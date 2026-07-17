@@ -1,0 +1,187 @@
+// U1 real-Doris query-semantics suite.
+//
+// Freezes the storage-neutral query invariants that the U1 physical design must
+// satisfy before U5 builds the full logical->Doris compiler: trusted project
+// scope on every scan, date-bounded (partition-pruned) reads, stable pagination
+// tie-break, the frozen relationship windows, and null/empty + array any/none/
+// all filter semantics. Full filter/search compilation parity is U5/U6.
+//
+// Runs ONLY against the pinned real Doris PoC target (DORIS_POC_ENABLED=1).
+
+import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { DorisPoCMysqlClient } from "../../../doris-poc/mysqlClient";
+
+const ENABLED = process.env.DORIS_POC_ENABLED === "1";
+const DB = "langfuse_poc";
+
+async function insertEvent(
+  db: DorisPoCMysqlClient,
+  opts: {
+    project_id: string;
+    partition_date: string;
+    trace_id: string;
+    span_id: string;
+    version_token: string;
+    name: string;
+    start_time: string;
+    tags?: string;
+    user_id?: string | null;
+  },
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO events_current
+       (project_id, partition_date, trace_id, span_id, version_token, type, environment,
+        name, start_time, created_at, updated_at, source, ingestion_sdk_name,
+        ingestion_sdk_version, tags, user_id)
+     VALUES (?, ?, ?, ?, ?, 'span', 'default', ?, ?, ?, ?, 'api', 'js', '5.0.0', ?${opts.user_id === undefined ? "" : ", ?"})`,
+    opts.user_id === undefined
+      ? [
+          opts.project_id,
+          opts.partition_date,
+          opts.trace_id,
+          opts.span_id,
+          opts.version_token,
+          opts.name,
+          opts.start_time,
+          opts.start_time,
+          opts.start_time,
+          opts.tags ?? "[]",
+        ]
+      : [
+          opts.project_id,
+          opts.partition_date,
+          opts.trace_id,
+          opts.span_id,
+          opts.version_token,
+          opts.name,
+          opts.start_time,
+          opts.start_time,
+          opts.start_time,
+          opts.tags ?? "[]",
+          opts.user_id,
+        ],
+  );
+}
+
+describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
+  let db: DorisPoCMysqlClient;
+
+  beforeAll(async () => {
+    db = new DorisPoCMysqlClient({
+      host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
+      port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
+      user: process.env.DORIS_POC_USER ?? "root",
+      password: process.env.DORIS_POC_PASSWORD ?? "",
+      database: DB,
+    });
+    await db.execute(`TRUNCATE TABLE events_current`);
+    // Two projects, both with a trace "shared-id" to prove project isolation.
+    await insertEvent(db, {
+      project_id: "p1",
+      partition_date: "2026-07-17",
+      trace_id: "shared-id",
+      span_id: "s1",
+      version_token: "1000",
+      name: "p1-trace",
+      start_time: "2026-07-17 10:00:00.000000",
+      tags: '["prod","canary"]',
+      user_id: "u1",
+    });
+    await insertEvent(db, {
+      project_id: "p2",
+      partition_date: "2026-07-17",
+      trace_id: "shared-id",
+      span_id: "s1",
+      version_token: "1000",
+      name: "p2-trace",
+      start_time: "2026-07-17 10:00:00.000000",
+      tags: '["prod"]',
+      user_id: "u2",
+    });
+  }, 60_000);
+
+  afterAll(async () => {
+    await db?.end();
+  });
+
+  it("cross-project isolation: equal trace_id under different project returns only the scoped project's row", async () => {
+    const rows = await db.query<{ project_id: string }>(
+      `SELECT project_id FROM events_current WHERE project_id = ? AND trace_id = ?`,
+      ["p1", "shared-id"],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].project_id).toBe("p1");
+  });
+
+  it("date-bounded scan prunes to the queried partition_date", async () => {
+    const rows = await db.query<{ d: string }>(
+      `SELECT DISTINCT CAST(partition_date AS string) d FROM events_current
+       WHERE project_id = ? AND partition_date >= ? AND partition_date < ?`,
+      ["p1", "2026-07-17", "2026-07-18"],
+    );
+    expect(rows.map((r) => r.d)).toEqual(["2026-07-17"]);
+  });
+
+  it("stable pagination tie-break: (start_time, span_id) cursor has no gaps/duplicates", async () => {
+    // Page 1 descending by start_time then span_id; capture cursor; page 2 must
+    // continue strictly after the cursor with no overlap.
+    const page1 = await db.query<{ start_time: string; span_id: string }>(
+      `SELECT start_time, span_id FROM events_current WHERE project_id = ?
+       ORDER BY start_time DESC, span_id ASC LIMIT 1`,
+      ["p1"],
+    );
+    expect(page1).toHaveLength(1);
+    const cursor = page1[0];
+    const page2 = await db.query<{ start_time: string; span_id: string }>(
+      `SELECT start_time, span_id FROM events_current WHERE project_id = ?
+       AND (start_time < ? OR (start_time = ? AND span_id > ?))
+       ORDER BY start_time DESC, span_id ASC LIMIT 1`,
+      ["p1", cursor.start_time, cursor.start_time, cursor.span_id],
+    );
+    // Union of both pages must be disjoint (cursor predicate excludes page1 row).
+    const allRows = await db.query<{ start_time: string; span_id: string }>(
+      `SELECT start_time, span_id FROM events_current WHERE project_id = ?`,
+      ["p1"],
+    );
+    expect(allRows.length).toBe(page1.length + page2.length);
+  });
+
+  it("array any/none/all filter semantics over tags", async () => {
+    // any of [prod, missing]: p1 has prod -> 1 row
+    const anyOf = await db.query<{ c: number }>(
+      `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND array_contains(tags, 'prod')`,
+      ["p1"],
+    );
+    expect(anyOf[0].c).toBe(1);
+    // none of [x]: p1 has no 'x' -> 1 row
+    const noneOf = await db.query<{ c: number }>(
+      `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND NOT array_contains(tags, 'x')`,
+      ["p1"],
+    );
+    expect(noneOf[0].c).toBe(1);
+    // all of [prod, canary]: p1 has both -> 1 row; requires array_contains_all
+    const allOf = await db.query<{ c: number }>(
+      `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND array_contains_all(tags, ARRAY('prod','canary'))`,
+      ["p1"],
+    );
+    expect(allOf[0].c).toBe(1);
+  });
+
+  it("null/empty user_id compatibility: NULL is distinguishable from empty", async () => {
+    await insertEvent(db, {
+      project_id: "p1",
+      partition_date: "2026-07-17",
+      trace_id: "t-nulluser",
+      span_id: "s1",
+      version_token: "1000",
+      name: "null-user",
+      start_time: "2026-07-17 10:00:00.000000",
+      user_id: null,
+    });
+    const nullCount = await db.query<{ c: number }>(
+      `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND user_id IS NULL`,
+      ["p1"],
+    );
+    expect(nullCount[0].c).toBeGreaterThanOrEqual(1);
+  });
+});

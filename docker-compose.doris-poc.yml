@@ -1,0 +1,101 @@
+# Doris PoC topology for U1 (Langfuse Community Doris Analytics Storage Refactor).
+#
+# Scope: a minimal 1 FE + 1 BE Apache Doris 4.0.7 cluster on an isolated private
+# network, used ONLY by the U1 engine/physical-design PoC and the real-Doris
+# integration tests (test:doris / benchmark:doris).
+#
+# This is a DEVELOPMENT TARGET, not production evidence. The plan's "Gate Inputs
+# That Do Not Change Product Scope" require the operator to freeze a separate
+# production topology, resource budget, RPO/RTO, and HA/non-HA risk acceptance
+# before U1 production benchmarks; see docs/operations/doris-poc.md.
+#
+# Ports bound to 127.0.0.1 only:
+#   - 9031 -> FE MySQL protocol (query path, used by mysqlClient + migrate.ts)
+#   - 8031 -> FE HTTP (Stream Load redirect source / REST)
+#   - 8041 -> BE HTTP (Stream Load redirect target)
+# Cluster-internal ports (9010/9020 FE, 9050/8060 BE) are NOT published.
+#
+# Fixed static IPs prevent the well-known BE-disconnect-on-restart issue.
+
+services:
+  doris-fe:
+    image: apache/doris:fe-4.0.7
+    container_name: doris-poc-fe
+    hostname: fe
+    # The image defaults FE heap to -Xmx8192m; on an 8GB Colima VM that OOMs on
+    # start. Shrink the JDK17 heap before the entrypoint runs.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        sed -i 's/-Xmx8192m -Xms8192m/-Xmx2048m -Xms2048m/' /opt/apache-doris/fe/conf/fe.conf
+        && exec bash /usr/local/bin/init_fe.sh
+    environment:
+      # FE_SERVERS = name:ip:editlog_port ; single-node PoC has one FE.
+      - FE_SERVERS=fe1:172.28.0.2:9010
+      - FE_ID=1
+    ports:
+      - "127.0.0.1:8031:8030" # FE HTTP / Stream Load redirect origin
+      - "127.0.0.1:9031:9030" # FE MySQL protocol (query)
+    volumes:
+      - doris-poc-fe-meta:/opt/apache-doris/fe/doris-meta
+      - doris-poc-fe-log:/opt/apache-doris/fe/log
+    mem_limit: 3g
+    networks:
+      doris-poc-net:
+        ipv4_address: 172.28.0.2
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -sf http://127.0.0.1:8030/api/bootstrap || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+  doris-be:
+    image: apache/doris:be-4.0.7
+    container_name: doris-poc-be
+    hostname: be
+    # BE defaults mem_limit_percentage to 80%; cap it for the shared 8GB VM.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        echo 'mem_limit_percentage = 70' >> /opt/apache-doris/be/conf/be.conf
+        && exec bash /usr/local/bin/init_be.sh
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    environment:
+      # 4.0.7 init_be.sh contract (NOT the 2.0-era BE_ADDR/FE_SERVERS):
+      # it pings FE MySQL and runs ALTER SYSTEM ADD BACKEND itself.
+      - MASTER_FE_IP=172.28.0.2
+      - CURRENT_BE_IP=172.28.0.3
+      - CURRENT_BE_PORT=9050
+      - PRIORITY_NETWORKS=172.28.0.0/24
+    ports:
+      - "127.0.0.1:8041:8040" # BE HTTP (Stream Load redirect target)
+    volumes:
+      - doris-poc-be-storage:/opt/apache-doris/be/storage
+      - doris-poc-be-log:/opt/apache-doris/be/log
+    mem_limit: 4g
+    networks:
+      doris-poc-net:
+        ipv4_address: 172.28.0.3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8040/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+networks:
+  doris-poc-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  doris-poc-fe-meta:
+  doris-poc-fe-log:
+  doris-poc-be-storage:
+  doris-poc-be-log:

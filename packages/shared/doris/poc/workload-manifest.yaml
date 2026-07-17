@@ -1,0 +1,144 @@
+# U1 Doris PoC workload manifest (machine-readable).
+#
+# Pairs with docs/operations/doris-poc.md. Records the frozen workload, the
+# candidate physical design, the byte/batch/backpressure limits derived from the
+# PoC, and the per-gate PASS/BLOCKED status. Operator-gated inputs (production
+# topology, RPO/RTO, producer census, object-store provider, backup repo) are
+# marked OPERATOR_REQUIRED and block the production-scale PASS, not the local
+# engine-layer PASS.
+
+pinned_target:
+  doris_version: "4.0.7" # revalidated Stable at implementation start
+  doris_build: "doris-4.0.7-rc02"
+  image_fe: "apache/doris:fe-4.0.7"
+  image_be: "apache/doris:be-4.0.7"
+  storage_compute_model: "存算一体 (shared-nothing)"
+  local_topology: "1 FE + 1 BE (development target; NOT production evidence)"
+  production_topology: OPERATOR_REQUIRED # one of: non-HA accepted risk | 3 FE / >=3 BE / 3 replicas
+
+frozen_physical_design:
+  decision: "single base table events_current; no full/core dual write; no synthetic root"
+  events_current:
+    model: "Unique Key Merge-on-Write"
+    unique_key: ["project_id", "partition_date", "trace_id", "span_id"]
+    sequence_col: "version_token" # BIGINT, UTC epoch ns; INT64_MAX = terminal delete
+    delete_sign: "__DORIS_DELETE_SIGN__" # MoW built-in; INT64_MAX delete row always wins
+    partition: "RANGE(partition_date) DAILY, dynamic_partition -365..365"
+    distribution: "HASH(trace_id) BUCKETS 8 (PoC; production bucket count scales with BE)"
+    hot_columns_typed:
+      [
+        project_id,
+        partition_date,
+        trace_id,
+        span_id,
+        type,
+        name,
+        environment,
+        user_id,
+        session_id,
+        start_time,
+        end_time,
+        total_input_tokens,
+        total_output_tokens,
+        total_cost,
+        tags,
+      ]
+    long_tail_variant:
+      [
+        metadata,
+        usage_details,
+        cost_details,
+        model_parameters,
+        tool_definitions,
+      ]
+    search_index_inverted:
+      { columns: [input, output, name], parser: unicode, support_phrase: true }
+    search_index_ngram_bf:
+      { columns: [input, output], gram_size: 3, bf_size: 64000 }
+    io_storage: "single STRING column (no full/core split); list/dashboard read input_preview/output_preview"
+  tombstone_barriers:
+    trace_tombstones:
+      { key: [project_id, trace_id], generation_col: deletion_generation }
+    project_tombstones:
+      { key: [project_id], generation_col: deletion_generation }
+
+source_version_contract:
+  token_type: "BIGINT UTC Unix-epoch nanoseconds (checked signed); no JS number rounding"
+  terminal_delete_token: 9223372036854775807 # INT64_MAX
+  v4_observation: "envelope timestamp; body startTime/endTime nullable; shared endTime ordered by envelope; missing start uses envelope (never receipt time)"
+  otlp_span: "valid source end_time; fallback to start_time only for protocol-valid incomplete snapshot; missing => quarantine"
+  score: "raw updated_at else raw score timestamp; score_date fixed from first valid raw score; cross-day => quarantine"
+  identity: "event/span = (trace_id, span_id) pair; score = immutable score_id; cross-trace equal span_id distinct"
+
+derived_writer_limits: # derived from PoC on the local topology; re-derived for production
+  max_batch_bytes: 104857600 # 100 MiB per Stream Load (Doris default be config)
+  max_batch_rows: 1000000 # soft cap; primary limit is bytes/partitions/latency
+  max_inflight_loads: 4 # bounded global in-flight Stream Loads
+  global_buffered_byte_cap: 536870912 # 512 MiB process-memory backpressure watermark
+  worker_concurrency: 4
+  shutdown_drain_deadline_ms: 30000
+
+workload_axes: # local PoC scale; production scale is OPERATOR_REQUIRED
+  retained_corpus_local:
+    rows_1x: 100000 # local; production retained corpus = OPERATOR_REQUIRED (>= 10M current events / 30d)
+    rows_3x: 300000
+  payload_distribution:
+    p50_input_bytes: 800
+    p95_input_bytes: 20000
+    p99_input_bytes: 200000
+    long_io_bytes: 1048576
+  project_skew: "2 projects, 50/50 with shared trace_id collision corpus"
+  query_mix:
+    [
+      trace_list_page,
+      trace_detail,
+      observation_list,
+      home_dashboard_bundle,
+      full_content_search,
+    ]
+  concurrency: 4
+  cold_warm: [cold, warm]
+
+gates:
+  engine_correctness: # local, PROVEN
+    latest_wins_by_sequence: PASS
+    lower_late_no_overwrite: PASS
+    same_token_single_row: PASS # engine guarantees one row; CAS winner is U4
+    terminal_delete_int64max: PASS
+    anti_resurrection: PASS
+    duplicate_label_idempotent: PASS
+    cross_trace_identity: PASS
+    variant_roundtrip: PASS
+    tombstone_barrier: PASS
+    sql_value_binding: PASS
+    compaction_invariance: PASS
+  transport: # local, PROVEN
+    expect_100_continue: PASS
+    allowlisted_fe_to_be_307: PASS
+    non_allowlisted_origin_rejected: PASS
+    zero_filtered_rows_enforced: PASS
+    label_reconciliation: PASS
+  query_semantics: # local, PROVEN
+    project_isolation: PASS
+    date_bounded_partition_prune: PASS
+    stable_cursor_tiebreak: PASS
+    array_any_none_all: PASS
+    null_empty: PASS
+  fulltext:
+    chinese_match_inverted: PASS
+    korean_substring_ngram_bf: PASS
+    arabic_substring_ngram_bf: PASS
+    korean_particle_match_gap: "FINDING: unicode/icu tokenizers do NOT strip Korean particles (비용에 != 비용); NGRAM_BF LIKE is the frozen substring path"
+  capacity_performance: OPERATOR_REQUIRED # needs production topology + retained corpus + duty cycle
+  producer_readiness: OPERATOR_REQUIRED # needs census sources + observation window
+  object_store_conditional_create: OPERATOR_REQUIRED # needs production object-store provider
+  backup_repository_anchor: OPERATOR_REQUIRED # needs backup repo + key manager + append-only authority
+  fe_failover_ha: N/A_LOCAL_NON_HA # local is non-HA; non-HA loss detection proven at engine layer
+
+operator_inputs_required_for_production_pass:
+  - production_topology_ha_or_non_ha_accepted
+  - resource_budget_cpu_mem_disk
+  - rpo_rto
+  - object_store_provider_with_conditional_create_and_head_get_proof
+  - producer_census_sources_and_observation_window
+  - backup_repository_and_manifest_key_manager_and_append_only_latest_anchor

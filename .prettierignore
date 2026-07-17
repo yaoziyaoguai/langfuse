@@ -1,2 +1,6 @@
 # Generated code
 packages/shared/prisma/generated
+
+# Local analysis artifacts (pre-existing, not part of this repo; must not be
+# read, modified, staged, or committed).
+.ua/

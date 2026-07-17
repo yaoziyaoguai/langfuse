@@ -4,7 +4,14 @@
   "globalDependencies": [".env"],
   "globalEnv": [
     "NEXT_PUBLIC_LANGFUSE_BLOB_EXPORT_CUTOFF",
-    "NEXT_PUBLIC_LANGFUSE_BLOB_EXPORTER_CUTOFF"
+    "NEXT_PUBLIC_LANGFUSE_BLOB_EXPORTER_CUTOFF",
+    "DORIS_POC_ENABLED",
+    "DORIS_POC_FE_HOST",
+    "DORIS_POC_FE_MYSQL_PORT",
+    "DORIS_POC_FE_HTTP_ORIGIN",
+    "DORIS_POC_USER",
+    "DORIS_POC_PASSWORD",
+    "DORIS_POC_DATABASE"
   ],
   "envMode": "loose",
   "tasks": {
