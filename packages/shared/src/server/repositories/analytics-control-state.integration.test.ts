@@ -33,6 +33,8 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
         sourceOperationId: `source-${suffix}`,
         sourceChecksum: "source-checksum",
         rawObjectKey: `raw/${suffix}`,
+        acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+        acceptedAtNanos: 1_784_376_000_000_000_000n,
         canonicalizerVersion: "r1a-v1",
         schemaVersion: 1,
         recoverableUntil: new Date("2030-01-01T00:00:00.000Z"),

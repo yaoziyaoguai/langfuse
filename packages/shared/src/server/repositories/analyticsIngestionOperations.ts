@@ -34,6 +34,7 @@ type CreateAnalyticsIngestionReceiptInput = {
   sourceChecksum: string;
   rawObjectKey: string;
   acceptedAt: Date;
+  acceptedAtNanos: bigint;
   canonicalizerVersion: string;
   schemaVersion: number;
   recoverableUntil: Date;
@@ -49,8 +50,12 @@ function receiptMatches(
     operation.sourceOperationId === input.sourceOperationId &&
     operation.sourceChecksum === input.sourceChecksum &&
     operation.rawObjectKey === input.rawObjectKey &&
+    operation.acceptedAt.getTime() === input.acceptedAt.getTime() &&
+    operation.acceptedAtNanos === input.acceptedAtNanos &&
     operation.canonicalizerVersion === input.canonicalizerVersion &&
-    operation.schemaVersion === input.schemaVersion
+    operation.schemaVersion === input.schemaVersion &&
+    operation.recoverableUntil.getTime() === input.recoverableUntil.getTime() &&
+    operation.statusExpiresAt.getTime() === input.statusExpiresAt.getTime()
   );
 }
 
@@ -67,6 +72,9 @@ export async function createAnalyticsIngestionReceipt(
     !input.sourceOperationId ||
     !SHA256_HEX.test(input.sourceChecksum) ||
     !input.rawObjectKey ||
+    !Number.isFinite(input.acceptedAt.getTime()) ||
+    input.acceptedAtNanos < 0n ||
+    input.acceptedAtNanos / 1_000_000n !== BigInt(input.acceptedAt.getTime()) ||
     !input.canonicalizerVersion ||
     !Number.isSafeInteger(input.schemaVersion) ||
     input.schemaVersion <= 0 ||
@@ -86,6 +94,7 @@ export async function createAnalyticsIngestionReceipt(
           sourceChecksum: input.sourceChecksum,
           rawObjectKey: input.rawObjectKey,
           acceptedAt: input.acceptedAt,
+          acceptedAtNanos: input.acceptedAtNanos,
           canonicalizerVersion: input.canonicalizerVersion,
           schemaVersion: input.schemaVersion,
           recoverableUntil: input.recoverableUntil,

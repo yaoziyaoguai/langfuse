@@ -1939,6 +1939,7 @@ model AnalyticsIngestionOperation {
   sourceChecksum             String                            @map("source_checksum")
   rawObjectKey               String                            @map("raw_object_key")
   acceptedAt                 DateTime                          @default(now()) @map("accepted_at")
+  acceptedAtNanos            BigInt                            @map("accepted_at_nanos")
   canonicalizerVersion       String                            @map("canonicalizer_version")
   schemaVersion              Int                               @map("schema_version")
   canonicalizationFence      BigInt                            @default(0) @map("canonicalization_fence")

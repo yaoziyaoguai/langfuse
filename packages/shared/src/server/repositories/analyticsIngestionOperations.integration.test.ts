@@ -40,6 +40,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
       sourceChecksum: "a".repeat(64),
       rawObjectKey: `events/${projectId}/raw/source.json`,
       acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+      acceptedAtNanos: 1_784_376_000_000_000_000n,
       canonicalizerVersion: "1",
       schemaVersion: 3,
       recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
@@ -92,6 +93,12 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         sourceChecksum: "b".repeat(64),
       }),
     ).rejects.toThrow("Ingestion source operation conflicts with its receipt");
+    await expect(
+      repository.createAnalyticsIngestionReceipt({
+        ...input,
+        acceptedAtNanos: input.acceptedAtNanos + 1n,
+      }),
+    ).rejects.toThrow("Ingestion source operation conflicts with its receipt");
   });
 
   it("requires absence reconciliation before an expired lease can advance its fence", async () => {
@@ -104,6 +111,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
       sourceChecksum: "c".repeat(64),
       rawObjectKey: `events/${projectId}/raw/takeover.json`,
       acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+      acceptedAtNanos: 1_784_376_000_000_000_000n,
       canonicalizerVersion: "1",
       schemaVersion: 3,
       recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
@@ -166,6 +174,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
       sourceChecksum: "d".repeat(64),
       rawObjectKey: `events/${projectId}/raw/publish.json`,
       acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+      acceptedAtNanos: 1_784_376_000_000_000_000n,
       canonicalizerVersion: "1",
       schemaVersion: 3,
       recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
