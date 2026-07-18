@@ -452,6 +452,61 @@ export async function mutateTraceControlState({
   return result.count === 1;
 }
 
+export async function updateTraceControlState({
+  client = prisma,
+  projectId,
+  traceId,
+  initialState,
+  updates,
+  mutationSource,
+}: {
+  client?: AnalyticsControlClient;
+  projectId: string;
+  traceId: string;
+  initialState: { bookmarked: boolean; public: boolean };
+  updates: { bookmarked?: boolean; public?: boolean };
+  mutationSource: string;
+}): Promise<void> {
+  if (updates.bookmarked === undefined && updates.public === undefined) {
+    return;
+  }
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const current = await getTraceControlState({ client, projectId, traceId });
+    if (!current) {
+      try {
+        await client.traceControlState.create({
+          data: {
+            projectId,
+            traceId,
+            bookmarked: updates.bookmarked ?? initialState.bookmarked,
+            public: updates.public ?? initialState.public,
+            revision: 1n,
+            lastMutationSource: mutationSource,
+          },
+        });
+        return;
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+        continue;
+      }
+    }
+
+    const updated = await mutateTraceControlState({
+      client,
+      projectId,
+      traceId,
+      expectedRevision: current.revision,
+      bookmarked: updates.bookmarked ?? current.bookmarked,
+      public: updates.public ?? current.public,
+      mutationSource,
+    });
+    if (updated) return;
+  }
+
+  throw new Error("Trace control state changed too frequently");
+}
+
 export function getTraceControlState({
   client = prisma,
   projectId,

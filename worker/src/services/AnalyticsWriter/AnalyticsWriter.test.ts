@@ -48,6 +48,8 @@ function event(input: {
   name?: string;
   traceId?: string;
   spanId?: string;
+  bookmarked?: boolean;
+  public?: boolean;
 }): CanonicalAnalyticsEvent {
   const content = {
     traceId: input.traceId ?? "writer-trace-1",
@@ -83,8 +85,8 @@ function event(input: {
     level: "DEFAULT",
     statusMessage: null,
     isAppRoot: false,
-    bookmarked: false,
-    public: false,
+    bookmarked: input.bookmarked ?? false,
+    public: input.public ?? false,
     tags: [],
     input: null,
     output: null,
@@ -119,6 +121,8 @@ function batch(input: {
   name?: string;
   traceId?: string;
   spanId?: string;
+  bookmarked?: boolean;
+  public?: boolean;
 }): CanonicalAnalyticsBatch {
   return {
     projectId: input.projectId,
@@ -239,6 +243,57 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
       ),
     ).resolves.toEqual({ operationId, status: "VISIBLE" });
     expect(load).toHaveBeenCalledOnce();
+  });
+
+  it("initializes trace control state from ingestion without owning later mutations", async () => {
+    const operationId = `writer-control-${suffix}`;
+    const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
+    const traceId = `writer-control-trace-${suffix}`;
+    await createReceipt({ operationId, rawObjectKey, checksumCharacter: "9" });
+
+    const load = vi.fn(async (input: { label: string }) => ({
+      status: "Success",
+      label: input.label,
+      numberTotalRows: 1,
+      numberFilteredRows: 0,
+      committed: true,
+      requiresReconciliation: false,
+    }));
+    const writer = new AnalyticsWriter({
+      client: prisma,
+      artifactStore: new CanonicalIngestionArtifactStore(
+        new MemoryObjectStore(),
+      ),
+      doris: new DorisBatchSink({ load, reconcile: vi.fn() }),
+      databaseName: "langfuse_poc",
+      canonicalPrefix: "events/",
+      workerId: "writer-worker-control",
+      now: () => new Date("2026-07-18T12:00:15.000Z"),
+    });
+
+    await writer.persist(
+      batch({
+        projectId,
+        operationId,
+        rawObjectKey,
+        traceId,
+        spanId: `writer-control-span-${suffix}`,
+        bookmarked: true,
+        public: true,
+      }),
+    );
+
+    await expect(
+      prisma.traceControlState.findUniqueOrThrow({
+        where: { projectId_traceId: { projectId, traceId } },
+      }),
+    ).resolves.toMatchObject({
+      bookmarked: true,
+      public: true,
+      revision: 0n,
+      initializedByOperationId: operationId,
+      lastMutationSource: "ingestion",
+    });
   });
 
   it("recovers an immutable artifact written before its pointer was published", async () => {

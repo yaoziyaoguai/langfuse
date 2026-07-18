@@ -17,6 +17,7 @@ import {
   freezeAnalyticsIngestionManifest,
   getProjectDeletionGeneration,
   getTraceDeletionGeneration,
+  initializeTraceControlState,
   publishCanonicalArtifact,
   recordAnalyticsLoadOutcome,
   recordAnalyticsLoadReconciliation,
@@ -130,6 +131,27 @@ function candidatePublication(
     traceDeletionGeneration: descriptor.claim.traceDeletionGeneration,
     projectDeletionGeneration: descriptor.claim.projectDeletionGeneration,
   }));
+}
+
+function controlStateRepresentative(
+  left: CanonicalCandidateDescriptor,
+  right: CanonicalCandidateDescriptor,
+): CanonicalCandidateDescriptor {
+  const leftEvent = left.claim.entity;
+  const rightEvent = right.claim.entity;
+  if (leftEvent.kind !== "event" || rightEvent.kind !== "event") return left;
+  if (leftEvent.isAppRoot !== rightEvent.isAppRoot) {
+    return leftEvent.isAppRoot ? left : right;
+  }
+  const leftIsRoot =
+    leftEvent.parentSpanId === null || leftEvent.parentSpanId === "";
+  const rightIsRoot =
+    rightEvent.parentSpanId === null || rightEvent.parentSpanId === "";
+  if (leftIsRoot !== rightIsRoot) return leftIsRoot ? left : right;
+  if (leftEvent.startTime !== rightEvent.startTime) {
+    return leftEvent.startTime < rightEvent.startTime ? left : right;
+  }
+  return leftEvent.spanId <= rightEvent.spanId ? left : right;
 }
 
 function loadBatchIdentity(input: {
@@ -477,6 +499,35 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       disposition.loadBatchId = null;
       disposition.reasonCode = "DELETION_BARRIER";
     }
+
+    const traceControls = new Map<string, CanonicalCandidateDescriptor>();
+    for (const descriptor of descriptors) {
+      if (
+        !requiredKeys.has(descriptor.candidateKey) ||
+        descriptor.claim.entity.kind !== "event"
+      ) {
+        continue;
+      }
+      const current = traceControls.get(descriptor.claim.entity.traceId);
+      traceControls.set(
+        descriptor.claim.entity.traceId,
+        current ? controlStateRepresentative(current, descriptor) : descriptor,
+      );
+    }
+    await Promise.all(
+      [...traceControls.values()].map((descriptor) => {
+        const entity = descriptor.claim.entity;
+        if (entity.kind !== "event") return Promise.resolve();
+        return initializeTraceControlState({
+          client: this.dependencies.client,
+          projectId: operation.projectId,
+          traceId: entity.traceId,
+          initializedByOperationId: operation.id,
+          bookmarked: entity.bookmarked,
+          public: entity.public,
+        });
+      }),
+    );
 
     const prepared = prepareDorisLoadBatches(batch, requiredKeys);
     const loadManifests = prepared.map((loadBatch) => {

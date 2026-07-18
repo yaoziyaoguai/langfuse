@@ -396,4 +396,51 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
       controlState.getTraceControlState({ client: prisma, projectId, traceId }),
     ).resolves.toMatchObject({ public: true, revision: 1n });
   });
+
+  it("retries concurrent trace-control mutations without losing the other field", async () => {
+    const traceId = `control-mutation-trace-${suffix}`;
+
+    await Promise.all([
+      controlState.updateTraceControlState({
+        client: prisma,
+        projectId,
+        traceId,
+        initialState: { bookmarked: false, public: false },
+        updates: { bookmarked: true },
+        mutationSource: "ui:bookmark",
+      }),
+      controlState.updateTraceControlState({
+        client: prisma,
+        projectId,
+        traceId,
+        initialState: { bookmarked: false, public: false },
+        updates: { public: true },
+        mutationSource: "ui:publish",
+      }),
+    ]);
+
+    await expect(
+      controlState.getTraceControlState({ client: prisma, projectId, traceId }),
+    ).resolves.toMatchObject({
+      bookmarked: true,
+      public: true,
+      revision: 2n,
+    });
+
+    await controlState.initializeTraceControlState({
+      client: prisma,
+      projectId,
+      traceId,
+      initializedByOperationId: operationId,
+      bookmarked: false,
+      public: false,
+    });
+    await expect(
+      controlState.getTraceControlState({ client: prisma, projectId, traceId }),
+    ).resolves.toMatchObject({
+      bookmarked: true,
+      public: true,
+      revision: 2n,
+    });
+  });
 });

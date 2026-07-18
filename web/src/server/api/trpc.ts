@@ -96,6 +96,7 @@ import { AdminApiAuthService } from "@/src/ee/features/admin-api/server/adminApi
 import { env } from "@/src/env.mjs";
 import { isBaseError, parseIO } from "@langfuse/shared";
 import { type Flag } from "@/src/features/feature-flags/types";
+import { resolveTraceAccess } from "@/src/features/traces/server/traceAccessPolicy";
 
 setUpSuperjson();
 
@@ -567,26 +568,16 @@ const enforceTraceAccess = t.middleware(async (opts) => {
     .flatMap((org) => org.projects)
     .find(({ id }) => id === projectId);
 
-  const traceSession = !!trace?.sessionId
-    ? await ctx.prisma.traceSession.findFirst({
-        where: {
-          id: trace.sessionId,
-          projectId,
-        },
-        select: {
-          public: true,
-        },
-      })
-    : null;
+  const traceAccess = await resolveTraceAccess({
+    client: ctx.prisma,
+    projectId,
+    trace,
+    isProjectMember: Boolean(sessionProject),
+    isAdmin: ctx.session?.user?.admin === true,
+    useTraceControlState: env.LANGFUSE_ANALYTICS_BACKEND === "doris",
+  });
 
-  const isSessionPublic = traceSession?.public === true;
-
-  if (
-    !trace?.public &&
-    !sessionProject &&
-    !isSessionPublic &&
-    ctx.session?.user?.admin !== true
-  ) {
+  if (!traceAccess.allowed) {
     logger.error(
       `User ${ctx.session?.user?.id} is not a member of project ${projectId}`,
     );

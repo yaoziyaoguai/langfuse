@@ -51,6 +51,7 @@ import {
   getTracesGroupedByUsers,
   getTracesGroupedBySessionId,
   updateEvents,
+  updateTraceControlState,
   getScoresAndCorrectionsForTraces,
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
@@ -568,7 +569,22 @@ export const traceRouter = createTRPCRouter({
         });
         if (clickhouseTrace) {
           trace = clickhouseTrace;
+          const initialState = {
+            bookmarked: clickhouseTrace.bookmarked,
+            public: clickhouseTrace.public,
+          };
           clickhouseTrace.bookmarked = input.bookmarked;
+          if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+            await updateTraceControlState({
+              client: ctx.prisma,
+              projectId: input.projectId,
+              traceId: input.traceId,
+              initialState,
+              updates: { bookmarked: input.bookmarked },
+              mutationSource: "ui:traces.bookmark",
+            });
+            return trace;
+          }
           const promises = [
             upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
           ];
@@ -633,7 +649,22 @@ export const traceRouter = createTRPCRouter({
             message: "Trace not found",
           });
         }
+        const initialState = {
+          bookmarked: clickhouseTrace.bookmarked,
+          public: clickhouseTrace.public,
+        };
         clickhouseTrace.public = input.public;
+        if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+          await updateTraceControlState({
+            client: ctx.prisma,
+            projectId: input.projectId,
+            traceId: input.traceId,
+            initialState,
+            updates: { public: input.public },
+            mutationSource: "ui:traces.publish",
+          });
+          return clickhouseTrace;
+        }
         const promises = [
           upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
         ];
