@@ -28,6 +28,7 @@ import { DatasetDeleteQueue } from "./datasetDelete";
 import { EventPropagationQueue } from "./eventPropagationQueue";
 import { NotificationQueue } from "./notificationQueue";
 import { MonitorQueue } from "./monitorQueue";
+import { AnalyticsIngestionQueue } from "./analyticsIngestionQueue";
 
 // Sharded queues require a sharding key.
 // Use the queue class directly, for example IngestionQueue.getInstance({ shardingKey }).
@@ -46,6 +47,8 @@ export function getQueue(
   >,
 ): Queue | null {
   switch (queueName) {
+    case QueueName.AnalyticsIngestionQueue:
+      return AnalyticsIngestionQueue.getInstance();
     case QueueName.BatchExport:
       return BatchExportQueue.getInstance();
     case QueueName.CloudUsageMeteringQueue:

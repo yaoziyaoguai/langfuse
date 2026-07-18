@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+
 import { PrismaClient } from "@prisma/client";
+import type { Job } from "bullmq";
 import {
   canonicalPayloadHash,
   normalizeVersionToken,
@@ -18,6 +21,11 @@ import { runMigrations } from "../../../../packages/shared/doris/scripts/migrate
 import { DorisPoCMysqlClient } from "../../../../packages/shared/src/server/doris-poc/mysqlClient";
 import { DorisPoCStreamLoadClient } from "../../../../packages/shared/src/server/doris-poc/streamLoadClient";
 import { createDorisAnalyticsPersistence } from "../dorisAnalyticsPersistence";
+import {
+  analyticsIngestionQueueProcessorBuilder,
+  publishAnalyticsIngestionOutboxBatch,
+} from "../../queues/analyticsIngestionQueue";
+import { QueueName, type TQueueJobTypes } from "@langfuse/shared/src/server";
 
 const ENABLED =
   process.env.DORIS_POC_ENABLED === "1" &&
@@ -37,8 +45,8 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   const spanId = `writer-e2e-span-${suffix}`;
   const scoreId = `writer-e2e-score-${suffix}`;
   const fileId = `writer-e2e-file-${suffix}`;
-  const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
   const canonicalPrefix = `writer-e2e/${suffix}/`;
+  const rawObjectKey = `${canonicalPrefix}raw/${operationId}.json`;
   const prisma = new PrismaClient({
     datasourceUrl: process.env.DORIS_CONTROL_TEST_DATABASE_URL,
   });
@@ -206,12 +214,18 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   }
 
   it("persists event, score, file reference, artifact, and durable ledgers", async () => {
+    const rawBody = JSON.stringify({ operationId, projectId, format: "v4" });
+    await storage.uploadFile({
+      fileName: rawObjectKey,
+      fileType: "application/json",
+      data: rawBody,
+    });
     await createAnalyticsIngestionReceipt({
       client: prisma,
       operationId,
       projectId,
       sourceOperationId: `source-${operationId}`,
-      sourceChecksum: "9".repeat(64),
+      sourceChecksum: createHash("sha256").update(rawBody).digest("hex"),
       rawObjectKey,
       acceptedAt: new Date("2026-07-18T12:30:00.123Z"),
       acceptedAtNanos: acceptedAt,
@@ -269,15 +283,47 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       workerId: "writer-e2e-worker",
     });
     const batch = canonicalBatch();
+    let queuedJob:
+      | TQueueJobTypes[QueueName.AnalyticsIngestionQueue]
+      | undefined;
+    await expect(
+      publishAnalyticsIngestionOutboxBatch({
+        client: prisma,
+        workerId: "writer-e2e-publisher",
+        now: new Date("2026-07-18T12:30:01.000Z"),
+        queue: {
+          add: async (_name, data) => {
+            queuedJob = data;
+          },
+        },
+      }),
+    ).resolves.toBe(1);
+    expect(queuedJob).toBeDefined();
+    const canonicalize = async (operation: {
+      rawObjectKey: string;
+      acceptedAtNanos: bigint;
+      canonicalizerVersion: string;
+      schemaVersion: number;
+    }) => {
+      expect(await storage.download(operation.rawObjectKey)).toBe(rawBody);
+      expect(operation).toMatchObject({
+        acceptedAtNanos: acceptedAt,
+        canonicalizerVersion: "1",
+        schemaVersion: 3,
+      });
+      return batch;
+    };
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      client: prisma,
+      sink: writer,
+      canonicalize,
+    });
+    const job = { data: queuedJob! } as Job<
+      TQueueJobTypes[QueueName.AnalyticsIngestionQueue]
+    >;
 
-    await expect(writer.persist(batch)).resolves.toEqual({
-      operationId,
-      status: "VISIBLE",
-    });
-    await expect(writer.persist(batch)).resolves.toEqual({
-      operationId,
-      status: "VISIBLE",
-    });
+    await expect(processor(job, "token")).resolves.toBeUndefined();
+    await expect(processor(job, "token")).resolves.toBeUndefined();
 
     const [events, scores, files, artifactFiles, operation] = await Promise.all(
       [
@@ -298,10 +344,14 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
           "SELECT CAST(version_token AS VARCHAR(32)) AS version_token, bucket_path FROM blob_storage_file_log WHERE project_id = ? AND file_id = ?",
           [projectId, fileId],
         ),
-        storage.listFiles(canonicalPrefix),
+        storage
+          .listFiles(canonicalPrefix)
+          .then((items) =>
+            items.filter(({ file }) => file.includes("/canonical-ingestion/")),
+          ),
         prisma.analyticsIngestionOperation.findUniqueOrThrow({
           where: { id: operationId },
-          include: { candidates: true, loadBatches: true },
+          include: { candidates: true, loadBatches: true, outbox: true },
         }),
       ],
     );
@@ -328,6 +378,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       status: "VISIBLE",
       manifestState: "FROZEN",
       terminalAt: expect.any(Date),
+      outbox: { status: "PUBLISHED" },
     });
     expect(operation.candidates).toHaveLength(3);
     expect(operation.loadBatches).toHaveLength(3);

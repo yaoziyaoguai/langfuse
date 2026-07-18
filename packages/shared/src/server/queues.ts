@@ -77,6 +77,11 @@ export const OtelIngestionEvent = z.object({
   isLangfuseInternal: z.boolean().optional(),
 });
 
+export const AnalyticsIngestionQueueEventSchema = z.object({
+  operationId: z.string().min(1),
+  projectId: z.string().min(1),
+});
+
 export const BatchExportJobSchema = z.object({
   projectId: z.string(),
   batchExportId: z.string(),
@@ -337,6 +342,9 @@ export type ObservationEvalExecutionEventType = z.infer<
 >;
 export type IngestionEventQueueType = z.infer<typeof IngestionEvent>;
 export type OtelIngestionEventQueueType = z.infer<typeof OtelIngestionEvent>;
+export type AnalyticsIngestionQueueEventType = z.infer<
+  typeof AnalyticsIngestionQueueEventSchema
+>;
 export type ExperimentCreateEventType = z.infer<
   typeof ExperimentCreateEventSchema
 >;
@@ -381,6 +389,7 @@ export enum QueueName {
   OtelIngestionSecondaryQueue = "secondary-otel-ingestion-queue", // Separates high priority + high throughput projects from other projects.
   IngestionQueue = "ingestion-queue", // Process single events with S3-merge
   IngestionSecondaryQueue = "secondary-ingestion-queue", // Separates high priority + high throughput projects from other projects.
+  AnalyticsIngestionQueue = "analytics-ingestion-queue",
   CloudUsageMeteringQueue = "cloud-usage-metering-queue",
   CloudSpendAlertQueue = "cloud-spend-alert-queue",
   CloudFreeTierUsageThresholdQueue = "cloud-free-tier-usage-threshold-queue",
@@ -421,6 +430,7 @@ export enum QueueJobs {
   CloudFreeTierUsageThresholdJob = "cloud-free-tier-usage-threshold-job",
   OtelIngestionJob = "otel-ingestion-job",
   IngestionJob = "ingestion-job",
+  AnalyticsIngestionJob = "analytics-ingestion-job",
   ExperimentCreateJob = "experiment-create-job",
   PostHogIntegrationJob = "posthog-integration-job",
   PostHogIntegrationProcessingJob = "posthog-integration-processing-job",
@@ -539,6 +549,12 @@ export type TQueueJobTypes = {
     id: string;
     payload: IngestionEventQueueType;
     name: QueueJobs.IngestionJob;
+  };
+  [QueueName.AnalyticsIngestionQueue]: {
+    timestamp: Date;
+    id: string;
+    payload: AnalyticsIngestionQueueEventType;
+    name: QueueJobs.AnalyticsIngestionJob;
   };
   [QueueName.ExperimentCreate]: {
     timestamp: Date;
