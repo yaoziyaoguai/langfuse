@@ -78,28 +78,33 @@ export type DorisEventCursor = {
   readonly spanId: string;
 };
 
-export function compileDorisVisibleEventsQuery(input: {
+type DorisVisibleEventScopeInput = {
   readonly projectId: string;
   readonly range: AnalyticsTimeRange | null;
-  readonly projection: "list" | "detail";
   readonly filters: EventsTableFilterState;
   readonly search?: {
     readonly query: string;
     readonly searchType?: readonly TracingSearchType[];
   };
   readonly cursor?: DorisEventCursor;
-  readonly limit: number;
-}): {
-  readonly sql: string;
+};
+
+const EVENT_FROM_SQL = `FROM events_current e
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = e.project_id
+ AND trace_deletion.trace_id = e.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = e.project_id`;
+
+export function compileDorisVisibleEventScope(
+  input: DorisVisibleEventScopeInput,
+): {
+  readonly fromSql: string;
+  readonly whereSql: string;
   readonly params: readonly unknown[];
   readonly selectsFullContent: boolean;
 } {
-  if (
-    !input.projectId ||
-    !Number.isSafeInteger(input.limit) ||
-    input.limit < 1 ||
-    input.limit > 1_000
-  ) {
+  if (!input.projectId) {
     throw new InvalidRequestError("Invalid Doris event query input");
   }
   assertAnalyticsTimeRange(input.range);
@@ -136,23 +141,44 @@ export function compileDorisVisibleEventsQuery(input: {
       OR (e.start_time = ${bound.bind(input.cursor.startTime)} AND e.trace_id = ${bound.bind(input.cursor.traceId)} AND e.span_id < ${bound.bind(input.cursor.spanId)})
     )`);
   }
-  const sql = `SELECT
-${input.projection === "detail" ? DETAIL_PROJECTION : LIST_PROJECTION}
-FROM events_current e
-LEFT JOIN trace_tombstones trace_deletion
-  ON trace_deletion.project_id = e.project_id
- AND trace_deletion.trace_id = e.trace_id
-LEFT JOIN project_tombstones project_deletion
-  ON project_deletion.project_id = e.project_id
-WHERE ${predicates.join("\n  AND ")}
-ORDER BY e.start_time DESC, e.trace_id DESC, e.span_id DESC
-LIMIT ${bound.bind(input.limit)}`;
   return {
-    sql,
+    fromSql: EVENT_FROM_SQL,
+    whereSql: predicates.join("\n  AND "),
     params,
     selectsFullContent:
-      input.projection === "detail" ||
       filterPlan.requiresFullContent ||
       searchPlan?.requiresFullContent === true,
+  };
+}
+
+export function compileDorisVisibleEventsQuery(
+  input: DorisVisibleEventScopeInput & {
+    readonly projection: "list" | "detail";
+    readonly limit: number;
+  },
+): {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+  readonly selectsFullContent: boolean;
+} {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 1_000
+  ) {
+    throw new InvalidRequestError("Invalid Doris event query input");
+  }
+  const scope = compileDorisVisibleEventScope(input);
+  const sql = `SELECT
+${input.projection === "detail" ? DETAIL_PROJECTION : LIST_PROJECTION}
+${scope.fromSql}
+WHERE ${scope.whereSql}
+ORDER BY e.start_time DESC, e.trace_id DESC, e.span_id DESC
+LIMIT ?`;
+  return {
+    sql,
+    params: [...scope.params, input.limit],
+    selectsFullContent:
+      input.projection === "detail" || scope.selectsFullContent,
   };
 }

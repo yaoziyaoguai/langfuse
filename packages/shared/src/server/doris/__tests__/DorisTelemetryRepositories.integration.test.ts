@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { DorisPoCMysqlClient } from "../../doris-poc/mysqlClient";
 import { DorisObservationsRepository } from "../../repositories/telemetry/doris/observations";
+import { DorisSessionsRepository } from "../../repositories/telemetry/doris/sessions";
+import { DorisTracesRepository } from "../../repositories/telemetry/doris/traces";
+import { DorisUsersRepository } from "../../repositories/telemetry/doris/users";
 
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
 const DB = "langfuse_poc";
@@ -9,6 +12,9 @@ const DB = "langfuse_poc";
 describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
   let db: DorisPoCMysqlClient;
   let observations: DorisObservationsRepository;
+  let sessions: DorisSessionsRepository;
+  let traces: DorisTracesRepository;
+  let users: DorisUsersRepository;
 
   beforeAll(async () => {
     db = new DorisPoCMysqlClient({
@@ -36,6 +42,33 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
             ]
           : [],
     });
+    traces = new DorisTracesRepository({
+      query: async <T extends object>(
+        sql: string,
+        params?: readonly unknown[],
+      ) => (await db.query(sql, params)) as readonly T[],
+      locateTrace: async ({ projectId, traceId }) =>
+        projectId === "trace-repository-project" && traceId === "rooted-trace"
+          ? [
+              {
+                partitionDate: "2026-07-17",
+                traceId: "rooted-trace",
+                observationId: "root-span",
+              },
+              {
+                partitionDate: "2026-07-17",
+                traceId: "rooted-trace",
+                observationId: "child-span",
+              },
+            ]
+          : [],
+    });
+    const query = async <T extends object>(
+      sql: string,
+      params?: readonly unknown[],
+    ) => (await db.query(sql, params)) as readonly T[];
+    sessions = new DorisSessionsRepository({ query });
+    users = new DorisUsersRepository({ query });
     await db.execute("TRUNCATE TABLE events_current");
     await db.execute("TRUNCATE TABLE trace_tombstones");
     await db.execute("TRUNCATE TABLE project_tombstones");
@@ -46,18 +79,24 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       spanId: string;
       name: string;
       startTime: string;
+      parentSpanId?: string | null;
+      isAppRoot?: boolean;
+      userId?: string;
+      sessionId?: string;
     }) =>
       db.execute(
         `INSERT INTO events_current
-          (project_id, partition_date, trace_id, span_id, version_token, type,
-           environment, name, start_time, end_time, completion_start_time,
+          (project_id, partition_date, trace_id, span_id, parent_span_id,
+           is_app_root, version_token, type, environment, name, user_id,
+           session_id, start_time,
+           end_time, completion_start_time,
            created_at, updated_at, source, ingestion_sdk_name,
            ingestion_sdk_version, tags, metadata, usage_details, cost_details,
            tool_definitions, tool_calls, tool_call_names, input, output,
            input_preview, output_preview, total_input_tokens, total_output_tokens,
-           total_cost)
-         VALUES (?, '2026-07-17', ?, ?, 1000, 'GENERATION', 'production', ?, ?,
-           '2026-07-17 10:00:02.500000', '2026-07-17 10:00:00.500000', ?, ?,
+         total_cost)
+         VALUES (?, '2026-07-17', ?, ?, ?, ?, 1000, 'GENERATION', 'production', ?, ?, ?, ?,
+           ?, ?, ?, ?,
            'api', 'js', '5.0.0', ARRAY('prod'), CAST(? AS VARIANT),
            CAST(? AS VARIANT), CAST(? AS VARIANT), CAST(? AS VARIANT),
            ARRAY('search'), ARRAY('search'), ?, ?, ?, ?, 10, 5, 0.125)`,
@@ -65,7 +104,13 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
           input.projectId,
           input.traceId,
           input.spanId,
+          input.parentSpanId ?? null,
+          input.isAppRoot ?? false,
           input.name,
+          input.userId ?? null,
+          input.sessionId ?? null,
+          input.startTime,
+          input.startTime,
           input.startTime,
           input.startTime,
           input.startTime,
@@ -125,6 +170,47 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
         (project_id, deletion_generation, created_at)
        VALUES ('project-deleted-project', 1, NOW())`,
     );
+    await insert({
+      projectId: "trace-repository-project",
+      traceId: "rooted-trace",
+      spanId: "root-span",
+      name: "real root",
+      startTime: "2026-07-17 12:00:00.000000",
+      isAppRoot: true,
+    });
+    await insert({
+      projectId: "trace-repository-project",
+      traceId: "rooted-trace",
+      spanId: "child-span",
+      name: "child",
+      startTime: "2026-07-17 12:00:01.000000",
+      parentSpanId: "root-span",
+    });
+    await insert({
+      projectId: "trace-repository-project",
+      traceId: "fallback-trace",
+      spanId: "fallback-span",
+      name: "fallback",
+      startTime: "2026-07-17 11:00:00.000000",
+    });
+    await insert({
+      projectId: "derived-repository-project",
+      traceId: "derived-trace-a",
+      spanId: "derived-span-a",
+      name: "derived a",
+      startTime: "2026-07-17 13:00:00.000000",
+      userId: "user-a",
+      sessionId: "session-shared",
+    });
+    await insert({
+      projectId: "derived-repository-project",
+      traceId: "derived-trace-b",
+      spanId: "derived-span-b",
+      name: "derived b",
+      startTime: "2026-07-17 13:00:01.000000",
+      userId: "user-b",
+      sessionId: "session-shared",
+    });
   }, 60_000);
 
   afterAll(async () => {
@@ -191,5 +277,107 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
     await expect(
       observations.list({ ...input, projectId: "project-deleted-project" }),
     ).resolves.toMatchObject({ items: [] });
+  });
+
+  it("derives real-root and incomplete traces with stable pagination", async () => {
+    const input = {
+      projectId: "trace-repository-project",
+      range: {
+        from: new Date("2026-07-17T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      filters: [],
+      limit: 1,
+    };
+    const first = await traces.list(input);
+    const second = await traces.list({
+      ...input,
+      cursor: first.nextCursor ?? undefined,
+    });
+
+    expect(first.items).toEqual([
+      expect.objectContaining({
+        id: "rooted-trace",
+        rootObservationId: "root-span",
+        incomplete: false,
+        observationCount: 2,
+        totalUsage: 30,
+      }),
+    ]);
+    expect(second.items).toEqual([
+      expect.objectContaining({
+        id: "fallback-trace",
+        rootObservationId: null,
+        fallbackObservationId: "fallback-span",
+        incomplete: true,
+      }),
+    ]);
+    await expect(
+      traces.get({
+        projectId: "trace-repository-project",
+        traceId: "rooted-trace",
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        id: "rooted-trace",
+        rootObservationId: "root-span",
+        observationCount: 2,
+      }),
+    );
+  });
+
+  it("derives bounded session and user aggregates from visible events", async () => {
+    const input = {
+      projectId: "derived-repository-project",
+      range: {
+        from: new Date("2026-07-17T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      filters: [],
+      limit: 10,
+    };
+
+    await expect(sessions.list(input)).resolves.toMatchObject({
+      items: [
+        {
+          id: "session-shared",
+          traceIds: ["derived-trace-a", "derived-trace-b"],
+          userIds: ["user-a", "user-b"],
+          traceCount: 2,
+          observationCount: 2,
+          totalUsage: 30,
+          totalCost: 0.25,
+        },
+      ],
+    });
+    await expect(
+      sessions.get({
+        projectId: input.projectId,
+        sessionId: "session-shared",
+        range: input.range,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ id: "session-shared", traceCount: 2 }),
+    );
+
+    const userPage = await users.list(input);
+    expect(userPage.items.map(({ id }) => id).sort()).toEqual([
+      "user-a",
+      "user-b",
+    ]);
+    await expect(
+      users.get({
+        projectId: input.projectId,
+        userId: "user-a",
+        range: input.range,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        id: "user-a",
+        traceCount: 1,
+        observationCount: 1,
+        totalUsage: 15,
+      }),
+    );
   });
 });

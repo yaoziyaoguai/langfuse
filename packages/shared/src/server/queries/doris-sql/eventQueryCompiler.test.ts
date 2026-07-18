@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { AnalyticsQueryValidationError } from "../logical/searchPlan";
-import { compileDorisVisibleEventsQuery } from "./eventQueryCompiler";
+import {
+  compileDorisVisibleEventScope,
+  compileDorisVisibleEventsQuery,
+} from "./eventQueryCompiler";
 
 const range = {
   from: new Date("2026-07-01T00:00:00.000Z"),
@@ -9,6 +12,31 @@ const range = {
 };
 
 describe("Doris event query compiler", () => {
+  it("exposes a reusable bounded scope without projection, order, or limit", () => {
+    const scope = compileDorisVisibleEventScope({
+      projectId: "project-1",
+      range,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "environment",
+          operator: "any of",
+          value: ["production"],
+        },
+      ],
+      search: { query: "trace", searchType: ["id"] },
+    });
+
+    expect(scope.fromSql).toContain("LEFT JOIN trace_tombstones");
+    expect(scope.whereSql).toContain("e.project_id = ?");
+    expect(scope.whereSql).toContain("e.environment IN (?)");
+    expect(scope.whereSql).not.toContain("ORDER BY");
+    expect(scope.whereSql).not.toContain("LIMIT");
+    expect(scope.params).toEqual(
+      expect.arrayContaining(["project-1", "production", "%trace%"]),
+    );
+  });
+
   it("binds tenant, range, filter, search, and pagination values", () => {
     const injection = "x' OR 1=1 --";
     const compiled = compileDorisVisibleEventsQuery({
