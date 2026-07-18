@@ -10,6 +10,7 @@
 
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { DorisPoCMysqlClient } from "../../../doris-poc/mysqlClient";
+import { compileDorisVisibleEventsQuery } from "../eventQueryCompiler";
 
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
 const DB = "langfuse_poc";
@@ -75,6 +76,8 @@ describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
       database: DB,
     });
     await db.execute(`TRUNCATE TABLE events_current`);
+    await db.execute(`TRUNCATE TABLE trace_tombstones`);
+    await db.execute(`TRUNCATE TABLE project_tombstones`);
     // Two projects, both with a trace "shared-id" to prove project isolation.
     await insertEvent(db, {
       project_id: "p1",
@@ -183,5 +186,116 @@ describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
       ["p1"],
     );
     expect(nullCount[0].c).toBeGreaterThanOrEqual(1);
+  });
+
+  it("executes compiled filters/search with bound values and deletion barriers", async () => {
+    await db.execute(
+      `INSERT INTO events_current
+        (project_id, partition_date, trace_id, span_id, version_token, type, environment,
+         name, start_time, created_at, updated_at, source, ingestion_sdk_name,
+         ingestion_sdk_version, tags, metadata, tool_definitions, input, output,
+         input_preview, output_preview)
+       VALUES (?, ?, ?, ?, ?, 'span', 'default', ?, ?, ?, ?, 'api', 'js', '5.0.0',
+         ARRAY('prod', 'canary'), CAST(? AS VARIANT), CAST(? AS VARIANT), ?, ?, ?, ?)`,
+      [
+        "p1",
+        "2026-07-17",
+        "compiled-visible",
+        "compiled-visible-span",
+        "1000",
+        "MiXeD %_\\ Needle",
+        "2026-07-17 11:00:00.000000",
+        "2026-07-17 11:00:00.000000",
+        "2026-07-17 11:00:00.000000",
+        JSON.stringify({ 'region."quoted"': "eu" }),
+        JSON.stringify({ search: { description: "Search" } }),
+        JSON.stringify({ message: "退款 %_\\ needle" }),
+        JSON.stringify({ ok: true }),
+        "input preview",
+        "output preview",
+      ],
+    );
+    await db.execute(
+      `INSERT INTO events_current
+        (project_id, partition_date, trace_id, span_id, version_token, type, environment,
+         name, start_time, created_at, updated_at, source, ingestion_sdk_name,
+         ingestion_sdk_version, tags, metadata, tool_definitions, input, output)
+       VALUES (?, ?, ?, ?, ?, 'span', 'default', ?, ?, ?, ?, 'api', 'js', '5.0.0',
+         ARRAY('prod', 'canary'), CAST(? AS VARIANT), CAST(? AS VARIANT), ?, ?)`,
+      [
+        "p1",
+        "2026-07-17",
+        "compiled-deleted",
+        "compiled-deleted-span",
+        "1000",
+        "MiXeD %_\\ Needle",
+        "2026-07-17 11:01:00.000000",
+        "2026-07-17 11:01:00.000000",
+        "2026-07-17 11:01:00.000000",
+        JSON.stringify({ 'region."quoted"': "eu" }),
+        JSON.stringify({ search: { description: "Search" } }),
+        JSON.stringify({ message: "退款 %_\\ needle" }),
+        JSON.stringify({ ok: true }),
+      ],
+    );
+    await db.execute(
+      `INSERT INTO trace_tombstones
+        (project_id, trace_id, deletion_generation, created_at)
+       VALUES (?, ?, ?, ?)`,
+      ["p1", "compiled-deleted", "1", "2026-07-17 11:02:00.000000"],
+    );
+
+    const compiled = compileDorisVisibleEventsQuery({
+      projectId: "p1",
+      range: {
+        from: new Date("2026-07-17T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      projection: "list",
+      filters: [
+        {
+          type: "stringObject",
+          column: "metadata",
+          key: 'region."quoted"',
+          operator: "=",
+          value: "eu",
+        },
+        {
+          type: "arrayOptions",
+          column: "traceTags",
+          operator: "all of",
+          value: ["prod", "canary"],
+        },
+        {
+          type: "arrayOptions",
+          column: "toolNames",
+          operator: "all of",
+          value: ["search"],
+        },
+        {
+          type: "number",
+          column: "toolDefinitions",
+          operator: ">=",
+          value: 1,
+        },
+        {
+          type: "boolean",
+          column: "hasInput",
+          operator: "=",
+          value: true,
+        },
+      ],
+      search: {
+        query: "MIXED %_\\ NEEDLE",
+        searchType: ["id", "content"],
+      },
+      limit: 10,
+    });
+    const rows = await db.query<{ trace_id: string }>(
+      compiled.sql,
+      compiled.params,
+    );
+
+    expect(rows.map((row) => row.trace_id)).toEqual(["compiled-visible"]);
   });
 });
