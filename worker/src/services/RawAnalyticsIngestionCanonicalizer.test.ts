@@ -33,7 +33,12 @@ function operation(body: string) {
   };
 }
 
-function canonicalizer(body: string) {
+function canonicalizer(
+  body: string,
+  overrides: Partial<
+    ConstructorParameters<typeof RawAnalyticsIngestionCanonicalizer>[0]
+  > = {},
+) {
   return new RawAnalyticsIngestionCanonicalizer({
     storageService: {
       download: vi.fn(async () => body),
@@ -45,6 +50,7 @@ function canonicalizer(body: string) {
     }),
     getProjectDeletionGeneration: vi.fn(async () => 2n),
     getTraceDeletionGeneration: vi.fn(async () => 3n),
+    ...overrides,
   });
 }
 
@@ -182,5 +188,87 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     await expect(
       canonicalizer(`${body} `).canonicalize(operation(body)),
     ).rejects.toMatchObject({ code: "ANALYTICS_CONFLICT" });
+  });
+
+  it("applies injected masking after reading raw storage and before OTLP canonicalization", async () => {
+    const start = 1_714_488_530_686_000_001n;
+    const end = 1_714_488_530_687_000_009n;
+    const maskedPayload = [
+      {
+        resource: { attributes: [] },
+        scopeSpans: [
+          {
+            scope: { name: "langfuse-sdk", version: "4.0.0" },
+            spans: [
+              {
+                traceId: bufferId("aabbccdd11223344aabbccdd11223344"),
+                spanId: bufferId("1122334455667788"),
+                name: "masked-name",
+                kind: 1,
+                startTimeUnixNano: nanoTimestamp(start),
+                endTimeUnixNano: nanoTimestamp(end),
+                attributes: [],
+                status: {},
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "otlp",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "python",
+        ingestionSdkVersion: "4.0.0",
+      },
+      payload: [],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const maskOtlp = vi.fn(async () => maskedPayload);
+
+    const batch = await canonicalizer(body, { maskOtlp }).canonicalize(
+      operation(body),
+    );
+
+    expect(maskOtlp).toHaveBeenCalledWith({
+      projectId: "project-1",
+      resourceSpans: [],
+    });
+    expect(batch.children[0]?.entity).toMatchObject({
+      kind: "event",
+      name: "masked-name",
+    });
+  });
+
+  it("rejects an internal event whose embedded project differs from the receipt", async () => {
+    const body = encodeRawAnalyticsIngestionEnvelope({
+      formatVersion: 1,
+      source: "internal-event",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "internal",
+        ingestionSdkVersion: "1",
+      },
+      payload: [
+        {
+          envelopeTimestamp: "2026-07-18T14:00:00.123456789Z",
+          eventData: {
+            projectId: "other-project",
+            traceId: "trace-1",
+            spanId: "span-1",
+            startTimeISO: "2026-07-18T14:00:00Z",
+            endTimeISO: "2026-07-18T14:00:01Z",
+            metadata: {},
+            source: "internal",
+          },
+        },
+      ],
+    });
+
+    await expect(
+      canonicalizer(body).canonicalize(operation(body)),
+    ).rejects.toMatchObject({ code: "ANALYTICS_VALIDATION_ERROR" });
   });
 });

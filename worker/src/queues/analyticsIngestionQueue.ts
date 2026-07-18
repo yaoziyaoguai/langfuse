@@ -100,6 +100,7 @@ type CanonicalizationOperation = Pick<
   AnalyticsIngestionOperation,
   | "id"
   | "projectId"
+  | "sourceChecksum"
   | "rawObjectKey"
   | "acceptedAtNanos"
   | "canonicalizerVersion"

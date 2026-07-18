@@ -7,10 +7,12 @@ import {
   DorisStreamLoadClient,
   getS3EventStorageClient,
   parseDorisStreamLoadConfig,
+  type ResourceSpan,
   type StorageService,
 } from "@langfuse/shared/src/server";
 
 import { env } from "../env";
+import { analyticsIngestionQueueProcessorBuilder } from "../queues/analyticsIngestionQueue";
 import {
   CanonicalIngestionArtifactStore,
   StorageServiceCanonicalObjectStore,
@@ -20,6 +22,8 @@ import {
   DorisBatchSink,
   type DorisStreamLoadTransport,
 } from "./AnalyticsWriter/DorisBatchSink";
+import type { EventCanonicalizer } from "./EventCanonicalizer";
+import { RawAnalyticsIngestionCanonicalizer } from "./RawAnalyticsIngestionCanonicalizer";
 
 type RuntimeEnvironment = {
   readonly NODE_ENV?: "development" | "test" | "production";
@@ -44,6 +48,10 @@ function optionalString(value: number | string | undefined) {
 
 export interface DorisAnalyticsPersistence {
   readonly writer: AnalyticsWriter;
+  readonly canonicalizer: RawAnalyticsIngestionCanonicalizer;
+  readonly processor: ReturnType<
+    typeof analyticsIngestionQueueProcessorBuilder
+  >;
   readonly workerId: string;
 }
 
@@ -51,16 +59,19 @@ export interface DorisAnalyticsPersistence {
  * U4 的显式 Doris composition root。发布路径在 U8 前不会调用它；集成测试可注入
  * 本地传输映射，但生产调用始终从经过校验的 workload env 构造凭据与 allowlist。
  */
-export function createDorisAnalyticsPersistence(
-  input: {
-    readonly runtimeEnv?: RuntimeEnvironment;
-    readonly prismaClient?: PrismaClient;
-    readonly storageService?: StorageService;
-    readonly streamLoadTransport?: DorisStreamLoadTransport;
-    readonly databaseName?: string;
-    readonly workerId?: string;
-  } = {},
-): DorisAnalyticsPersistence {
+export function createDorisAnalyticsPersistence(input: {
+  readonly runtimeEnv?: RuntimeEnvironment;
+  readonly prismaClient?: PrismaClient;
+  readonly storageService?: StorageService;
+  readonly streamLoadTransport?: DorisStreamLoadTransport;
+  readonly databaseName?: string;
+  readonly workerId?: string;
+  readonly eventCanonicalizer: EventCanonicalizer;
+  readonly maskOtlp?: (input: {
+    readonly projectId: string;
+    readonly resourceSpans: ResourceSpan[];
+  }) => Promise<ResourceSpan[]>;
+}): DorisAnalyticsPersistence {
   const runtimeEnv = input.runtimeEnv ?? env;
   const nodeEnv = runtimeEnv.NODE_ENV ?? "development";
   const streamConfig =
@@ -99,17 +110,31 @@ export function createDorisAnalyticsPersistence(
   const workerId =
     input.workerId ??
     `doris-writer-${hostname()}-${process.pid}-${randomUUID()}`;
+  const client = input.prismaClient ?? prisma;
+  const writer = new AnalyticsWriter({
+    client,
+    artifactStore: new CanonicalIngestionArtifactStore(
+      new StorageServiceCanonicalObjectStore(storageService),
+    ),
+    doris: new DorisBatchSink(streamLoadTransport, databaseName),
+    databaseName,
+    canonicalPrefix: runtimeEnv.LANGFUSE_S3_EVENT_UPLOAD_PREFIX ?? "",
+    workerId,
+  });
+  const canonicalizer = new RawAnalyticsIngestionCanonicalizer({
+    client,
+    storageService,
+    eventCanonicalizer: input.eventCanonicalizer,
+    maskOtlp: input.maskOtlp,
+  });
 
   return {
-    writer: new AnalyticsWriter({
-      client: input.prismaClient ?? prisma,
-      artifactStore: new CanonicalIngestionArtifactStore(
-        new StorageServiceCanonicalObjectStore(storageService),
-      ),
-      doris: new DorisBatchSink(streamLoadTransport, databaseName),
-      databaseName,
-      canonicalPrefix: runtimeEnv.LANGFUSE_S3_EVENT_UPLOAD_PREFIX ?? "",
-      workerId,
+    writer,
+    canonicalizer,
+    processor: analyticsIngestionQueueProcessorBuilder({
+      client,
+      sink: writer,
+      canonicalize: (operation) => canonicalizer.canonicalize(operation),
     }),
     workerId,
   };

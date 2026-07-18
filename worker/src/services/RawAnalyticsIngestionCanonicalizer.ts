@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { AnalyticsIngestionOperation } from "@prisma/client";
+import type { AnalyticsIngestionOperation, PrismaClient } from "@prisma/client";
 import {
   AnalyticsPersistenceError,
   canonicalPayloadHash,
@@ -103,6 +103,11 @@ export class RawAnalyticsIngestionCanonicalizer {
     private readonly dependencies: {
       readonly storageService: StorageService;
       readonly eventCanonicalizer: EventCanonicalizer;
+      readonly client?: PrismaClient;
+      readonly maskOtlp?: (input: {
+        readonly projectId: string;
+        readonly resourceSpans: ResourceSpan[];
+      }) => Promise<ResourceSpan[]>;
       readonly getProjectDeletionGeneration?: typeof getProjectDeletionGeneration;
       readonly getTraceDeletionGeneration?: typeof getTraceDeletionGeneration;
       readonly validateAndInflateScore?: typeof validateAndInflateScore;
@@ -129,6 +134,7 @@ export class RawAnalyticsIngestionCanonicalizer {
     }
     const envelope = decodeRawAnalyticsIngestionEnvelope(body);
     const projectDeletionGeneration = await this.getProjectGeneration({
+      client: this.dependencies.client,
       projectId: operation.projectId,
     });
     const traceGenerations = new Map<string, bigint>();
@@ -137,6 +143,7 @@ export class RawAnalyticsIngestionCanonicalizer {
       const existing = traceGenerations.get(traceId);
       if (existing !== undefined) return existing;
       const generation = await this.getTraceGeneration({
+        client: this.dependencies.client,
         projectId: operation.projectId,
         traceId,
       });
@@ -195,7 +202,14 @@ export class RawAnalyticsIngestionCanonicalizer {
     projectDeletionGeneration: bigint;
     traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
   }): Promise<CanonicalAnalyticsEntityClaim[]> {
-    const resourceSpans = asArray(input.payload, "otlp") as ResourceSpan[];
+    const rawResourceSpans = asArray(input.payload, "otlp") as ResourceSpan[];
+    const resourceSpans = this.dependencies.maskOtlp
+      ? await this.dependencies.maskOtlp({
+          projectId: input.operation.projectId,
+          resourceSpans: rawResourceSpans,
+        })
+      : rawResourceSpans;
+    if (!Array.isArray(resourceSpans)) throw validationError("otlp");
     const processor = new OtelIngestionProcessor({
       projectId: input.operation.projectId,
       publicKey: input.attribution.ingestionApiKey,
@@ -373,6 +387,9 @@ export class RawAnalyticsIngestionCanonicalizer {
         throw validationError("v4");
       }
       const item = value as InternalEventPayload;
+      if (item.eventData.projectId !== input.operation.projectId) {
+        throw validationError("v4");
+      }
       const event = await this.dependencies.eventCanonicalizer.canonicalize({
         eventData: item.eventData,
         rawObjectKey: input.operation.rawObjectKey,
