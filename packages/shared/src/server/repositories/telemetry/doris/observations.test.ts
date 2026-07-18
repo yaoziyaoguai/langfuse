@@ -159,4 +159,69 @@ describe("Doris observations repository", () => {
     ).rejects.toMatchObject({ httpCode: 409 });
     expect(query).not.toHaveBeenCalled();
   });
+
+  it("resolves trace-only list scope to exact immutable partitions", async () => {
+    const locateTrace = vi.fn().mockResolvedValue([
+      {
+        partitionDate: "2026-07-17",
+        traceId: "trace-1",
+        observationId: "span-1",
+      },
+      {
+        partitionDate: "2026-07-18",
+        traceId: "trace-1",
+        observationId: "span-2",
+      },
+    ]);
+    const query = vi.fn().mockResolvedValue([row]);
+    const repository = new DorisObservationsRepository({ query, locateTrace });
+
+    await repository.listForTrace({
+      projectId: "project-1",
+      traceId: "trace-1",
+      filters: [],
+      limit: 10,
+    });
+
+    expect(locateTrace).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceId: "trace-1",
+    });
+    expect(query.mock.calls[0]?.[0]).toContain("e.partition_date IN (?, ?)");
+    expect(query.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(["2026-07-17", "2026-07-18", "trace-1"]),
+    );
+  });
+
+  it("enforces the 30-day cap when a list projects full content", async () => {
+    const repository = new DorisObservationsRepository({ query: vi.fn() });
+
+    await expect(
+      repository.list({
+        projectId: "project-1",
+        range: {
+          from: new Date("2026-01-01T00:00:00.000Z"),
+          to: new Date("2026-02-01T00:00:00.001Z"),
+        },
+        filters: [],
+        includeFullContent: true,
+        limit: 10,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: "InvalidTimeRange", maxDays: 30 }),
+    );
+  });
+
+  it("counts through the same bounded visibility scope", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "7" }]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.count({ projectId: "project-1", range, filters: [] }),
+    ).resolves.toBe(7);
+    expect(query.mock.calls[0]?.[0]).toContain("SELECT COUNT(*) AS count");
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "trace_deletion.trace_id IS NULL",
+    );
+  });
 });

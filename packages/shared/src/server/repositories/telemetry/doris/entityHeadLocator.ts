@@ -1,6 +1,5 @@
 import type { AnalyticsEntityType, Prisma, PrismaClient } from "@prisma/client";
 
-import { prisma } from "../../../../db";
 import { InvalidRequestError } from "../../../../errors";
 
 type EntityHeadLocatorClient = PrismaClient | Prisma.TransactionClient;
@@ -54,7 +53,7 @@ async function findEventHeadLocators(input: {
   });
 }
 
-export function findObservationHeadLocators(input: {
+export async function findObservationHeadLocators(input: {
   readonly client?: EntityHeadLocatorClient;
   readonly projectId: string;
   readonly observationId: string;
@@ -62,8 +61,9 @@ export function findObservationHeadLocators(input: {
 }): Promise<readonly EventHeadLocator[]> {
   requireId(input.projectId, "projectId");
   requireId(input.observationId, "observationId");
+  const client = input.client ?? (await import("../../../../db.js")).prisma;
   return findEventHeadLocators({
-    client: input.client ?? prisma,
+    client,
     projectId: input.projectId,
     where: {
       lookupId: input.observationId,
@@ -72,15 +72,16 @@ export function findObservationHeadLocators(input: {
   });
 }
 
-export function findTraceEventHeadLocators(input: {
+export async function findTraceEventHeadLocators(input: {
   readonly client?: EntityHeadLocatorClient;
   readonly projectId: string;
   readonly traceId: string;
 }): Promise<readonly EventHeadLocator[]> {
   requireId(input.projectId, "projectId");
   requireId(input.traceId, "traceId");
+  const client = input.client ?? (await import("../../../../db.js")).prisma;
   return findEventHeadLocators({
-    client: input.client ?? prisma,
+    client,
     projectId: input.projectId,
     where: { owningTraceId: input.traceId },
   });

@@ -162,6 +162,23 @@ export function withMiddlewares(
           );
         }
 
+        if (
+          isBaseError(error) &&
+          "code" in error &&
+          error.code === "InvalidTimeRange" &&
+          "maxDays" in error &&
+          "acceptedRange" in error
+        ) {
+          logger.warn(error);
+          return res.status(error.httpCode).json({
+            message: error.message,
+            error: "InvalidTimeRange",
+            code: "InvalidTimeRange",
+            maxDays: error.maxDays,
+            acceptedRange: error.acceptedRange,
+          });
+        }
+
         if (isBaseError(error)) {
           logBaseError(error);
           if (error.httpCode >= 500 && error.httpCode < 600) {

@@ -124,6 +124,21 @@ import {
 } from "../../tableDefinitions";
 import { tracesTableCols } from "../../tableDefinitions/tracesTable";
 import { parseMetadataCHRecordToDomain } from "../utils/metadata_conversion";
+import {
+  buildDorisDerivedQuery,
+  toDorisSessionMetricsRow,
+  toDorisUserMetricsRow,
+} from "./telemetry/doris/derivedUi";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
+import {
+  toDorisEventsObservation,
+  toDorisTraceDomain,
+} from "./telemetry/doris/adapters";
+import type { DorisTrace } from "./telemetry/doris/traces";
+import type { DorisPublicApiTracesQuery } from "./telemetry/doris/publicTraces";
 
 export type EventBatchIOStringOutput = {
   id: string;
@@ -1053,6 +1068,33 @@ export const getTraceByIdFromEventsTable = async ({
 export const getTraceById = async (
   params: Parameters<typeof getTraceByIdFromTracesTable>[0],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const trace = await getDorisTelemetryRepositories().traces.get({
+      projectId: params.projectId,
+      traceId: params.traceId,
+    });
+    if (!trace) return undefined;
+    if (
+      params.timestamp &&
+      trace.timestamp.toISOString().slice(0, 10) !==
+        params.timestamp.toISOString().slice(0, 10)
+    ) {
+      return undefined;
+    }
+    const control = await prisma.traceControlState.findUnique({
+      where: {
+        projectId_traceId: {
+          projectId: params.projectId,
+          traceId: params.traceId,
+        },
+      },
+      select: { bookmarked: true, public: true },
+    });
+    return toDorisTraceDomain(trace, {
+      bookmarked: control?.bookmarked ?? false,
+      public: control?.public ?? false,
+    });
+  }
   if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
     return getTraceByIdFromTracesTable(params);
   }
@@ -1072,6 +1114,52 @@ export const getTraceById = async (
 export const getObservationById = async (
   params: Parameters<typeof getObservationByIdFromObservationsTable>[0],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const observation = await getDorisTelemetryRepositories().observations.get({
+      projectId: params.projectId,
+      observationId: params.id,
+      traceId: params.traceId,
+    });
+    const matchesType = !params.type || observation?.type === params.type;
+    const matchesStartDate =
+      !params.startTime ||
+      observation?.startTime.toISOString().slice(0, 10) ===
+        params.startTime.toISOString().slice(0, 10);
+    if (!observation || !matchesType || !matchesStartDate) {
+      throw new LangfuseNotFoundError(
+        `Observation with id ${params.id} not found`,
+      );
+    }
+    const control = await prisma.traceControlState.findUnique({
+      where: {
+        projectId_traceId: {
+          projectId: params.projectId,
+          traceId: observation.traceId,
+        },
+      },
+      select: { bookmarked: true, public: true },
+    });
+    const mapped = toDorisEventsObservation({
+      ...observation,
+      bookmarked: control?.bookmarked ?? false,
+      public: control?.public ?? false,
+    });
+    const renderingProps = params.renderingProps ?? DEFAULT_RENDERING_PROPS;
+    const renderIo = (value: EventsObservation["input"]) =>
+      applyInputOutputRendering(
+        value === null
+          ? null
+          : typeof value === "string"
+            ? value
+            : JSON.stringify(value),
+        renderingProps,
+      );
+    return {
+      ...mapped,
+      input: params.fetchWithInputOutput ? renderIo(mapped.input) : null,
+      output: params.fetchWithInputOutput ? renderIo(mapped.output) : null,
+    };
+  }
   if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
     return getObservationByIdFromObservationsTable(params);
   }
@@ -1092,6 +1180,9 @@ export const getTracesIdentifierForSession = async (
   projectId: string,
   sessionId: string,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    return getTracesIdentifierForSessionFromEvents(projectId, sessionId);
+  }
   if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
     return getTracesIdentifierForSessionFromTracesTable(projectId, sessionId);
   }
@@ -1457,6 +1548,14 @@ async function getObservationsCountFromEventsTableForPublicApiInternal(
 export const getObservationsFromEventsTableForPublicApi = async (
   opts: Omit<PublicApiObservationsQuery, "fields">,
 ): Promise<Array<EventsObservation & ObservationPriceFields>> => {
+  if (isDorisAnalyticsBackend()) {
+    const { getDorisObservationsForPublicApi } =
+      await import("./telemetry/doris/publicApi.js");
+    return (await getDorisObservationsForPublicApi({
+      ...opts,
+      fields: OBSERVATION_FIELD_GROUPS_PUBLIC_API,
+    })) as Array<EventsObservation & ObservationPriceFields>;
+  }
   const { projectId } = opts;
 
   // Build query with filters and common CTEs
@@ -1501,6 +1600,11 @@ export const getObservationsV2FromEventsTableForPublicApi = async (
   },
   options: BuildObservationsQueryComponentsOptions = {},
 ): Promise<Array<EventsObservationPublic>> => {
+  if (isDorisAnalyticsBackend()) {
+    const { getDorisObservationsForPublicApi } =
+      await import("./telemetry/doris/publicApi.js");
+    return getDorisObservationsForPublicApi(opts);
+  }
   const { projectId, expandMetadataKeys } = opts;
 
   // Determine which field groups to include
@@ -1590,6 +1694,11 @@ export const getObservationsV2FromEventsTableForPublicApi = async (
 export const getObservationsCountFromEventsTableForPublicApi = async (
   opts: PublicApiObservationsQuery,
 ): Promise<number> => {
+  if (isDorisAnalyticsBackend()) {
+    const { getDorisObservationsCountForPublicApi } =
+      await import("./telemetry/doris/publicApi.js");
+    return getDorisObservationsCountForPublicApi(opts);
+  }
   const countResult =
     await getObservationsCountFromEventsTableForPublicApiInternal(opts);
   return Number(countResult[0].count);
@@ -1791,6 +1900,13 @@ async function getTracesFromEventsTableForPublicApiInternal<T>(
 export const getTracesFromEventsTableForPublicApi = async (
   opts: PublicApiTracesQuery,
 ): Promise<Array<any>> => {
+  if (isDorisAnalyticsBackend()) {
+    const { getDorisTracesForPublicApi } =
+      await import("./telemetry/doris/publicTraces.js");
+    return getDorisTracesForPublicApi(
+      opts as unknown as DorisPublicApiTracesQuery,
+    );
+  }
   const requestedFields = opts.fields ?? [
     "core",
     "io",
@@ -1822,6 +1938,13 @@ export const getTracesFromEventsTableForPublicApi = async (
 export const getTracesCountFromEventsTableForPublicApi = async (
   opts: PublicApiTracesQuery,
 ): Promise<number> => {
+  if (isDorisAnalyticsBackend()) {
+    const { getDorisTracesCountForPublicApi } =
+      await import("./telemetry/doris/publicTraces.js");
+    return getDorisTracesCountForPublicApi(
+      opts as unknown as DorisPublicApiTracesQuery,
+    );
+  }
   const countResult = await getTracesFromEventsTableForPublicApiInternal<{
     count: string;
   }>({
@@ -2608,6 +2731,37 @@ export const getUsersFromEventsTable = async (
   limit?: number,
   offset?: number,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(filter, "user");
+    const requestedLimit = limit ?? 999;
+    let remainingOffset = offset ?? 0;
+    let cursor: string | undefined;
+    const users: Array<{ user: string; count: string }> = [];
+
+    while (users.length < requestedLimit) {
+      const page = await getDorisTelemetryRepositories().users.list({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        identifierQuery: searchQuery,
+        cursor,
+        limit: Math.min(999, Math.max(requestedLimit, 1)),
+      });
+      const visibleItems = page.items.slice(remainingOffset);
+      remainingOffset = Math.max(0, remainingOffset - page.items.length);
+      users.push(
+        ...visibleItems.slice(0, requestedLimit - users.length).map((user) => ({
+          user: user.id,
+          count: String(user.traceCount),
+        })),
+      );
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+
+    return users;
+  }
+
   const eventsFilter = new FilterList(
     createFilterFromFilterState(filter, usersFromEventsTableColumnDefinitions),
   );
@@ -2647,6 +2801,17 @@ export const getUsersCountFromEventsTable = async (
   filter: FilterState,
   searchQuery?: string,
 ): Promise<{ totalCount: string }[]> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(filter, "user");
+    const count = await getDorisTelemetryRepositories().users.count({
+      projectId,
+      range: query.range,
+      filters: query.filters,
+      identifierQuery: searchQuery,
+    });
+    return [{ totalCount: String(count) }];
+  }
+
   const eventsFilter = new FilterList(
     createFilterFromFilterState(filter, usersFromEventsTableColumnDefinitions),
   );
@@ -2692,6 +2857,28 @@ export const getUserMetricsFromEventsTable = async (
 ) => {
   if (userIds.length === 0) {
     return [];
+  }
+
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(
+      [
+        ...filter,
+        {
+          type: "stringOptions",
+          column: "userId",
+          operator: "any of",
+          value: userIds,
+        },
+      ],
+      "user",
+    );
+    const page = await getDorisTelemetryRepositories().users.list({
+      projectId,
+      range: query.range,
+      filters: query.filters,
+      limit: Math.min(999, userIds.length),
+    });
+    return page.items.map(toDorisUserMetricsRow);
   }
 
   const eventsFilter = new FilterList(
@@ -2777,6 +2964,17 @@ export const getUserMetricsFromEventsTable = async (
 export const hasAnyUserFromEventsTable = async (
   projectId: string,
 ): Promise<boolean> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery([], "user");
+    return (
+      (await getDorisTelemetryRepositories().users.count({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+      })) > 0
+    );
+  }
+
   // Filter out deleted rows
   const query = `
     SELECT 1
@@ -3019,6 +3217,17 @@ export const getEventsForAnalyticsIntegrations = async function* (
 export const hasAnySessionFromEventsTable = async (
   projectId: string,
 ): Promise<boolean> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery([], "session");
+    return (
+      (await getDorisTelemetryRepositories().sessions.count({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+      })) > 0
+    );
+  }
+
   const query = `
     SELECT 1
     FROM events_core
@@ -3139,6 +3348,37 @@ export const getSessionMetricsFromEvents = async (props: {
   queryFromTimestamp?: Date;
 }) => {
   if (props.sessionIds.length === 0) return [];
+
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(
+      [
+        ...(props.queryFromTimestamp
+          ? [
+              {
+                type: "datetime" as const,
+                column: "createdAt",
+                operator: ">=" as const,
+                value: props.queryFromTimestamp,
+              },
+            ]
+          : []),
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "any of",
+          value: props.sessionIds,
+        },
+      ],
+      "session",
+    );
+    const page = await getDorisTelemetryRepositories().sessions.list({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+      limit: Math.min(999, props.sessionIds.length),
+    });
+    return page.items.map(toDorisSessionMetricsRow);
+  }
 
   const builder = eventsSessionsAggregation({
     projectId: props.projectId,
@@ -3273,6 +3513,44 @@ export const getTracesIdentifierForSessionFromEvents = async (
   projectId: string,
   sessionId: string,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(
+      [
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "any of",
+          value: [sessionId],
+        },
+      ],
+      "session",
+    );
+    const traces: DorisTrace[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().traces.list({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        cursor,
+        limit: 999,
+      });
+      traces.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return traces
+      .map((trace) => ({
+        id: trace.id,
+        userId: trace.userId,
+        name: trace.name,
+        timestamp: trace.timestamp,
+        environment: trace.environment,
+      }))
+      .sort(
+        (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
+      );
+  }
+
   // Build traces CTE using eventsTracesAggregation
   const tracesBuilder = eventsTracesAggregation({
     projectId,

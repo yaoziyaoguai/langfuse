@@ -81,7 +81,7 @@ export default withMiddlewares(
       querySchema: GetTracesV1Query,
       responseSchema: GetTracesV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.tracesList,
-      rejectInEventsOnlyMode: true,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         // Api-performance controls.
         // 1. Reject if no date range and rejection is enabled
@@ -136,7 +136,10 @@ export default withMiddlewares(
           toTimestamp: query.toTimestamp ?? undefined,
         };
 
-        if (query.useEventsTable) {
+        if (
+          query.useEventsTable ||
+          env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+        ) {
           const [items, count] = await Promise.all([
             getTracesFromEventsTableForPublicApi({
               ...filterProps,

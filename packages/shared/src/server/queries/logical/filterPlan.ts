@@ -10,11 +10,13 @@ type DorisEventColumn = {
 const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
   id: { expression: "e.span_id" },
   traceId: { expression: "e.trace_id" },
+  parentObservationId: { expression: "e.parent_span_id" },
   startTime: { expression: "e.start_time" },
   endTime: { expression: "e.end_time" },
   name: { expression: "e.name" },
   type: { expression: "e.`type`" },
   environment: { expression: "e.environment" },
+  release: { expression: "e.`release`" },
   version: { expression: "e.`version`" },
   userId: { expression: "e.user_id" },
   sessionId: { expression: "e.session_id" },

@@ -87,6 +87,7 @@ type DorisVisibleEventScopeInput = {
     readonly searchType?: readonly TracingSearchType[];
   };
   readonly cursor?: DorisEventCursor;
+  readonly partitionDates?: readonly string[];
 };
 
 const EVENT_FROM_SQL = `FROM events_current e
@@ -122,12 +123,20 @@ export function compileDorisVisibleEventScope(
       return "?";
     },
   };
+  const partitionDates = [...new Set(input.partitionDates ?? [])].sort();
   const predicates = [
     `e.project_id = ${bound.bind(input.projectId)}`,
     `e.partition_date >= ${bound.bind(utcDate(input.range.from))}`,
     `e.partition_date < ${bound.bind(exclusivePartitionTo(input.range.to))}`,
     `e.start_time >= ${bound.bind(input.range.from)}`,
     `e.start_time < ${bound.bind(input.range.to)}`,
+    ...(partitionDates.length > 0
+      ? [
+          `e.partition_date IN (${partitionDates
+            .map((partitionDate) => bound.bind(partitionDate))
+            .join(", ")})`,
+        ]
+      : []),
     "trace_deletion.trace_id IS NULL",
     "project_deletion.project_id IS NULL",
     ...compileDorisEventFilters(filterPlan.filters, bound),

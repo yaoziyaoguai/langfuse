@@ -1,9 +1,9 @@
 import type { TracingSearchType } from "../../../interfaces/search";
+import { InvalidRequestError } from "../../../errors";
 
 const MAX_FULL_CONTENT_RANGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
-export class AnalyticsQueryValidationError extends Error {
-  readonly name = "AnalyticsQueryValidationError";
+export class AnalyticsQueryValidationError extends InvalidRequestError {
   readonly code = "InvalidTimeRange";
   readonly maxDays = 30;
 

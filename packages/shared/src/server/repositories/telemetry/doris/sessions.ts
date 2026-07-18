@@ -282,6 +282,37 @@ export class DorisSessionsRepository {
     };
   }
 
+  async count(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly identifierQuery?: string;
+  }): Promise<number> {
+    const scope = compileDorisVisibleEventScope(input);
+    const identifierSql = input.identifierQuery
+      ? "AND LOWER(e.session_id) LIKE ? ESCAPE '\\\\'"
+      : "";
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(DISTINCT e.session_id) AS count
+${scope.fromSql}
+WHERE ${scope.whereSql}
+  AND e.session_id IS NOT NULL
+  AND e.session_id != ''
+  ${identifierSql}`,
+      [
+        ...scope.params,
+        ...(input.identifierQuery
+          ? [identifierPattern(input.identifierQuery)]
+          : []),
+      ],
+    );
+    return numberValue(rows[0]?.count);
+  }
+
   async get(input: {
     readonly projectId: string;
     readonly sessionId: string;

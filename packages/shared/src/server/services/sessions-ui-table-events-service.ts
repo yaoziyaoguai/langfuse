@@ -18,7 +18,7 @@ import {
   eventsSessionScoresAggregation,
   eventsTracesAggregation,
 } from "../queries/clickhouse-sql/query-fragments";
-import { queryClickhouse } from "../repositories";
+import { queryClickhouse } from "../repositories/clickhouse";
 import {
   sessionEventsCols,
   sessionEventsOrderByCols,
@@ -26,6 +26,17 @@ import {
 import { sessionsEventsViewCols } from "../../tableDefinitions/sessionsView";
 import { findUiColumnMapping } from "../../tableDefinitions";
 import { parseClickhouseUTCDateTimeFormat } from "../repositories/clickhouse";
+import {
+  buildDorisDerivedQuery,
+  toDorisSessionEventsRow,
+  toDorisSessionMetricsRow,
+} from "../repositories/telemetry/doris/derivedUi";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "../repositories/telemetry/doris/runtime";
+import type { DorisSession } from "../repositories/telemetry/doris/sessions";
+import type { DorisTrace } from "../repositories/telemetry/doris/traces";
 
 type SessionEventsBaseReturnType = {
   session_id: string;
@@ -55,10 +66,86 @@ export type SessionTraceFromEvents = {
   userId: string | null;
 };
 
+async function getDorisSessionsPage(props: {
+  projectId: string;
+  filter: FilterState;
+  orderBy?: OrderByState;
+  limit?: number;
+  page?: number;
+}): Promise<readonly DorisSession[]> {
+  if (
+    props.orderBy &&
+    (props.orderBy.column !== "createdAt" || props.orderBy.order !== "DESC")
+  ) {
+    throw new InvalidRequestError(
+      `Unsupported Doris session order: ${props.orderBy.column} ${props.orderBy.order}`,
+    );
+  }
+
+  const query = buildDorisDerivedQuery(props.filter, "session");
+  const limit = props.limit ?? 999;
+  const targetPage = props.page ?? 0;
+  let cursor: string | undefined;
+
+  for (let page = 0; page <= targetPage; page += 1) {
+    const result = await getDorisTelemetryRepositories().sessions.list({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+      cursor,
+      limit,
+    });
+    if (page === targetPage) return result.items;
+    if (!result.nextCursor) return [];
+    cursor = result.nextCursor;
+  }
+
+  return [];
+}
+
 export const getSessionTracesFromEvents = async (props: {
   projectId: string;
   sessionId: string;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(
+      [
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "any of",
+          value: [props.sessionId],
+        },
+      ],
+      "session",
+    );
+    const traces: DorisTrace[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().traces.list({
+        projectId: props.projectId,
+        range: query.range,
+        filters: query.filters,
+        cursor,
+        limit: 999,
+      });
+      traces.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+
+    return traces
+      .map((trace) => ({
+        id: trace.id,
+        name: trace.name,
+        timestamp: trace.timestamp,
+        environment: trace.environment,
+        userId: trace.userId,
+      }))
+      .sort(
+        (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
+      );
+  }
+
   const tracesBuilder = eventsTracesAggregation({
     projectId: props.projectId,
   })
@@ -117,6 +204,15 @@ export const getSessionsTableCountFromEvents = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(props.filter, "session");
+    return getDorisTelemetryRepositories().sessions.count({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+    });
+  }
+
   const rows = await getSessionsTableFromEventsGeneric<{ count: string }>({
     select: "count",
     projectId: props.projectId,
@@ -136,6 +232,11 @@ export const getSessionsTableFromEvents = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const sessions = await getDorisSessionsPage(props);
+    return sessions.map(toDorisSessionEventsRow);
+  }
+
   const rows =
     await getSessionsTableFromEventsGeneric<SessionEventsDataReturnType>({
       select: "rows",
@@ -164,6 +265,11 @@ export const getSessionsWithMetricsFromEvents = async (props: {
   page?: number;
   clickhouseConfigs?: ClickHouseClientConfigOptions | undefined;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const sessions = await getDorisSessionsPage(props);
+    return sessions.map(toDorisSessionMetricsRow);
+  }
+
   const rows = await getSessionsTableFromEventsGeneric<SessionEventsMetricsRow>(
     {
       select: "metrics",

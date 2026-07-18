@@ -116,4 +116,16 @@ describe("Doris users repository", () => {
       expect.objectContaining({ code: "InvalidTimeRange", maxDays: 30 }),
     );
   });
+
+  it("counts matching users through the bounded visibility scope", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "5" }]);
+    const repository = new DorisUsersRepository({ query });
+
+    await expect(
+      repository.count({ projectId: "project-1", range, filters: [] }),
+    ).resolves.toBe(5);
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "COUNT(DISTINCT e.user_id) AS count",
+    );
+  });
 });

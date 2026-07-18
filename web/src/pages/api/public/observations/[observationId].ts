@@ -16,6 +16,7 @@ import {
   getObservationByIdFromEventsTable,
 } from "@langfuse/shared/src/server";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
+import { env } from "@/src/env.mjs";
 
 export default withMiddlewares(
   {
@@ -26,21 +27,22 @@ export default withMiddlewares(
       querySchema: GetObservationV1Query,
       responseSchema: GetObservationV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.observationGet,
-      rejectInEventsOnlyMode: true,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
-        const clickhouseObservation = query.useEventsTable
-          ? await getObservationByIdFromEventsTable({
-              id: query.observationId,
-              projectId: auth.scope.projectId,
-              fetchWithInputOutput: true,
-            })
-          : // eslint-disable-next-line @typescript-eslint/no-deprecated
-            await getObservationById({
-              id: query.observationId,
-              projectId: auth.scope.projectId,
-              fetchWithInputOutput: true,
-              preferredClickhouseService: "ReadOnly",
-            });
+        const clickhouseObservation =
+          query.useEventsTable && env.LANGFUSE_ANALYTICS_BACKEND !== "doris"
+            ? await getObservationByIdFromEventsTable({
+                id: query.observationId,
+                projectId: auth.scope.projectId,
+                fetchWithInputOutput: true,
+              })
+            : // eslint-disable-next-line @typescript-eslint/no-deprecated
+              await getObservationById({
+                id: query.observationId,
+                projectId: auth.scope.projectId,
+                fetchWithInputOutput: true,
+                preferredClickhouseService: "ReadOnly",
+              });
 
         if (!clickhouseObservation) {
           throw new LangfuseNotFoundError(

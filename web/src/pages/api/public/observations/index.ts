@@ -20,6 +20,7 @@ import {
   getObservationsCountForPublicApi,
 } from "@/src/features/public-api/server/observations";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
+import { env } from "@/src/env.mjs";
 
 export default withMiddlewares(
   {
@@ -31,7 +32,7 @@ export default withMiddlewares(
       responseSchema: GetObservationsV1Response,
       rateLimitUpgradePath:
         legacyPublicApiRateLimitUpgradePaths.observationsList,
-      rejectInEventsOnlyMode: true,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         const filterProps = {
           projectId: auth.scope.projectId,
@@ -50,7 +51,10 @@ export default withMiddlewares(
           advancedFilters: query.filter,
         };
 
-        if (query.useEventsTable) {
+        if (
+          query.useEventsTable ||
+          env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+        ) {
           const [items, count] = await Promise.all([
             getObservationsFromEventsTableForPublicApi(filterProps),
             getObservationsCountFromEventsTableForPublicApi(filterProps),

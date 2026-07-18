@@ -4,12 +4,17 @@ import { InvalidRequestError, LangfuseConflictError } from "../../../../errors";
 import { parseJsonIfString } from "../../../../utils/json";
 import type { DorisQueryExecutor } from "../../../doris/client";
 import {
+  compileDorisVisibleEventScope,
   compileDorisVisibleEventsQuery,
   type DorisEventCursor,
 } from "../../../queries/doris-sql/eventQueryCompiler";
-import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
+import {
+  buildSearchPlan,
+  type AnalyticsTimeRange,
+} from "../../../queries/logical/searchPlan";
 import {
   findObservationHeadLocators,
+  findTraceEventHeadLocators,
   type EventHeadLocator,
 } from "./entityHeadLocator";
 
@@ -19,6 +24,11 @@ type LocateObservation = (input: {
   readonly projectId: string;
   readonly observationId: string;
   readonly traceId?: string;
+}) => Promise<readonly EventHeadLocator[]>;
+
+type LocateTrace = (input: {
+  readonly projectId: string;
+  readonly traceId: string;
 }) => Promise<readonly EventHeadLocator[]>;
 
 type DorisEventRow = Record<string, unknown> & {
@@ -128,6 +138,10 @@ function nullableNumber(value: unknown): number | null {
     throw new TypeError("Doris returned an invalid number");
   }
   return parsed;
+}
+
+function numberValue(value: unknown): number {
+  return nullableNumber(value) ?? 0;
 }
 
 function booleanValue(value: unknown): boolean {
@@ -286,15 +300,18 @@ function nextUtcDay(partitionDate: string): Date {
 
 export class DorisObservationsRepository {
   private readonly locateObservation: LocateObservation;
+  private readonly locateTrace: LocateTrace;
 
   constructor(
     private readonly dependencies: {
       readonly query: DorisQueryExecutor["query"];
       readonly locateObservation?: LocateObservation;
+      readonly locateTrace?: LocateTrace;
     },
   ) {
     this.locateObservation =
       dependencies.locateObservation ?? findObservationHeadLocators;
+    this.locateTrace = dependencies.locateTrace ?? findTraceEventHeadLocators;
   }
 
   async list(input: {
@@ -307,6 +324,8 @@ export class DorisObservationsRepository {
     };
     readonly cursor?: string;
     readonly limit: number;
+    readonly includeFullContent?: boolean;
+    readonly partitionDates?: readonly string[];
   }): Promise<DorisObservationsPage> {
     if (
       !Number.isSafeInteger(input.limit) ||
@@ -315,13 +334,20 @@ export class DorisObservationsRepository {
     ) {
       throw new RangeError("Doris observation page size is invalid");
     }
+    if (input.includeFullContent) {
+      buildSearchPlan({
+        range: input.range,
+        filtersRequireFullContent: true,
+      });
+    }
     const compiled = compileDorisVisibleEventsQuery({
       projectId: input.projectId,
       range: input.range,
-      projection: "list",
+      projection: input.includeFullContent ? "detail" : "list",
       filters: input.filters,
       search: input.search,
       cursor: decodeCursor(input.cursor),
+      partitionDates: input.partitionDates,
       limit: input.limit + 1,
     });
     const rows = await this.dependencies.query<DorisEventRow>(
@@ -336,6 +362,108 @@ export class DorisObservationsRepository {
           ? encodeCursor(items[items.length - 1]!)
           : null,
     };
+  }
+
+  async count(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly partitionDates?: readonly string[];
+  }): Promise<number> {
+    const scope = compileDorisVisibleEventScope(input);
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(*) AS count\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
+      scope.params,
+    );
+    return numberValue(rows[0]?.count);
+  }
+
+  private async resolveTraceRange(input: {
+    readonly projectId: string;
+    readonly traceId: string;
+  }): Promise<
+    | {
+        readonly range: AnalyticsTimeRange;
+        readonly partitionDates: readonly string[];
+      }
+    | undefined
+  > {
+    const locators = await this.locateTrace(input);
+    if (locators.length === 0) return undefined;
+    const partitionDates = [
+      ...new Set(locators.map(({ partitionDate }) => partitionDate)),
+    ].sort();
+    return {
+      range: {
+        from: new Date(`${partitionDates[0]}T00:00:00.000Z`),
+        to: nextUtcDay(partitionDates[partitionDates.length - 1]!),
+      },
+      partitionDates,
+    };
+  }
+
+  async listForTrace(input: {
+    readonly projectId: string;
+    readonly traceId: string;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly cursor?: string;
+    readonly limit: number;
+    readonly includeFullContent?: boolean;
+  }): Promise<DorisObservationsPage> {
+    const resolved = await this.resolveTraceRange({
+      projectId: input.projectId,
+      traceId: input.traceId,
+    });
+    if (!resolved) return { items: [], nextCursor: null };
+    return this.list({
+      ...input,
+      range: resolved.range,
+      filters: [
+        ...input.filters,
+        {
+          type: "string",
+          column: "traceId",
+          operator: "=",
+          value: input.traceId,
+        },
+      ],
+      partitionDates: resolved.partitionDates,
+    });
+  }
+
+  async countForTrace(input: {
+    readonly projectId: string;
+    readonly traceId: string;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+  }): Promise<number> {
+    const resolved = await this.resolveTraceRange(input);
+    if (!resolved) return 0;
+    return this.count({
+      ...input,
+      range: resolved.range,
+      filters: [
+        ...input.filters,
+        {
+          type: "string",
+          column: "traceId",
+          operator: "=",
+          value: input.traceId,
+        },
+      ],
+      partitionDates: resolved.partitionDates,
+    });
   }
 
   async get(input: {

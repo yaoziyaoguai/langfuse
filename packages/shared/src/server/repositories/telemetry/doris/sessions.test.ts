@@ -131,4 +131,16 @@ describe("Doris sessions repository", () => {
       expect.objectContaining({ code: "InvalidTimeRange", maxDays: 30 }),
     );
   });
+
+  it("counts matching sessions through the bounded visibility scope", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "3" }]);
+    const repository = new DorisSessionsRepository({ query });
+
+    await expect(
+      repository.count({ projectId: "project-1", range, filters: [] }),
+    ).resolves.toBe(3);
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "COUNT(DISTINCT e.session_id) AS count",
+    );
+  });
 });

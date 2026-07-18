@@ -37,7 +37,7 @@ export default withMiddlewares(
       querySchema: GetTraceV1Query,
       responseSchema: GetTraceV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.traceGet,
-      rejectInEventsOnlyMode: true,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         const { traceId } = query;
 

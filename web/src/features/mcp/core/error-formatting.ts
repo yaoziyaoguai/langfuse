@@ -72,6 +72,25 @@ export function formatErrorForUser(error: unknown): McpError {
     return new McpError(ErrorCode.InvalidRequest, error.message);
   }
 
+  if (
+    error instanceof InvalidRequestError &&
+    "code" in error &&
+    error.code === "InvalidTimeRange" &&
+    "maxDays" in error &&
+    "acceptedRange" in error
+  ) {
+    return new McpError(
+      ErrorCode.InvalidRequest,
+      JSON.stringify({
+        message: error.message,
+        error: "InvalidTimeRange",
+        code: "InvalidTimeRange",
+        maxDays: error.maxDays,
+        acceptedRange: error.acceptedRange,
+      }),
+    );
+  }
+
   if (error instanceof InvalidRequestError) {
     return new McpError(ErrorCode.InvalidRequest, error.message);
   }

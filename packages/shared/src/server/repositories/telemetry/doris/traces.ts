@@ -37,6 +37,9 @@ export type DorisTrace = {
   readonly tags: readonly string[];
   readonly inputPreview: string | null;
   readonly outputPreview: string | null;
+  readonly input?: unknown;
+  readonly output?: unknown;
+  readonly metadata?: Readonly<Record<string, unknown>>;
   readonly rootObservationId: string | null;
   readonly fallbackObservationId: string;
   readonly incomplete: boolean;
@@ -96,6 +99,13 @@ function stringArray(value: unknown): readonly string[] {
   return Array.isArray(parsed) ? parsed.map(String) : [];
 }
 
+function objectValue(value: unknown): Readonly<Record<string, unknown>> {
+  const parsed = parseJsonIfString(value);
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as Readonly<Record<string, unknown>>)
+    : {};
+}
+
 function decodeTrace(row: DorisTraceRow): DorisTrace {
   const timestamp = dateTime(row.trace_timestamp);
   const endTime = dateTime(row.trace_end_time);
@@ -117,6 +127,13 @@ function decodeTrace(row: DorisTraceRow): DorisTrace {
     tags: stringArray(row.tags),
     inputPreview: nullableString(row.input_preview),
     outputPreview: nullableString(row.output_preview),
+    ...(Object.hasOwn(row, "input") && { input: parseJsonIfString(row.input) }),
+    ...(Object.hasOwn(row, "output") && {
+      output: parseJsonIfString(row.output),
+    }),
+    ...(Object.hasOwn(row, "metadata") && {
+      metadata: objectValue(row.metadata),
+    }),
     rootObservationId: representativeIsRoot ? fallbackObservationId : null,
     fallbackObservationId,
     incomplete: !representativeIsRoot,
@@ -179,6 +196,7 @@ function compileTraceList(input: {
   readonly cursor?: string;
   readonly limit: number;
   readonly partitionDates?: readonly string[];
+  readonly includeFullContent?: boolean;
 }): { readonly sql: string; readonly params: readonly unknown[] } {
   if (
     !Number.isSafeInteger(input.limit) ||
@@ -210,6 +228,12 @@ function compileTraceList(input: {
       OR (trace_timestamp = ? AND trace_id < ?)
     )`
     : "";
+  const rankedFullContent = input.includeFullContent
+    ? ",\n    e.input,\n    e.output,\n    e.metadata"
+    : "";
+  const selectedFullContent = input.includeFullContent
+    ? ",\n  input,\n  output,\n  metadata"
+    : "";
   const params = [
     ...matchedEvents.params,
     ...partitionDates,
@@ -237,7 +261,7 @@ function compileTraceList(input: {
     e.\`version\`,
     e.tags,
     e.input_preview,
-    e.output_preview,
+    e.output_preview${rankedFullContent},
     ROW_NUMBER() OVER (
       PARTITION BY e.trace_id
       ORDER BY e.is_app_root DESC,
@@ -271,7 +295,7 @@ SELECT
   \`version\`,
   tags,
   input_preview,
-  output_preview,
+  output_preview${selectedFullContent},
   observation_count,
   total_input_tokens,
   total_output_tokens,
@@ -322,6 +346,23 @@ export class DorisTracesRepository {
     };
   }
 
+  async count(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+  }): Promise<number> {
+    const scope = compileDorisVisibleEventScope(input);
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(DISTINCT e.trace_id) AS count\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
+      scope.params,
+    );
+    return numberValue(rows[0]?.count);
+  }
+
   async get(input: {
     readonly projectId: string;
     readonly traceId: string;
@@ -349,6 +390,7 @@ export class DorisTracesRepository {
       ],
       limit: 1,
       partitionDates,
+      includeFullContent: true,
     });
     const rows = await this.dependencies.query<DorisTraceRow>(
       compiled.sql,

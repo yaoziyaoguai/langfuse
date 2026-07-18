@@ -187,6 +187,9 @@ describe("Doris traces repository", () => {
         tags: "[]",
         input_preview: null,
         output_preview: null,
+        input: '{"question":"price"}',
+        output: '{"answer":"ok"}',
+        metadata: '{"region":"eu"}',
         observation_count: "2",
         total_input_tokens: "0",
         total_output_tokens: "0",
@@ -202,6 +205,8 @@ describe("Doris traces repository", () => {
         id: "trace-midnight",
         observationCount: 2,
         incomplete: true,
+        input: { question: "price" },
+        metadata: { region: "eu" },
       }),
     );
     expect(locateTrace).toHaveBeenCalledWith({
@@ -209,8 +214,24 @@ describe("Doris traces repository", () => {
       traceId: "trace-midnight",
     });
     expect(query.mock.calls[0]?.[0]).toContain("e.partition_date IN (?, ?)");
+    expect(query.mock.calls[0]?.[0]).toContain("e.input");
     expect(query.mock.calls[0]?.[1]).toEqual(
       expect.arrayContaining(["2026-07-17", "2026-07-18", "trace-midnight"]),
+    );
+  });
+
+  it("counts distinct matching traces through the bounded visibility scope", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "4" }]);
+    const repository = new DorisTracesRepository({ query });
+
+    await expect(
+      repository.count({ projectId: "project-1", range, filters: [] }),
+    ).resolves.toBe(4);
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "COUNT(DISTINCT e.trace_id) AS count",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "project_deletion.project_id IS NULL",
     );
   });
 });
