@@ -76,6 +76,9 @@ interface MigrationFile {
   readonly checksum: string;
 }
 
+const ADD_COLUMN_STATEMENT =
+  /^ALTER\s+TABLE\s+`?([A-Za-z0-9_]+)`?\s+ADD\s+COLUMN\s+`?([A-Za-z0-9_]+)`?/i;
+
 function loadMigrations(): readonly MigrationFile[] {
   const files = readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
@@ -144,6 +147,28 @@ async function ensureVersionTable(
   });
 }
 
+async function schemaChangeAlreadyApplied(
+  conn: Connection,
+  database: string,
+  statement: string,
+  timeout: number,
+): Promise<boolean> {
+  const match = statement.match(ADD_COLUMN_STATEMENT);
+  if (!match?.[1] || !match[2]) return false;
+
+  const [rows] = (await conn.query({
+    sql: `
+      SELECT 1 AS present
+      FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = ? AND column_name = ?
+      LIMIT 1
+    `,
+    values: [database, match[1], match[2]],
+    timeout,
+  })) as unknown as [{ present?: number }[], unknown];
+  return rows.length === 1;
+}
+
 export interface MigrationResult {
   readonly applied: readonly string[];
   readonly skipped: readonly string[];
@@ -196,6 +221,16 @@ export async function runMigrations(
         continue;
       }
       for (const stmt of splitSqlStatements(mig.sql)) {
+        if (
+          await schemaChangeAlreadyApplied(
+            conn,
+            config.database,
+            stmt,
+            queryTimeoutMs,
+          )
+        ) {
+          continue;
+        }
         await conn.query({ sql: stmt, timeout: queryTimeoutMs });
       }
       await conn.query({

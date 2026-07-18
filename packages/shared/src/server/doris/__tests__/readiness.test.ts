@@ -9,7 +9,8 @@ import {
 
 const createTableByName: Record<string, string> = {
   events_current: `
-    CREATE TABLE events_current (... INDEX idx_inv_input (input),
+    CREATE TABLE events_current (... status_message TEXT,
+      INDEX idx_inv_input (input),
       INDEX idx_inv_output (output), INDEX idx_inv_name (name),
       INDEX idx_ng_input (input), INDEX idx_ng_output (output))
     UNIQUE KEY (project_id, partition_date, trace_id, span_id)

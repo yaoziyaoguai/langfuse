@@ -11,10 +11,15 @@ export const EXPECTED_DORIS_MIGRATIONS = [
     checksum:
       "26d3b1eeb51070d002f701929a376e9c43faf765ff712a70a6241637ad8cdfab",
   },
+  {
+    name: "0003_expand_events_status_message.sql",
+    checksum:
+      "0a46d6f871d0958b33f10494fbff31368a6b8f24c24be243076987b3a1774ab0",
+  },
 ] as const;
 
 export const SUPPORTED_DORIS_CANONICALIZER_VERSIONS = ["1"] as const;
-export const SUPPORTED_DORIS_SCHEMA_VERSIONS = [2] as const;
+export const SUPPORTED_DORIS_SCHEMA_VERSIONS = [3] as const;
 
 export type DorisReadinessCode =
   | "READY"
@@ -40,6 +45,7 @@ const PHYSICAL_SCHEMA_FINGERPRINTS: Readonly<
     "INDEX idx_inv_name",
     "INDEX idx_ng_input",
     "INDEX idx_ng_output",
+    "status_message TEXT",
   ],
   scores_current: [
     "UNIQUE KEY (project_id, score_date, score_id)",

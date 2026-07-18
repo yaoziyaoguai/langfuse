@@ -17,8 +17,24 @@ const refreeze = readFileSync(
   ),
   "utf8",
 );
+const statusMessageExpansion = readFileSync(
+  path.resolve(
+    __dirname,
+    "../../../../doris/migrations/0003_expand_events_status_message.sql",
+  ),
+  "utf8",
+);
 
 describe("Doris R1A schema contract", () => {
+  it("requires the forward events status-message expansion", () => {
+    expect(EXPECTED_DORIS_MIGRATIONS.map(({ name }) => name)).toContain(
+      "0003_expand_events_status_message.sql",
+    );
+    expect(statusMessageExpansion).toContain(
+      "ADD COLUMN status_message STRING NULL",
+    );
+  });
+
   it("does not enable global retention in dynamic partition settings", () => {
     expect(refreeze).not.toContain("dynamic_partition.");
     expect(refreeze).not.toContain("partition.retention_count");
@@ -52,9 +68,9 @@ describe("Doris R1A schema contract", () => {
     );
   });
 
-  it("keeps readiness checksums pinned to both immutable migrations", () => {
+  it("keeps readiness checksums pinned to every immutable migration", () => {
     expect(
-      [baseline, refreeze].map((sql) =>
+      [baseline, refreeze, statusMessageExpansion].map((sql) =>
         createHash("sha256").update(sql).digest("hex"),
       ),
     ).toEqual(EXPECTED_DORIS_MIGRATIONS.map(({ checksum }) => checksum));

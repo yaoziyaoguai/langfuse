@@ -83,6 +83,38 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
     await conn.end();
   }, 120_000);
 
+  it("repairs a missing expand-migration ledger row without repeating its DDL", async () => {
+    const conn = await createConnection({
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      password: cfg.password,
+      database: cfg.database,
+    });
+    await conn.query(`DELETE FROM _langfuse_schema_migrations WHERE name = ?`, [
+      "0003_expand_events_status_message.sql",
+    ]);
+    await conn.end();
+
+    const result = await runMigrations(cfg);
+    expect(result.applied).toEqual(["0003_expand_events_status_message.sql"]);
+
+    const verify = await createConnection({
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      password: cfg.password,
+      database: cfg.database,
+    });
+    const [columns] = (await verify.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
+      [cfg.database, "events_current", "status_message"],
+    )) as unknown as [unknown[], unknown];
+    expect(columns).toHaveLength(1);
+    await verify.end();
+  });
+
   it("is idempotent: re-running is a no-op", async () => {
     const result = await runMigrations(cfg);
     expect(result.applied).toEqual([]);
