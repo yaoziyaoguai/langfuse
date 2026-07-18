@@ -16,6 +16,7 @@ type AnalyticsControlClient = PrismaClient | Prisma.TransactionClient;
 type EntityHeadClaimOutcome =
   | "won"
   | "noop"
+  | "superseded"
   | "conflict"
   | "partition_conflict"
   | "stale_fence";
@@ -59,11 +60,12 @@ function classifyEntityHeadClaim(
   current: AnalyticsEntityHead,
   candidate: ClaimAnalyticsEntityHeadInput,
 ): AnalyticsEntityHeadClaimResult {
-  if (!samePartition(current.partitionDate, candidate.partitionDate)) {
-    return { outcome: "partition_conflict", head: current };
+  if (current.sourceVersion > candidate.sourceVersion) {
+    return { outcome: "superseded", head: current };
   }
 
   if (
+    samePartition(current.partitionDate, candidate.partitionDate) &&
     current.sourceVersion === candidate.sourceVersion &&
     current.canonicalPayloadHash === candidate.canonicalPayloadHash
   ) {
@@ -76,6 +78,10 @@ function classifyEntityHeadClaim(
     current.projectDeletionGeneration > candidate.projectDeletionGeneration
   ) {
     return { outcome: "stale_fence", head: current };
+  }
+
+  if (!samePartition(current.partitionDate, candidate.partitionDate)) {
+    return { outcome: "partition_conflict", head: current };
   }
 
   return { outcome: "conflict", head: current };
@@ -104,6 +110,41 @@ export async function claimAnalyticsEntityHead(
 ): Promise<AnalyticsEntityHeadClaimResult> {
   const client = input.client ?? prisma;
 
+  const advanceExistingHead = () =>
+    client.analyticsEntityHead.updateMany({
+      where: {
+        projectId: input.projectId,
+        entityType: input.entityType,
+        entityKey: input.entityKey,
+        sourceVersion: { lt: input.sourceVersion },
+        partitionDate: input.partitionDate,
+        fenceGeneration: { lte: input.fenceGeneration },
+        traceDeletionGeneration: { lte: input.traceDeletionGeneration },
+        projectDeletionGeneration: {
+          lte: input.projectDeletionGeneration,
+        },
+      },
+      data: {
+        operationId: input.operationId,
+        owningTraceId: input.owningTraceId,
+        sourceVersion: input.sourceVersion,
+        canonicalPayloadHash: input.canonicalPayloadHash,
+        canonicalizerVersion: input.canonicalizerVersion,
+        fenceGeneration: input.fenceGeneration,
+        traceDeletionGeneration: input.traceDeletionGeneration,
+        projectDeletionGeneration: input.projectDeletionGeneration,
+      },
+    });
+
+  let updated = await advanceExistingHead();
+
+  if (updated.count === 1) {
+    return {
+      outcome: "won",
+      head: await findEntityHeadOrThrow(client, input),
+    };
+  }
+
   if (input.expectedSourceVersion === null) {
     try {
       const head = await client.analyticsEntityHead.create({
@@ -125,45 +166,18 @@ export async function claimAnalyticsEntityHead(
       return { outcome: "won", head };
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
-      const current = await findEntityHeadOrThrow(client, input);
-      return classifyEntityHeadClaim(current, input);
+      updated = await advanceExistingHead();
+      if (updated.count === 1) {
+        return {
+          outcome: "won",
+          head: await findEntityHeadOrThrow(client, input),
+        };
+      }
     }
   }
 
-  if (input.sourceVersion <= input.expectedSourceVersion) {
-    const current = await findEntityHeadOrThrow(client, input);
-    return classifyEntityHeadClaim(current, input);
-  }
-
-  const updated = await client.analyticsEntityHead.updateMany({
-    where: {
-      projectId: input.projectId,
-      entityType: input.entityType,
-      entityKey: input.entityKey,
-      sourceVersion: input.expectedSourceVersion,
-      partitionDate: input.partitionDate,
-      fenceGeneration: { lte: input.fenceGeneration },
-      traceDeletionGeneration: { lte: input.traceDeletionGeneration },
-      projectDeletionGeneration: {
-        lte: input.projectDeletionGeneration,
-      },
-    },
-    data: {
-      operationId: input.operationId,
-      owningTraceId: input.owningTraceId,
-      sourceVersion: input.sourceVersion,
-      canonicalPayloadHash: input.canonicalPayloadHash,
-      canonicalizerVersion: input.canonicalizerVersion,
-      fenceGeneration: input.fenceGeneration,
-      traceDeletionGeneration: input.traceDeletionGeneration,
-      projectDeletionGeneration: input.projectDeletionGeneration,
-    },
-  });
-
   const current = await findEntityHeadOrThrow(client, input);
-  return updated.count === 1
-    ? { outcome: "won", head: current }
-    : classifyEntityHeadClaim(current, input);
+  return classifyEntityHeadClaim(current, input);
 }
 
 export async function advanceAnalyticsIngestionOperation({

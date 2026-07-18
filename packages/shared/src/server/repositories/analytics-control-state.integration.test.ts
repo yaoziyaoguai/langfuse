@@ -64,7 +64,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
     await prisma.$disconnect();
   }, 30_000);
 
-  it("allows exactly one concurrent entity-head create and preserves its partition", async () => {
+  it("atomically claims one payload per source version and preserves its partition", async () => {
     const base = {
       client: prisma,
       projectId,
@@ -88,7 +88,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
       }),
       controlState.claimAnalyticsEntityHead({
         ...base,
-        sourceVersion: 11n,
+        sourceVersion: 10n,
         canonicalPayloadHash: "hash-b",
         partitionDate: new Date("2026-07-17T00:00:00.000Z"),
       }),
@@ -102,21 +102,42 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
     const winner = results.find(({ outcome }) => outcome === "won");
     expect(winner).toBeDefined();
 
-    const replay = await controlState.claimAnalyticsEntityHead({
+    const samePayloadReplay = await controlState.claimAnalyticsEntityHead({
       ...base,
       sourceVersion: winner!.head.sourceVersion,
       canonicalPayloadHash: winner!.head.canonicalPayloadHash,
       partitionDate: winner!.head.partitionDate,
     });
-    expect(replay.outcome).toBe("noop");
+    expect(samePayloadReplay.outcome).toBe("noop");
 
-    const crossDayMutation = await controlState.claimAnalyticsEntityHead({
+    const laterVersion = await controlState.claimAnalyticsEntityHead({
       ...base,
       expectedSourceVersion: winner!.head.sourceVersion,
       sourceVersion: winner!.head.sourceVersion + 1n,
+      canonicalPayloadHash: "later-hash",
+      partitionDate: winner!.head.partitionDate,
+      fenceGeneration: 2n,
+    });
+    expect(laterVersion.outcome).toBe("won");
+    expect(laterVersion.head.sourceVersion).toBe(11n);
+
+    const supersededVersion = await controlState.claimAnalyticsEntityHead({
+      ...base,
+      expectedSourceVersion: null,
+      sourceVersion: 9n,
+      canonicalPayloadHash: "old-hash",
+      partitionDate: winner!.head.partitionDate,
+    });
+    expect(supersededVersion.outcome).toBe("superseded");
+    expect(supersededVersion.head.sourceVersion).toBe(11n);
+
+    const crossDayMutation = await controlState.claimAnalyticsEntityHead({
+      ...base,
+      expectedSourceVersion: laterVersion.head.sourceVersion,
+      sourceVersion: laterVersion.head.sourceVersion + 1n,
       canonicalPayloadHash: "new-hash",
       partitionDate: new Date("2026-07-18T00:00:00.000Z"),
-      fenceGeneration: 2n,
+      fenceGeneration: 3n,
     });
     expect(crossDayMutation.outcome).toBe("partition_conflict");
 
@@ -130,6 +151,53 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
       },
     });
     expect(persisted.partitionDate).toEqual(winner!.head.partitionDate);
+    expect(persisted.sourceVersion).toBe(11n);
+  });
+
+  it("converges concurrent first claims to the highest source version", async () => {
+    const base = {
+      client: prisma,
+      projectId,
+      operationId,
+      entityType: "EVENT" as const,
+      entityKey: `concurrent-version-event-${suffix}`,
+      owningTraceId: `trace-${suffix}`,
+      expectedSourceVersion: null,
+      canonicalizerVersion: "r1a-v1",
+      fenceGeneration: 1n,
+      traceDeletionGeneration: 0n,
+      projectDeletionGeneration: 0n,
+      partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+    };
+
+    const results = await Promise.all([
+      controlState.claimAnalyticsEntityHead({
+        ...base,
+        sourceVersion: 10n,
+        canonicalPayloadHash: "version-10",
+      }),
+      controlState.claimAnalyticsEntityHead({
+        ...base,
+        sourceVersion: 11n,
+        canonicalPayloadHash: "version-11",
+      }),
+    ]);
+
+    expect(results[1]?.outcome).toBe("won");
+    await expect(
+      prisma.analyticsEntityHead.findUniqueOrThrow({
+        where: {
+          projectId_entityType_entityKey: {
+            projectId,
+            entityType: "EVENT",
+            entityKey: base.entityKey,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      sourceVersion: 11n,
+      canonicalPayloadHash: "version-11",
+    });
   });
 
   it("rejects stale ingestion and deletion worker fences", async () => {
