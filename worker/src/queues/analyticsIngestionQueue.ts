@@ -1,5 +1,10 @@
 import type { AnalyticsIngestionOperation, PrismaClient } from "@prisma/client";
-import type { Job, JobsOptions, Processor } from "bullmq";
+import {
+  UnrecoverableError,
+  type Job,
+  type JobsOptions,
+  type Processor,
+} from "bullmq";
 import {
   AnalyticsIngestionQueue,
   AnalyticsIngestionQueueEventSchema,
@@ -7,6 +12,7 @@ import {
   claimAnalyticsIngestionOutbox,
   findAnalyticsIngestionOperationForProject,
   markAnalyticsIngestionOutboxPublished,
+  markAnalyticsIngestionRetrying,
   QueueJobs,
   QueueName,
   recordIncrement,
@@ -107,6 +113,7 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
   ) => Promise<CanonicalAnalyticsBatch>;
   readonly client?: PrismaClient;
   readonly findOperation?: typeof findAnalyticsIngestionOperationForProject;
+  readonly markRetrying?: typeof markAnalyticsIngestionRetrying;
 }): Processor<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]> {
   return async (
     job: Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>,
@@ -139,10 +146,29 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
       );
     }
 
-    const batch = await input.canonicalize(operation);
-    await input.sink.persist(batch);
-    recordIncrement("langfuse.analytics.ingestion.queue", 1, {
-      status: "terminal",
-    });
+    try {
+      const batch = await input.canonicalize(operation);
+      await input.sink.persist(batch);
+      recordIncrement("langfuse.analytics.ingestion.queue", 1, {
+        status: "terminal",
+      });
+    } catch (error) {
+      if (!(error instanceof AnalyticsPersistenceError)) throw error;
+      if (!error.retryable) {
+        throw new UnrecoverableError(error.message);
+      }
+      const attempts = job.opts.attempts ?? 1;
+      const exhausted = job.attemptsMade + 1 >= attempts;
+      await (input.markRetrying ?? markAnalyticsIngestionRetrying)({
+        client: input.client ?? prisma,
+        operationId: operation.id,
+        projectId: operation.projectId,
+        reasonCode: exhausted ? "MAX_RETRIES_EXHAUSTED" : error.code,
+      });
+      recordIncrement("langfuse.analytics.ingestion.queue", 1, {
+        status: exhausted ? "retry_exhausted" : "retrying",
+      });
+      throw error;
+    }
   };
 }

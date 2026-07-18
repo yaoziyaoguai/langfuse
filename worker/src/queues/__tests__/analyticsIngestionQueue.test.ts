@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { Job } from "bullmq";
 import {
+  AnalyticsPersistenceError,
   QueueJobs,
   QueueName,
   type CanonicalAnalyticsBatch,
@@ -17,6 +18,8 @@ const now = new Date("2026-07-18T13:00:00.000Z");
 
 function queueJob(operationId: string, projectId: string) {
   return {
+    attemptsMade: 0,
+    opts: { attempts: 10 },
     data: {
       timestamp: now,
       id: operationId,
@@ -136,5 +139,60 @@ describe("analytics ingestion durable queue", () => {
     ).resolves.toBeUndefined();
     expect(canonicalize).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("fails non-retryable persistence errors without consuming all attempts", async () => {
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist: vi.fn() },
+      canonicalize: vi.fn(async () => {
+        throw new AnalyticsPersistenceError(
+          "ANALYTICS_VALIDATION_ERROR",
+          false,
+        );
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "QUEUED",
+      })) as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+  });
+
+  it("records retry exhaustion before leaving the body-free job in BullMQ failed state", async () => {
+    const markRetrying = vi.fn(async () => true);
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist: vi.fn() },
+      canonicalize: vi.fn(async () => {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true);
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "QUEUED",
+      })) as never,
+      markRetrying: markRetrying as never,
+    });
+    const job = queueJob("operation-1", "project-1");
+    job.attemptsMade = 9;
+    job.opts.attempts = 10;
+
+    await expect(processor(job, "token")).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+    });
+    expect(markRetrying).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "operation-1",
+        projectId: "project-1",
+        reasonCode: "MAX_RETRIES_EXHAUSTED",
+      }),
+    );
   });
 });

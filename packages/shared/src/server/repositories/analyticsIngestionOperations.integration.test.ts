@@ -107,6 +107,23 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         now: new Date("2026-07-18T12:00:03.000Z"),
       }),
     ).resolves.toBe(true);
+    await expect(
+      repository.markAnalyticsIngestionRetrying({
+        client: prisma,
+        operationId: input.operationId,
+        projectId,
+        reasonCode: "MAX_RETRIES_EXHAUSTED",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      prisma.analyticsIngestionOperation.findUniqueOrThrow({
+        where: { id: input.operationId },
+      }),
+    ).resolves.toMatchObject({
+      status: "RETRYING",
+      lastErrorCode: "MAX_RETRIES_EXHAUSTED",
+      terminalAt: null,
+    });
 
     await expect(
       repository.createAnalyticsIngestionReceipt({

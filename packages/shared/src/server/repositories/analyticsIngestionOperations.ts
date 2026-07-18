@@ -499,6 +499,34 @@ export async function getAnalyticsIngestionStatusForProject(input: {
   };
 }
 
+export async function markAnalyticsIngestionRetrying(input: {
+  client?: PrismaClient;
+  operationId: string;
+  projectId: string;
+  reasonCode: string;
+}): Promise<boolean> {
+  if (
+    !input.operationId ||
+    !input.projectId ||
+    !/^[A-Z0-9_]{1,64}$/.test(input.reasonCode)
+  ) {
+    throw new TypeError("Invalid analytics ingestion retry state");
+  }
+  const client = input.client ?? prisma;
+  const updated = await client.analyticsIngestionOperation.updateMany({
+    where: {
+      id: input.operationId,
+      projectId: input.projectId,
+      terminalAt: null,
+    },
+    data: {
+      status: "RETRYING",
+      lastErrorCode: input.reasonCode,
+    },
+  });
+  return updated.count === 1;
+}
+
 type AnalyticsCandidateDispositionInput = {
   readonly candidateKey: string;
   readonly disposition: AnalyticsCandidateDisposition;
