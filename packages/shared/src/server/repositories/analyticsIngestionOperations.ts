@@ -432,6 +432,73 @@ export function findAnalyticsIngestionOperationForProject(input: {
   });
 }
 
+export async function getAnalyticsIngestionStatusForProject(input: {
+  client?: PrismaClient | Prisma.TransactionClient;
+  operationId: string;
+  projectId: string;
+}) {
+  const client = input.client ?? prisma;
+  const operation = await client.analyticsIngestionOperation.findFirst({
+    where: { id: input.operationId, projectId: input.projectId },
+    select: {
+      id: true,
+      projectId: true,
+      status: true,
+      manifestState: true,
+      acceptedAt: true,
+      recoverableUntil: true,
+      statusExpiresAt: true,
+      visibleAt: true,
+      terminalAt: true,
+      cancellationReasonCode: true,
+      lastErrorCode: true,
+      outbox: { select: { status: true } },
+      candidates: {
+        orderBy: { candidateKey: "asc" },
+        select: {
+          candidateKey: true,
+          entityType: true,
+          entityKey: true,
+          owningTraceId: true,
+          disposition: true,
+          loadBatchId: true,
+          reasonCode: true,
+        },
+      },
+      loadBatches: {
+        orderBy: [{ targetTable: "asc" }, { logicalBatchId: "asc" }],
+        select: {
+          id: true,
+          targetTable: true,
+          status: true,
+          totalRows: true,
+          filteredRows: true,
+          lastErrorCode: true,
+          visibleAt: true,
+        },
+      },
+    },
+  });
+  if (!operation) return null;
+
+  return {
+    projectId: operation.projectId,
+    operationId: operation.id,
+    status: operation.status,
+    manifest: operation.manifestState,
+    outbox: operation.outbox?.status ?? "PENDING",
+    acceptedAt: operation.acceptedAt,
+    recoverableUntil: operation.recoverableUntil,
+    statusExpiresAt: operation.statusExpiresAt,
+    visibleAt: operation.visibleAt,
+    terminalAt: operation.terminalAt,
+    reasonCode:
+      operation.cancellationReasonCode ?? operation.lastErrorCode ?? null,
+    candidates: operation.candidates,
+    loads: operation.loadBatches,
+  };
+}
+
 type AnalyticsCandidateDispositionInput = {
   readonly candidateKey: string;
   readonly disposition: AnalyticsCandidateDisposition;

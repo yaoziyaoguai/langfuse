@@ -60,6 +60,27 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         where: { operationId: input.operationId },
       }),
     ).resolves.toBe(1);
+    await expect(
+      repository.getAnalyticsIngestionStatusForProject({
+        client: prisma,
+        operationId: input.operationId,
+        projectId,
+      }),
+    ).resolves.toMatchObject({
+      operationId: input.operationId,
+      status: "ACCEPTED",
+      manifest: "PENDING",
+      outbox: "PENDING",
+      candidates: [],
+      loads: [],
+    });
+    await expect(
+      repository.getAnalyticsIngestionStatusForProject({
+        client: prisma,
+        operationId: input.operationId,
+        projectId: "other-project",
+      }),
+    ).resolves.toBeNull();
 
     const claimed = await repository.claimAnalyticsIngestionOutbox({
       client: prisma,

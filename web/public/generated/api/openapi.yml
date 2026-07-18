@@ -1837,6 +1837,54 @@ paths:
               schema: {}
         '503':
           description: ''
+  /api/public/ingestion-operations/{operationId}:
+    get:
+      description: >-
+        Get durable persistence status for an accepted ingestion operation.
+        Operation IDs are scoped to the authenticated project.
+      operationId: ingestion_get-operation
+      tags:
+        - Ingestion
+      parameters:
+        - name: operationId
+          in: path
+          description: The operation ID returned when ingestion was accepted.
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsIngestionOperation'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: ''
+          content:
+            application/json:
+              schema: {}
+        '403':
+          description: ''
+          content:
+            application/json:
+              schema: {}
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema: {}
+        '405':
+          description: ''
+          content:
+            application/json:
+              schema: {}
+      security: *ref_0
   /api/public/ingestion:
     post:
       description: >-
@@ -11091,6 +11139,176 @@ components:
       required:
         - version
         - status
+    AnalyticsIngestionOperation:
+      title: AnalyticsIngestionOperation
+      type: object
+      properties:
+        operationId:
+          type: string
+        status:
+          $ref: '#/components/schemas/AnalyticsIngestionOperationStatus'
+        manifest:
+          $ref: '#/components/schemas/AnalyticsIngestionManifestState'
+        outbox:
+          $ref: '#/components/schemas/AnalyticsIngestionOutboxStatus'
+        acceptedAt:
+          type: string
+          format: date-time
+        recoverableUntil:
+          type: string
+          format: date-time
+        statusExpiresAt:
+          type: string
+          format: date-time
+        visibleAt:
+          type: string
+          format: date-time
+          nullable: true
+        terminalAt:
+          type: string
+          format: date-time
+          nullable: true
+        reasonCode:
+          type: string
+          nullable: true
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsIngestionCandidate'
+        loads:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsIngestionLoad'
+        guidance:
+          type: string
+      required:
+        - operationId
+        - status
+        - manifest
+        - outbox
+        - acceptedAt
+        - recoverableUntil
+        - statusExpiresAt
+        - visibleAt
+        - terminalAt
+        - reasonCode
+        - candidates
+        - loads
+        - guidance
+    AnalyticsIngestionCandidate:
+      title: AnalyticsIngestionCandidate
+      type: object
+      properties:
+        candidateKey:
+          type: string
+          description: Opaque stable identifier for this operation child.
+        entityType:
+          $ref: '#/components/schemas/AnalyticsIngestionEntityType'
+        disposition:
+          $ref: '#/components/schemas/AnalyticsIngestionCandidateDisposition'
+        loadBatchId:
+          type: string
+          nullable: true
+        reasonCode:
+          type: string
+          nullable: true
+        entityLink:
+          type: string
+          nullable: true
+          description: >-
+            Product URL when the entity is visible and has a supported
+            destination.
+      required:
+        - candidateKey
+        - entityType
+        - disposition
+        - loadBatchId
+        - reasonCode
+        - entityLink
+    AnalyticsIngestionLoad:
+      title: AnalyticsIngestionLoad
+      type: object
+      properties:
+        id:
+          type: string
+        entityType:
+          $ref: '#/components/schemas/AnalyticsIngestionEntityType'
+        status:
+          $ref: '#/components/schemas/AnalyticsIngestionLoadStatus'
+        totalRows:
+          type: integer
+          nullable: true
+        filteredRows:
+          type: integer
+          nullable: true
+        lastErrorCode:
+          type: string
+          nullable: true
+        visibleAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - entityType
+        - status
+        - totalRows
+        - filteredRows
+        - lastErrorCode
+        - visibleAt
+    AnalyticsIngestionOperationStatus:
+      title: AnalyticsIngestionOperationStatus
+      type: string
+      enum:
+        - ACCEPTED
+        - QUEUED
+        - PERSISTED
+        - VISIBLE
+        - RETRYING
+        - PARTIAL_FAILED
+        - QUARANTINED
+        - UNRECOVERABLE
+        - CANCELLED_BY_DELETION
+        - COMPLETED_WITH_CANCELLATIONS
+    AnalyticsIngestionManifestState:
+      title: AnalyticsIngestionManifestState
+      type: string
+      enum:
+        - PENDING
+        - CANDIDATE_PUBLISHED
+        - FROZEN
+    AnalyticsIngestionOutboxStatus:
+      title: AnalyticsIngestionOutboxStatus
+      type: string
+      enum:
+        - PENDING
+        - PUBLISHED
+    AnalyticsIngestionEntityType:
+      title: AnalyticsIngestionEntityType
+      type: string
+      enum:
+        - EVENT
+        - SCORE
+        - FILE_REFERENCE
+    AnalyticsIngestionCandidateDisposition:
+      title: AnalyticsIngestionCandidateDisposition
+      type: string
+      enum:
+        - PENDING
+        - LOAD_REQUIRED
+        - NOOP
+        - QUARANTINED
+        - CANCELLED_BY_DELETION
+    AnalyticsIngestionLoadStatus:
+      title: AnalyticsIngestionLoadStatus
+      type: string
+      enum:
+        - PENDING
+        - LOADING
+        - VISIBLE
+        - UNKNOWN
+        - FAILED
+        - CANCELLED_BY_DELETION
     IngestionEvent:
       title: IngestionEvent
       oneOf:

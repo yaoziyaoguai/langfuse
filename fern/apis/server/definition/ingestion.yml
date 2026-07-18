@@ -6,6 +6,16 @@ service:
   auth: true
   base-path: /api/public
   endpoints:
+    get-operation:
+      docs: Get durable persistence status for an accepted ingestion operation. Operation IDs are scoped to the authenticated project.
+      method: GET
+      path: /ingestion-operations/{operationId}
+      path-parameters:
+        operationId:
+          type: string
+          docs: The operation ID returned when ingestion was accepted.
+      response: AnalyticsIngestionOperation
+
     batch:
       availability:
         status: deprecated
@@ -107,6 +117,92 @@ service:
               errors: []
 
 types:
+  AnalyticsIngestionOperation:
+    properties:
+      operationId: string
+      status: AnalyticsIngestionOperationStatus
+      manifest: AnalyticsIngestionManifestState
+      outbox: AnalyticsIngestionOutboxStatus
+      acceptedAt: datetime
+      recoverableUntil: datetime
+      statusExpiresAt: datetime
+      visibleAt: nullable<datetime>
+      terminalAt: nullable<datetime>
+      reasonCode: nullable<string>
+      candidates: list<AnalyticsIngestionCandidate>
+      loads: list<AnalyticsIngestionLoad>
+      guidance: string
+
+  AnalyticsIngestionCandidate:
+    properties:
+      candidateKey:
+        type: string
+        docs: Opaque stable identifier for this operation child.
+      entityType: AnalyticsIngestionEntityType
+      disposition: AnalyticsIngestionCandidateDisposition
+      loadBatchId: nullable<string>
+      reasonCode: nullable<string>
+      entityLink:
+        type: nullable<string>
+        docs: Product URL when the entity is visible and has a supported destination.
+
+  AnalyticsIngestionLoad:
+    properties:
+      id: string
+      entityType: AnalyticsIngestionEntityType
+      status: AnalyticsIngestionLoadStatus
+      totalRows: nullable<integer>
+      filteredRows: nullable<integer>
+      lastErrorCode: nullable<string>
+      visibleAt: nullable<datetime>
+
+  AnalyticsIngestionOperationStatus:
+    enum:
+      - ACCEPTED
+      - QUEUED
+      - PERSISTED
+      - VISIBLE
+      - RETRYING
+      - PARTIAL_FAILED
+      - QUARANTINED
+      - UNRECOVERABLE
+      - CANCELLED_BY_DELETION
+      - COMPLETED_WITH_CANCELLATIONS
+
+  AnalyticsIngestionManifestState:
+    enum:
+      - PENDING
+      - CANDIDATE_PUBLISHED
+      - FROZEN
+
+  AnalyticsIngestionOutboxStatus:
+    enum:
+      - PENDING
+      - PUBLISHED
+
+  AnalyticsIngestionEntityType:
+    enum:
+      - EVENT
+      - SCORE
+      - FILE_REFERENCE
+
+  AnalyticsIngestionCandidateDisposition:
+    enum:
+      - PENDING
+      - LOAD_REQUIRED
+      - NOOP
+      - QUARANTINED
+      - CANCELLED_BY_DELETION
+
+  AnalyticsIngestionLoadStatus:
+    enum:
+      - PENDING
+      - LOADING
+      - VISIBLE
+      - UNKNOWN
+      - FAILED
+      - CANCELLED_BY_DELETION
+
   IngestionEvent:
     discriminant: "type"
     union:
