@@ -58,6 +58,7 @@ import {
 import { tokenCountAsync } from "../../features/tokenisation/async-usage";
 import { tokenCount } from "../../features/tokenisation/usage";
 import { ClickhouseWriter, TableName } from "../ClickhouseWriter";
+import { EventCanonicalizer } from "../EventCanonicalizer";
 import {
   convertJsonSchemaToRecord,
   convertPostgresJsonToMetadataRecord,
@@ -67,17 +68,6 @@ import {
 import { randomUUID } from "crypto";
 import { SpanKind } from "@opentelemetry/api";
 import { ClickhouseReadSkipCache } from "../../utils/clickhouseReadSkipCache";
-
-/**
- * Parse a value to a UInt16-compatible number (0–65535).
- * Returns undefined if the value is nullish or not a valid UInt16 integer.
- */
-function parseUInt16(value: string | null | undefined): number | undefined {
-  if (value == null) return undefined;
-  const num = parseInt(value, 10);
-  if (!Number.isInteger(num) || num < 0 || num > 65535) return undefined;
-  return num;
-}
 
 export type EventInput = InternalTraceEventInput;
 type InsertRecord =
@@ -148,6 +138,7 @@ const immutableEntityKeys: {
 
 export class IngestionService {
   private promptService: PromptService;
+  private eventCanonicalizer: EventCanonicalizer;
 
   constructor(
     private redis: Redis | Cluster,
@@ -156,6 +147,48 @@ export class IngestionService {
     private clickhouseClient: ClickhouseClientType,
   ) {
     this.promptService = new PromptService(prisma, redis);
+    this.eventCanonicalizer = new EventCanonicalizer({
+      warnOnUsageTotalMismatch: (usage, identity) =>
+        this.warnOnUsageTotalMismatch(
+          usage,
+          { id: identity.spanId, project_id: identity.projectId },
+          "events",
+        ),
+      resolvePrompt: async ({ projectId, promptName, promptVersion }) => {
+        const prompt = await this.promptService.getPrompt({
+          projectId,
+          promptName,
+          version: promptVersion,
+          label: undefined,
+        });
+        return prompt
+          ? { id: prompt.id, name: prompt.name, version: prompt.version }
+          : null;
+      },
+      resolveGenerationUsage: async (input) => {
+        const usage = await this.getGenerationUsage({
+          projectId: input.projectId,
+          observationRecord: {
+            id: input.spanId,
+            project_id: input.projectId,
+            trace_id: input.traceId,
+            provided_model_name: input.providedModelName,
+            provided_usage_details: { ...input.providedUsageDetails },
+            provided_cost_details: { ...input.providedCostDetails },
+            input: input.input,
+            output: input.output,
+          },
+        });
+        return {
+          internalModelId: usage.internal_model_id,
+          usageDetails: usage.usage_details,
+          costDetails: usage.cost_details,
+          totalCost: usage.total_cost,
+          usagePricingTierId: usage.usage_pricing_tier_id,
+          usagePricingTierName: usage.usage_pricing_tier_name,
+        };
+      },
+    });
   }
 
   public async mergeAndWrite(params: MergeAndWriteParams): Promise<void> {
@@ -235,51 +268,10 @@ export class IngestionService {
       `Creating event record for project ${eventData.projectId} and span ${eventData.spanId}`,
     );
 
-    // processToEvent can keep normalized input/output as objects so tool data
-    // can be extracted before write time. EventRecordInsertType stores both
-    // fields as strings, so stringify at this schema boundary.
-    const input = this.stringify(eventData.input);
-    const output = this.stringify(eventData.output);
-
-    // Runs outside the modelName gate below so model-less events with provided
-    // usage are still checked.
-    this.warnOnUsageTotalMismatch(
-      eventData.providedUsageDetails ?? {},
-      { id: eventData.spanId, project_id: eventData.projectId },
-      "events",
-    );
-
-    // Perform lookups for prompt and model/usage enrichment
-    const [prompt, generationUsage] = await Promise.all([
-      // Lookup prompt by name and version
-      eventData.promptName && eventData.promptVersion
-        ? this.promptService.getPrompt({
-            projectId: eventData.projectId,
-            promptName: eventData.promptName,
-            version:
-              typeof eventData.promptVersion === "string"
-                ? parseInt(eventData.promptVersion, 10)
-                : eventData.promptVersion,
-            label: undefined,
-          })
-        : null,
-      // Lookup model and enrich usage/cost details (includes tokenization if needed)
-      eventData.modelName
-        ? this.getGenerationUsage({
-            projectId: eventData.projectId,
-            observationRecord: {
-              id: eventData.spanId,
-              project_id: eventData.projectId,
-              trace_id: eventData.traceId,
-              provided_model_name: eventData.modelName,
-              provided_usage_details: eventData.providedUsageDetails ?? {},
-              provided_cost_details: eventData.providedCostDetails ?? {},
-              input,
-              output,
-            },
-          })
-        : null,
-    ]);
+    const enriched = await this.eventCanonicalizer.enrich({
+      eventData,
+      rawObjectKey: fileKey,
+    });
 
     const now = this.getMicrosecondTimestamp();
 
@@ -306,8 +298,8 @@ export class IngestionService {
       name: eventData.name ?? "",
       type: eventData.type ?? "SPAN",
       environment: eventData.environment ?? "default",
-      version: eventData.version,
-      release: eventData.release,
+      version: enriched.version ?? undefined,
+      release: enriched.release ?? undefined,
 
       tags: eventData.tags ?? [],
       bookmarked: eventData.bookmarked ?? false,
@@ -315,7 +307,7 @@ export class IngestionService {
       is_app_root: eventData.isAppRoot ?? false,
 
       // Trace-level attributes: Name/User/session
-      trace_name: eventData.traceName,
+      trace_name: enriched.traceName ?? undefined,
       user_id: eventData.userId,
       session_id: eventData.sessionId,
 
@@ -331,29 +323,23 @@ export class IngestionService {
         : null,
 
       // Prompt
-      prompt_id: prompt?.id || "",
+      prompt_id: enriched.promptId ?? "",
       prompt_name: eventData.promptName,
-      prompt_version: parseUInt16(eventData.promptVersion),
+      prompt_version: enriched.promptVersion ?? undefined,
 
       // Model
-      model_id: generationUsage?.internal_model_id || "",
+      model_id: enriched.internalModelId ?? "",
       provided_model_name: eventData.modelName,
-      model_parameters: eventData.modelParameters
-        ? typeof eventData.modelParameters === "string"
-          ? JSON.parse(eventData.modelParameters)
-          : eventData.modelParameters
-        : {},
+      model_parameters: { ...enriched.modelParameters },
 
       // Usage & Cost
-      provided_usage_details: eventData.providedUsageDetails ?? {},
-      usage_details:
-        generationUsage?.usage_details ?? eventData.usageDetails ?? {},
-      provided_cost_details: eventData.providedCostDetails ?? {},
-      cost_details:
-        generationUsage?.cost_details ?? eventData.costDetails ?? {},
+      provided_usage_details: { ...enriched.providedUsageDetails },
+      usage_details: { ...enriched.usageDetails },
+      provided_cost_details: { ...enriched.providedCostDetails },
+      cost_details: { ...enriched.costDetails },
 
-      usage_pricing_tier_id: generationUsage?.usage_pricing_tier_id,
-      usage_pricing_tier_name: generationUsage?.usage_pricing_tier_name,
+      usage_pricing_tier_id: enriched.usagePricingTierId ?? undefined,
+      usage_pricing_tier_name: enriched.usagePricingTierName ?? undefined,
 
       // Tool Calls
       tool_definitions: eventData.toolDefinitions ?? {},
@@ -361,8 +347,8 @@ export class IngestionService {
       tool_call_names: eventData.toolCallNames ?? [],
 
       // I/O
-      input,
-      output,
+      input: enriched.inputForUsage,
+      output: enriched.outputForUsage,
 
       // Metadata
       metadata_names: metadataNames,

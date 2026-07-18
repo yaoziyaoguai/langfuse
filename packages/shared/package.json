@@ -31,6 +31,10 @@
       "import": "./dist/src/server/index.js",
       "require": "./dist/src/server/index.js"
     },
+    "./analytics-persistence": {
+      "import": "./dist/src/server/analytics-persistence/index.js",
+      "require": "./dist/src/server/analytics-persistence/index.js"
+    },
     "./src/server/auth/apiKeys": {
       "import": "./dist/src/server/auth/apiKeys.js",
       "require": "./dist/src/server/auth/apiKeys.js"

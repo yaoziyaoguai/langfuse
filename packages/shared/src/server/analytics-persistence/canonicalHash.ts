@@ -1,193 +1,277 @@
-// U3 storage-neutral canonical Source Version Contract — pure logic core.
-//
-// The timestamp-token normalization, typed-identity encoding, and canonical
-// payload hash that the Doris physical design (U1), the durable writer (U4),
-// and the read compiler (U5) depend on. No Doris, no ClickHouse, no physical
-// row type crosses this boundary; these functions are deterministic and free of
-// processing-clock / arrival-order dependence.
-//
-// Invariants (frozen by the plan PRD §6.2 and the U1 corpus):
-//   * version_token = UTC Unix-epoch NANOSECONDS as a checked signed BIGINT.
-//     Equivalent RFC3339 / protobuf / decimal expressions yield the same token.
-//     TypeScript never rounds through `number` (lossy beyond 2^53). Ordinary
-//     sequence < INT64_MAX; a terminal delete carries INT64_MAX.
-//   * event identity = collision-free, length-prefixed (trace_id, span_id) pair.
-//   * canonical_payload_hash = SHA-256 of a domain-separated, length-prefixed,
-//     key-sorted tuple of schema_version + typed identity + normalized version
-//     token + deterministic canonical child JSON. Arrays and Unicode code points
-//     are preserved verbatim (no content-rearranging normalization).
-
 import { createHash } from "node:crypto";
 
+export const INT64_MIN = -9_223_372_036_854_775_808n;
 export const INT64_MAX = 9_223_372_036_854_775_807n;
-
-// ---------------------------------------------------------------------------
-// Version token normalization
-// ---------------------------------------------------------------------------
 
 export type VersionTokenInput =
   | bigint
   | string
-  | { readonly seconds: number | string | bigint; readonly nanos: number };
+  | {
+      readonly seconds: number | string | bigint;
+      readonly nanos: number;
+    };
 
-/**
- * Normalize a raw source-time expression to UTC Unix-epoch nanoseconds (BigInt).
- * Equivalent RFC3339 / decimal-epoch-nanos / protobuf {seconds,nanos} inputs
- * collapse to the same token. Throws on unparseable input or values > INT64_MAX
- * (the reserved terminal-delete token boundary).
- */
-export function normalizeVersionToken(input: VersionTokenInput): bigint {
-  let nanos: bigint;
-  if (typeof input === "bigint") {
-    nanos = input;
-  } else if (typeof input === "string") {
-    nanos = parseTimeString(input);
-  } else if (
-    typeof input === "object" &&
-    input !== null &&
-    "seconds" in input
+const RFC3339_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function parseRfc3339(value: string): bigint {
+  const match = RFC3339_RE.exec(value);
+  if (!match) throw new Error("Invalid RFC3339 source timestamp");
+  const [, year, month, day, hour, minute, second, fraction, offset] = match;
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  const h = Number(hour);
+  const min = Number(minute);
+  const sec = Number(second);
+  const maxDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (
+    m < 1 ||
+    m > 12 ||
+    d < 1 ||
+    d > maxDay ||
+    h > 23 ||
+    min > 59 ||
+    sec > 59
   ) {
-    const secs = BigInt(input.seconds);
-    const ns = BigInt(input.nanos ?? 0);
-    nanos = secs * 1_000_000_000n + ns;
+    throw new Error("Invalid RFC3339 source timestamp");
+  }
+  if (offset !== "Z") {
+    const offsetHour = Number(offset.slice(1, 3));
+    const offsetMinute = Number(offset.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) {
+      throw new Error("Invalid RFC3339 source timestamp");
+    }
+  }
+  const wholeSecondMs = Date.parse(
+    `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`,
+  );
+  if (!Number.isFinite(wholeSecondMs)) {
+    throw new Error("Invalid RFC3339 source timestamp");
+  }
+  const nanos = BigInt((fraction ?? "").padEnd(9, "0"));
+  return BigInt(wholeSecondMs) * 1_000_000n + nanos;
+}
+
+export function normalizeVersionToken(input: VersionTokenInput): bigint {
+  let token: bigint;
+  if (typeof input === "bigint") {
+    token = input;
+  } else if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) throw new Error("Source timestamp is required");
+    token = /^-?\d+$/.test(trimmed) ? BigInt(trimmed) : parseRfc3339(trimmed);
   } else {
-    throw new Error(
-      `Cannot normalize version token: unsupported input ${String(input)}`,
-    );
+    if (
+      (typeof input.seconds === "number" &&
+        !Number.isSafeInteger(input.seconds)) ||
+      !Number.isInteger(input.nanos) ||
+      input.nanos < 0 ||
+      input.nanos > 999_999_999
+    ) {
+      throw new Error("Invalid protobuf source timestamp");
+    }
+    token = BigInt(input.seconds) * 1_000_000_000n + BigInt(input.nanos);
   }
-  if (nanos > INT64_MAX) {
-    throw new Error(
-      `Version token ${nanos} exceeds INT64_MAX (reserved for terminal delete)`,
-    );
+  if (token < INT64_MIN || token >= INT64_MAX) {
+    throw new Error("Source timestamp is outside the supported sequence range");
   }
-  return nanos;
+  return token;
 }
 
-const ISO_RE =
-  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})?$/;
-
-function parseTimeString(s: string): bigint {
-  const trimmed = s.trim();
-  if (trimmed === "") {
-    throw new Error("Cannot normalize empty version token");
+export function partitionDateFromVersionToken(token: bigint): string {
+  const millis =
+    token >= 0n ? token / 1_000_000n : (token - 999_999n) / 1_000_000n;
+  const asNumber = Number(millis);
+  const date = new Date(asNumber);
+  if (!Number.isSafeInteger(asNumber) || Number.isNaN(date.getTime())) {
+    throw new Error("Source timestamp is outside the supported calendar range");
   }
-  // All-digits => decimal epoch-nanoseconds.
-  if (/^-?\d+$/.test(trimmed)) {
-    return BigInt(trimmed);
-  }
-  const m = ISO_RE.exec(trimmed);
-  if (!m) {
-    throw new Error(`Cannot parse version token timestamp: ${s}`);
-  }
-  const secondsMs = Date.parse(`${m[1]}${m[3] ?? "Z"}`);
-  if (!Number.isFinite(secondsMs)) {
-    throw new Error(`Cannot parse version token timestamp: ${s}`);
-  }
-  const frac = m[2] ? m[2].padEnd(9, "0").slice(0, 9) : "000000000";
-  return BigInt(secondsMs) * 1_000_000n + BigInt(frac);
+  return date.toISOString().slice(0, 10);
 }
-
-// ---------------------------------------------------------------------------
-// Typed event identity (collision-free, length-prefixed)
-// ---------------------------------------------------------------------------
 
 export interface EventIdentity {
-  readonly project_id: string;
-  readonly partition_date: string; // immutable UTC date (YYYY-MM-DD)
-  readonly trace_id: string;
-  readonly span_id: string;
+  readonly projectId: string;
+  readonly partitionDate: string;
+  readonly traceId: string;
+  readonly spanId: string;
 }
 
-/**
- * Length-prefixed encoding of (project_id, partition_date, trace_id, span_id).
- * Length-prefixing prevents ambiguous concatenation collisions such as
- * (trace, 12spans) vs (trace1, 2spans). Reversible by toEventIdentity.
- */
-export function encodeEventIdentity(id: EventIdentity): string {
-  return (
-    lengthPrefix(id.project_id) +
-    lengthPrefix(id.partition_date) +
-    lengthPrefix(id.trace_id) +
-    lengthPrefix(id.span_id)
-  );
+export interface ScoreIdentity {
+  readonly projectId: string;
+  readonly partitionDate: string;
+  readonly scoreId: string;
 }
 
-export function toEventIdentity(encoded: string): EventIdentity {
-  let rest = encoded;
-  const fields: string[] = [];
-  for (let i = 0; i < 4 && rest.length > 0; i++) {
-    const [value, next] = readLengthPrefix(rest);
-    fields.push(value);
-    rest = next;
+export interface FileReferenceIdentity {
+  readonly projectId: string;
+  readonly partitionDate: string;
+  readonly entityType: "EVENT" | "SCORE";
+  readonly entityId: string;
+  readonly fileId: string;
+}
+
+function encodeField(value: string): Buffer {
+  const bytes = Buffer.from(value, "utf8");
+  return Buffer.concat([Buffer.from(`${bytes.byteLength}:`, "ascii"), bytes]);
+}
+
+function isValidPartitionDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  try {
+    return (
+      partitionDateFromVersionToken(
+        normalizeVersionToken(`${value}T00:00:00Z`),
+      ) === value
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function encodeEventIdentity(identity: EventIdentity): string {
+  if (
+    !identity.projectId ||
+    !isValidPartitionDate(identity.partitionDate) ||
+    !identity.traceId ||
+    !identity.spanId
+  ) {
+    throw new Error("Event identity is invalid");
+  }
+  return Buffer.concat([
+    Buffer.from("event\0", "ascii"),
+    encodeField(identity.projectId),
+    encodeField(identity.partitionDate),
+    encodeField(identity.traceId),
+    encodeField(identity.spanId),
+  ]).toString("base64url");
+}
+
+export function encodeScoreIdentity(identity: ScoreIdentity): string {
+  if (
+    !identity.projectId ||
+    !isValidPartitionDate(identity.partitionDate) ||
+    !identity.scoreId
+  ) {
+    throw new Error("Score identity is invalid");
+  }
+  return Buffer.concat([
+    Buffer.from("score\0", "ascii"),
+    encodeField(identity.projectId),
+    encodeField(identity.partitionDate),
+    encodeField(identity.scoreId),
+  ]).toString("base64url");
+}
+
+export function encodeFileReferenceIdentity(
+  identity: FileReferenceIdentity,
+): string {
+  if (
+    !identity.projectId ||
+    !isValidPartitionDate(identity.partitionDate) ||
+    !identity.entityId ||
+    !identity.fileId
+  ) {
+    throw new Error("File-reference identity is invalid");
+  }
+  return Buffer.concat([
+    Buffer.from("file-reference\0", "ascii"),
+    encodeField(identity.projectId),
+    encodeField(identity.partitionDate),
+    encodeField(identity.entityType),
+    encodeField(identity.entityId),
+    encodeField(identity.fileId),
+  ]).toString("base64url");
+}
+
+function decodeField(
+  bytes: Buffer,
+  offset: number,
+): { readonly value: string; readonly nextOffset: number } {
+  const colon = bytes.indexOf(58, offset);
+  if (colon < 0) throw new Error("Event identity is malformed");
+  const lengthText = bytes.subarray(offset, colon).toString("ascii");
+  if (!/^\d+$/.test(lengthText)) throw new Error("Event identity is malformed");
+  const length = Number(lengthText);
+  const start = colon + 1;
+  const end = start + length;
+  if (!Number.isSafeInteger(length) || end > bytes.byteLength) {
+    throw new Error("Event identity is malformed");
   }
   return {
-    project_id: fields[0],
-    partition_date: fields[1],
-    trace_id: fields[2],
-    span_id: fields[3],
+    value: bytes.subarray(start, end).toString("utf8"),
+    nextOffset: end,
   };
 }
 
-function lengthPrefix(s: string): string {
-  return `${Buffer.byteLength(s, "utf8")}:${s}`;
+export function toEventIdentity(encoded: string): EventIdentity {
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new Error("Event identity is malformed");
+  }
+  const bytes = Buffer.from(encoded, "base64url");
+  if (bytes.toString("base64url") !== encoded) {
+    throw new Error("Event identity is malformed");
+  }
+  const prefix = Buffer.from("event\0", "ascii");
+  if (!bytes.subarray(0, prefix.byteLength).equals(prefix)) {
+    throw new Error("Event identity is malformed");
+  }
+  const fields: string[] = [];
+  let offset = prefix.byteLength;
+  for (let index = 0; index < 4; index += 1) {
+    const decoded = decodeField(bytes, offset);
+    fields.push(decoded.value);
+    offset = decoded.nextOffset;
+  }
+  if (offset !== bytes.byteLength)
+    throw new Error("Event identity is malformed");
+  const identity = {
+    projectId: fields[0] ?? "",
+    partitionDate: fields[1] ?? "",
+    traceId: fields[2] ?? "",
+    spanId: fields[3] ?? "",
+  };
+  encodeEventIdentity(identity);
+  return identity;
 }
 
-function readLengthPrefix(s: string): [value: string, rest: string] {
-  const colon = s.indexOf(":");
-  if (colon < 0) throw new Error(`Malformed length-prefixed identity: ${s}`);
-  const len = Number(s.slice(0, colon));
-  const start = colon + 1;
-  const buf = Buffer.from(s, "utf8").subarray(start, start + len);
-  return [buf.toString("utf8"), s.slice(start + len)];
+function lengthPrefix(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
 }
 
-// ---------------------------------------------------------------------------
-// Canonical payload hash
-// ---------------------------------------------------------------------------
-
-export interface CanonicalAnalyticsEvent {
-  /** Domain-separating canonicalizer/schema version, e.g. "v4@1". */
-  readonly schema_version: string;
-  readonly identity: EventIdentity;
-  readonly version_token: bigint;
-  readonly type: string;
-  readonly name: string;
-  /** Start time as RFC3339 or epoch-nanoseconds; normalized before hashing. */
-  readonly start_time: string;
-  /** Resolved enrichment identifiers included in the hash (R10 replay contract). */
-  readonly resolved_enrichment_ids?: Readonly<Record<string, string>>;
-  readonly tags?: readonly string[];
-  readonly [extra: string]: unknown;
-}
-
-/**
- * Deterministic SHA-256 of a domain-separated, key-sorted, length-prefixed
- * tuple of the canonical event. JSON object key order does not matter; RFC3339
- * and epoch-nanosecond start times hash identically; array order and Unicode
- * code points are preserved; schema_version domain-separates the hash.
- */
-export function canonicalPayloadHash(event: CanonicalAnalyticsEvent): string {
-  const normalized: Record<string, unknown> = { ...event };
-  // Normalize the timestamp so equivalent expressions hash identically.
-  normalized.start_time = normalizeVersionToken(event.start_time).toString(10);
-  return createHash("sha256")
-    .update(canonicalize(normalized), "utf8")
-    .digest("hex");
-}
-
-function canonicalize(value: unknown): string {
-  if (value === null || value === undefined) return "n";
-  if (typeof value === "bigint") return `b${lengthPrefix(value.toString(10))}`;
-  if (typeof value === "string") return `s${lengthPrefix(value)}`;
-  if (typeof value === "boolean") return value ? "t" : "f";
-  if (typeof value === "number") return `d${lengthPrefix(value.toString())}`;
+function canonicalize(value: unknown, inArray = false): string {
+  if (value === null) return "null";
+  if (value === undefined) {
+    if (inArray) throw new Error("Undefined array values are not canonical");
+    return "undefined";
+  }
+  if (typeof value === "bigint")
+    return `bigint:${lengthPrefix(value.toString())}`;
+  if (typeof value === "string") return `string:${lengthPrefix(value)}`;
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error("Non-finite numbers are not canonical");
+    return `number:${lengthPrefix(Object.is(value, -0) ? "0" : String(value))}`;
+  }
   if (Array.isArray(value)) {
-    return `a[${value.map((v) => canonicalize(v)).join(",")}]`;
+    return `array:[${value.map((item) => canonicalize(item, true)).join(",")}]`;
   }
   if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const keys = Object.keys(obj).sort();
-    return `o{${keys.map((k) => `${lengthPrefix(k)}:${canonicalize(obj[k])}`).join(",")}}`;
+    const object = value as Record<string, unknown>;
+    const keys = Object.keys(object)
+      .filter((key) => object[key] !== undefined)
+      .sort();
+    return `object:{${keys
+      .map((key) => `${lengthPrefix(key)}=${canonicalize(object[key])}`)
+      .join(",")}}`;
   }
-  return `u${lengthPrefix(String(value))}`;
+  throw new Error("Unsupported canonical payload value");
+}
+
+export function canonicalPayloadHash(payload: unknown): string {
+  return createHash("sha256")
+    .update("langfuse-analytics-canonical-v1\0", "utf8")
+    .update(canonicalize(payload), "utf8")
+    .digest("hex");
 }

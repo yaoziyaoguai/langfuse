@@ -138,6 +138,7 @@ export * from "./repositories/dataset-items";
 export * from "./utils/metadata_conversion";
 export * from "./repositories/experiments";
 export * from "./repositories/analytics-control-state";
+export * from "./analytics-persistence";
 export * from "./utils/rendering";
 export * from "./utils/sqlLike";
 export * from "./redis/evalExecutionQueue";

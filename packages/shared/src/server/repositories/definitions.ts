@@ -686,7 +686,11 @@ export const eventRecordBaseSchema = z.object({
   // Model
   model_id: z.string().nullish(),
   provided_model_name: z.string().nullish(),
-  model_parameters: z.string().nullish(),
+  // Direct event conversion keeps structured parameters until JSONEachRow;
+  // persisted reads return the ClickHouse String representation.
+  model_parameters: z
+    .union([z.string(), z.record(z.string(), z.unknown())])
+    .nullish(),
 
   // Usage & Cost
   provided_usage_details: UsageCostSchema,
@@ -747,6 +751,7 @@ export const eventRecordBaseSchema = z.object({
 export type EventRecordBaseType = z.infer<typeof eventRecordBaseSchema>;
 
 export const eventRecordReadSchema = eventRecordBaseSchema.extend({
+  model_parameters: z.string().nullish(),
   total_cost: z.number().nullish(),
 
   start_time: clickhouseStringDateSchema,
