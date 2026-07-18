@@ -18,6 +18,7 @@ type EntityHeadClaimOutcome =
   | "noop"
   | "superseded"
   | "conflict"
+  | "locator_conflict"
   | "partition_conflict"
   | "stale_fence";
 
@@ -32,6 +33,7 @@ type ClaimAnalyticsEntityHeadInput = {
   operationId: string;
   entityType: AnalyticsEntityType;
   entityKey: string;
+  lookupId: string;
   owningTraceId: string | null;
   expectedSourceVersion: bigint | null;
   sourceVersion: bigint;
@@ -60,6 +62,9 @@ function classifyEntityHeadClaim(
   current: AnalyticsEntityHead,
   candidate: ClaimAnalyticsEntityHeadInput,
 ): AnalyticsEntityHeadClaimResult {
+  if (current.lookupId !== null && current.lookupId !== candidate.lookupId) {
+    return { outcome: "locator_conflict", head: current };
+  }
   if (current.sourceVersion > candidate.sourceVersion) {
     return { outcome: "superseded", head: current };
   }
@@ -116,6 +121,7 @@ export async function claimAnalyticsEntityHead(
         projectId: input.projectId,
         entityType: input.entityType,
         entityKey: input.entityKey,
+        OR: [{ lookupId: input.lookupId }, { lookupId: null }],
         sourceVersion: { lt: input.sourceVersion },
         partitionDate: input.partitionDate,
         fenceGeneration: { lte: input.fenceGeneration },
@@ -126,6 +132,7 @@ export async function claimAnalyticsEntityHead(
       },
       data: {
         operationId: input.operationId,
+        lookupId: input.lookupId,
         owningTraceId: input.owningTraceId,
         sourceVersion: input.sourceVersion,
         canonicalPayloadHash: input.canonicalPayloadHash,
@@ -153,6 +160,7 @@ export async function claimAnalyticsEntityHead(
           operationId: input.operationId,
           entityType: input.entityType,
           entityKey: input.entityKey,
+          lookupId: input.lookupId,
           owningTraceId: input.owningTraceId,
           sourceVersion: input.sourceVersion,
           canonicalPayloadHash: input.canonicalPayloadHash,
@@ -175,6 +183,16 @@ export async function claimAnalyticsEntityHead(
       }
     }
   }
+
+  await client.analyticsEntityHead.updateMany({
+    where: {
+      projectId: input.projectId,
+      entityType: input.entityType,
+      entityKey: input.entityKey,
+      lookupId: null,
+    },
+    data: { lookupId: input.lookupId },
+  });
 
   const current = await findEntityHeadOrThrow(client, input);
   return classifyEntityHeadClaim(current, input);

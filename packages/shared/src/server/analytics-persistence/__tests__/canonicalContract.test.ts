@@ -39,7 +39,6 @@ describe("event identity", () => {
     const identity = (traceId: string, spanId: string) =>
       encodeEventIdentity({
         projectId: "project-1",
-        partitionDate: "2026-07-17",
         traceId,
         spanId,
       });
@@ -49,19 +48,34 @@ describe("event identity", () => {
     );
   });
 
+  it("keeps the logical entity key stable across a forbidden partition mutation", () => {
+    const base = {
+      projectId: "project-1",
+      traceId: "trace-1",
+      spanId: "span-1",
+    };
+    expect(
+      encodeEventIdentity({
+        ...base,
+        partitionDate: "2026-07-17",
+      } as EventIdentity),
+    ).toBe(
+      encodeEventIdentity({
+        ...base,
+        partitionDate: "2026-07-18",
+      } as EventIdentity),
+    );
+  });
+
   it("round-trips a typed identity", () => {
     const identity: EventIdentity = {
       projectId: "project-1",
-      partitionDate: "2026-07-17",
       traceId: "trace-1",
       spanId: "span-1",
     };
     expect(toEventIdentity(encodeEventIdentity(identity))).toEqual(identity);
     expect(() =>
       toEventIdentity(`${encodeEventIdentity(identity)}=`),
-    ).toThrow();
-    expect(() =>
-      encodeEventIdentity({ ...identity, partitionDate: "2026-02-30" }),
     ).toThrow();
   });
 });

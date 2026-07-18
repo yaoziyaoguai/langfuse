@@ -146,7 +146,6 @@ describe("storage-neutral identity and hash", () => {
   it("round-trips Unicode identities by UTF-8 byte length", () => {
     const identity = {
       projectId: "项目🚀",
-      partitionDate: "2026-07-17",
       traceId: "跟踪-α",
       spanId: "范围-😀",
     };
@@ -159,18 +158,15 @@ describe("storage-neutral identity and hash", () => {
   it("domain-separates event, score, and file-reference identities", () => {
     const event = encodeEventIdentity({
       projectId: "project-1",
-      partitionDate: "2026-07-17",
       traceId: "trace-1",
       spanId: "shared-id",
     });
     const score = encodeScoreIdentity({
       projectId: "project-1",
-      partitionDate: "2026-07-17",
       scoreId: "shared-id",
     });
     const file = encodeFileReferenceIdentity({
       projectId: "project-1",
-      partitionDate: "2026-07-17",
       entityType: "EVENT",
       entityId: "trace-1/shared-id",
       fileId: "shared-id",

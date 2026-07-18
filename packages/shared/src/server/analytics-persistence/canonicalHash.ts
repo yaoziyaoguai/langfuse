@@ -92,20 +92,17 @@ export function partitionDateFromVersionToken(token: bigint): string {
 
 export interface EventIdentity {
   readonly projectId: string;
-  readonly partitionDate: string;
   readonly traceId: string;
   readonly spanId: string;
 }
 
 export interface ScoreIdentity {
   readonly projectId: string;
-  readonly partitionDate: string;
   readonly scoreId: string;
 }
 
 export interface FileReferenceIdentity {
   readonly projectId: string;
-  readonly partitionDate: string;
   readonly entityType: "EVENT" | "SCORE";
   readonly entityId: string;
   readonly fileId: string;
@@ -116,49 +113,25 @@ function encodeField(value: string): Buffer {
   return Buffer.concat([Buffer.from(`${bytes.byteLength}:`, "ascii"), bytes]);
 }
 
-function isValidPartitionDate(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  try {
-    return (
-      partitionDateFromVersionToken(
-        normalizeVersionToken(`${value}T00:00:00Z`),
-      ) === value
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function encodeEventIdentity(identity: EventIdentity): string {
-  if (
-    !identity.projectId ||
-    !isValidPartitionDate(identity.partitionDate) ||
-    !identity.traceId ||
-    !identity.spanId
-  ) {
+  if (!identity.projectId || !identity.traceId || !identity.spanId) {
     throw new Error("Event identity is invalid");
   }
   return Buffer.concat([
     Buffer.from("event\0", "ascii"),
     encodeField(identity.projectId),
-    encodeField(identity.partitionDate),
     encodeField(identity.traceId),
     encodeField(identity.spanId),
   ]).toString("base64url");
 }
 
 export function encodeScoreIdentity(identity: ScoreIdentity): string {
-  if (
-    !identity.projectId ||
-    !isValidPartitionDate(identity.partitionDate) ||
-    !identity.scoreId
-  ) {
+  if (!identity.projectId || !identity.scoreId) {
     throw new Error("Score identity is invalid");
   }
   return Buffer.concat([
     Buffer.from("score\0", "ascii"),
     encodeField(identity.projectId),
-    encodeField(identity.partitionDate),
     encodeField(identity.scoreId),
   ]).toString("base64url");
 }
@@ -166,18 +139,12 @@ export function encodeScoreIdentity(identity: ScoreIdentity): string {
 export function encodeFileReferenceIdentity(
   identity: FileReferenceIdentity,
 ): string {
-  if (
-    !identity.projectId ||
-    !isValidPartitionDate(identity.partitionDate) ||
-    !identity.entityId ||
-    !identity.fileId
-  ) {
+  if (!identity.projectId || !identity.entityId || !identity.fileId) {
     throw new Error("File-reference identity is invalid");
   }
   return Buffer.concat([
     Buffer.from("file-reference\0", "ascii"),
     encodeField(identity.projectId),
-    encodeField(identity.partitionDate),
     encodeField(identity.entityType),
     encodeField(identity.entityId),
     encodeField(identity.fileId),
@@ -218,7 +185,7 @@ export function toEventIdentity(encoded: string): EventIdentity {
   }
   const fields: string[] = [];
   let offset = prefix.byteLength;
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     const decoded = decodeField(bytes, offset);
     fields.push(decoded.value);
     offset = decoded.nextOffset;
@@ -227,9 +194,8 @@ export function toEventIdentity(encoded: string): EventIdentity {
     throw new Error("Event identity is malformed");
   const identity = {
     projectId: fields[0] ?? "",
-    partitionDate: fields[1] ?? "",
-    traceId: fields[2] ?? "",
-    spanId: fields[3] ?? "",
+    traceId: fields[1] ?? "",
+    spanId: fields[2] ?? "",
   };
   encodeEventIdentity(identity);
   return identity;

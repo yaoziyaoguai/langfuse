@@ -395,6 +395,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         operationId: operation.id,
         entityType: descriptor.entityType,
         entityKey: descriptor.entityKey,
+        lookupId: descriptor.lookupId,
         owningTraceId: descriptor.owningTraceId,
         expectedSourceVersion: descriptor.claim.expectedSourceVersion,
         sourceVersion: descriptor.claim.entity.sourceVersion,

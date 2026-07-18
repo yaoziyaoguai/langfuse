@@ -2060,6 +2060,7 @@ model AnalyticsEntityHead {
   projectId                 String                      @map("project_id")
   entityType                AnalyticsEntityType         @map("entity_type")
   entityKey                 String                      @map("entity_key")
+  lookupId                  String?                     @map("lookup_id")
   owningTraceId             String?                     @map("owning_trace_id")
   sourceVersion             BigInt                      @map("source_version")
   canonicalPayloadHash      String                      @map("canonical_payload_hash")
@@ -2075,6 +2076,7 @@ model AnalyticsEntityHead {
   updatedAt                 DateTime                    @default(now()) @updatedAt @map("updated_at")
 
   @@unique([projectId, entityType, entityKey])
+  @@index([projectId, entityType, lookupId])
   @@index([projectId, owningTraceId, entityType])
   @@index([projectId, entityType, partitionDate])
   @@index([operationId])

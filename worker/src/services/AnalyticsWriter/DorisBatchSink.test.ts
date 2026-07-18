@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AnalyticsLoadAdmissionController,
+  describeCanonicalCandidates,
   DorisBatchSink,
   prepareDorisLoadBatches,
 } from "./DorisBatchSink";
@@ -202,6 +203,40 @@ describe("DorisBatchSink", () => {
       version_token: (sourceVersion + 2n).toString(),
       bucket_path: "project-1/file-1.bin",
     });
+  });
+
+  it("retains a typed lookup id beside the collision-free entity key", () => {
+    expect(
+      describeCanonicalCandidates(batch(entities())).map(
+        ({ entityType, lookupId }) => ({ entityType, lookupId }),
+      ),
+    ).toEqual([
+      { entityType: "EVENT", lookupId: "span-1" },
+      { entityType: "FILE_REFERENCE", lookupId: "file-1" },
+      { entityType: "SCORE", lookupId: "score-1" },
+    ]);
+  });
+
+  it("keeps the entity-head key stable so a cross-day mutation reaches the partition CAS", () => {
+    const first = entities()[0]!;
+    if (first.kind !== "event") throw new Error("Expected event fixture");
+    const second = {
+      ...first,
+      partitionDate: "2026-07-18",
+      startTime: normalizeVersionToken("2026-07-18T10:00:00.123456789Z"),
+      sourceVersion: normalizeVersionToken("2026-07-18T10:02:00.987654321Z"),
+      canonicalPayloadHash: canonicalPayloadHash({
+        kind: "event",
+        partitionDate: "2026-07-18",
+      }),
+    };
+
+    const descriptors = describeCanonicalCandidates(batch([first, second]));
+
+    expect(new Set(descriptors.map(({ entityKey }) => entityKey)).size).toBe(1);
+    expect(
+      descriptors.map(({ partitionDate }) => partitionDate).sort(),
+    ).toEqual(["2026-07-17", "2026-07-18"]);
   });
 
   it("delegates a prepared batch to the hardened Stream Load client", async () => {

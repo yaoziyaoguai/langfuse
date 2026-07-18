@@ -36,6 +36,7 @@ export interface CanonicalCandidateDescriptor {
   readonly candidateKey: string;
   readonly entityType: AnalyticsEntityType;
   readonly entityKey: string;
+  readonly lookupId: string;
   readonly owningTraceId: string | null;
   readonly partitionDate: string;
   readonly claim: CanonicalAnalyticsEntityClaim;
@@ -195,17 +196,19 @@ function entityType(entity: CanonicalAnalyticsEntity): AnalyticsEntityType {
 function entityKey(entity: CanonicalAnalyticsEntity): string {
   switch (entity.kind) {
     case "event":
-      return encodeEventIdentity(entity);
+      return encodeEventIdentity({
+        projectId: entity.projectId,
+        traceId: entity.traceId,
+        spanId: entity.spanId,
+      });
     case "score":
       return encodeScoreIdentity({
         projectId: entity.projectId,
-        partitionDate: entity.partitionDate,
         scoreId: entity.scoreId,
       });
     case "fileReference":
       return encodeFileReferenceIdentity({
         projectId: entity.projectId,
-        partitionDate: entity.partitionDate,
         entityType: entity.entityType,
         entityId: entity.entityId,
         fileId: entity.fileId,
@@ -219,6 +222,17 @@ function owningTraceId(entity: CanonicalAnalyticsEntity): string | null {
     : entity.kind === "score"
       ? entity.traceId
       : entity.owningTraceId;
+}
+
+function lookupId(entity: CanonicalAnalyticsEntity): string {
+  switch (entity.kind) {
+    case "event":
+      return entity.spanId;
+    case "score":
+      return entity.scoreId;
+    case "fileReference":
+      return entity.fileId;
+  }
 }
 
 function candidateBaseKey(claim: CanonicalAnalyticsEntityClaim): string {
@@ -250,6 +264,7 @@ export function describeCanonicalCandidates(
       ).padStart(4, "0")}`,
       entityType: entityType(claim.entity),
       entityKey: entityKey(claim.entity),
+      lookupId: lookupId(claim.entity),
       owningTraceId: owningTraceId(claim.entity),
       partitionDate: claim.entity.partitionDate,
       claim,

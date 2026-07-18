@@ -73,6 +73,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
       operationId,
       entityType: "EVENT" as const,
       entityKey: `event-${suffix}`,
+      lookupId: `span-${suffix}`,
       owningTraceId: `trace-${suffix}`,
       expectedSourceVersion: null,
       canonicalizerVersion: "r1a-v1",
@@ -143,6 +144,17 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
     });
     expect(crossDayMutation.outcome).toBe("partition_conflict");
 
+    const locatorMutation = await controlState.claimAnalyticsEntityHead({
+      ...base,
+      lookupId: `different-span-${suffix}`,
+      expectedSourceVersion: laterVersion.head.sourceVersion,
+      sourceVersion: laterVersion.head.sourceVersion + 1n,
+      canonicalPayloadHash: "different-locator-hash",
+      partitionDate: laterVersion.head.partitionDate,
+      fenceGeneration: 3n,
+    });
+    expect(locatorMutation.outcome).toBe("locator_conflict");
+
     const persisted = await prisma.analyticsEntityHead.findUniqueOrThrow({
       where: {
         projectId_entityType_entityKey: {
@@ -154,6 +166,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
     });
     expect(persisted.partitionDate).toEqual(winner!.head.partitionDate);
     expect(persisted.sourceVersion).toBe(11n);
+    expect(persisted.lookupId).toBe(base.lookupId);
   });
 
   it("converges concurrent first claims to the highest source version", async () => {
@@ -163,6 +176,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics control state", () => {
       operationId,
       entityType: "EVENT" as const,
       entityKey: `concurrent-version-event-${suffix}`,
+      lookupId: `concurrent-span-${suffix}`,
       owningTraceId: `trace-${suffix}`,
       expectedSourceVersion: null,
       canonicalizerVersion: "r1a-v1",

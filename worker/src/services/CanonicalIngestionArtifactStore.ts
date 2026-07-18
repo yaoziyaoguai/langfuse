@@ -59,17 +59,19 @@ export class CanonicalArtifactIntegrityError extends Error {
 function canonicalEntityKey(entity: CanonicalAnalyticsEntity): string {
   switch (entity.kind) {
     case "event":
-      return encodeEventIdentity(entity);
+      return encodeEventIdentity({
+        projectId: entity.projectId,
+        traceId: entity.traceId,
+        spanId: entity.spanId,
+      });
     case "score":
       return encodeScoreIdentity({
         projectId: entity.projectId,
-        partitionDate: entity.partitionDate,
         scoreId: entity.scoreId,
       });
     case "fileReference":
       return encodeFileReferenceIdentity({
         projectId: entity.projectId,
-        partitionDate: entity.partitionDate,
         entityType: entity.entityType,
         entityId: entity.entityId,
         fileId: entity.fileId,

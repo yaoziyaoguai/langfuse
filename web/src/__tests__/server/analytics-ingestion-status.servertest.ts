@@ -28,7 +28,6 @@ describe("analytics ingestion status response", () => {
           entityType: "EVENT" as const,
           entityKey: encodeEventIdentity({
             projectId,
-            partitionDate: "2026-07-18",
             traceId: "trace-visible",
             spanId: "span-visible",
           }),
@@ -42,7 +41,6 @@ describe("analytics ingestion status response", () => {
           entityType: "SCORE" as const,
           entityKey: encodeScoreIdentity({
             projectId,
-            partitionDate: "2026-07-18",
             scoreId: "score-pending",
           }),
           owningTraceId: "trace-pending",
