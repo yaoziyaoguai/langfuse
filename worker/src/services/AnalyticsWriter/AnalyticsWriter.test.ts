@@ -415,6 +415,54 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
     ).resolves.toMatchObject({ status: "PERSISTED", terminalAt: null });
   });
 
+  it("durably quarantines a permanent Doris rejection", async () => {
+    const operationId = `writer-permanent-${suffix}`;
+    const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
+    await createReceipt({ operationId, rawObjectKey, checksumCharacter: "7" });
+    const writer = new AnalyticsWriter({
+      client: prisma,
+      artifactStore: new CanonicalIngestionArtifactStore(
+        new MemoryObjectStore(),
+      ),
+      doris: new DorisBatchSink({
+        load: vi.fn(async () => {
+          throw new DorisError("FILTERED_ROWS", false);
+        }),
+        reconcile: vi.fn(),
+      }),
+      databaseName: "langfuse_poc",
+      canonicalPrefix: "events/",
+      workerId: "writer-worker-permanent",
+      now: () => new Date("2026-07-18T12:00:27.000Z"),
+    });
+
+    await expect(
+      writer.persist(
+        batch({
+          projectId,
+          operationId,
+          rawObjectKey,
+          traceId: `writer-permanent-trace-${suffix}`,
+          spanId: "writer-permanent-span",
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_QUARANTINED",
+      retryable: false,
+    });
+    await expect(
+      prisma.analyticsIngestionOperation.findUniqueOrThrow({
+        where: { id: operationId },
+        include: { candidates: true, loadBatches: true },
+      }),
+    ).resolves.toMatchObject({
+      status: "QUARANTINED",
+      terminalAt: expect.any(Date),
+      candidates: [{ disposition: "QUARANTINED", reasonCode: "FILTERED_ROWS" }],
+      loadBatches: [{ status: "FAILED", lastErrorCode: "FILTERED_ROWS" }],
+    });
+  });
+
   it("quarantines one of two concurrent payloads with the same source token", async () => {
     const traceId = `writer-conflict-trace-${suffix}`;
     const spanId = "writer-conflict-span";

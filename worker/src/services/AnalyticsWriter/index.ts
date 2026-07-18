@@ -505,6 +505,12 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false);
       }
       if (ledger.status === "VISIBLE") continue;
+      if (
+        ledger.status === "FAILED" ||
+        ledger.status === "CANCELLED_BY_DELETION"
+      ) {
+        continue;
+      }
       if (ledger.status === "UNKNOWN" || ledger.status === "LOADING") {
         await this.reconcileLoad(ledger, prepared);
         continue;
@@ -581,16 +587,17 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
           );
           continue;
         }
-        throw new AnalyticsPersistenceError("ANALYTICS_QUARANTINED", false);
+        continue;
       } catch (error) {
         if (error instanceof AnalyticsPersistenceError) throw error;
+        const permanent = error instanceof DorisError && !error.retryable;
         const recorded = await recordAnalyticsLoadOutcome({
           client: this.dependencies.client,
           loadBatchId: ledger.id,
           projectId: operation.projectId,
           fence: claimed.fence,
           leaseOwner: this.dependencies.workerId,
-          outcome: "UNKNOWN",
+          outcome: permanent ? "FAILED" : "UNKNOWN",
           transactionId: null,
           totalRows: null,
           filteredRows: null,
@@ -599,6 +606,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
           now: this.now(),
         });
         this.assertLoadOutcomeRecorded(recorded);
+        if (permanent) continue;
         throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true);
       }
     }
@@ -643,6 +651,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       now: this.now(),
     });
     this.assertLoadOutcomeRecorded(recorded);
+    if (reconciliation.status === "ABORTED") return;
     if (!reconciliation.visible) {
       throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true);
     }

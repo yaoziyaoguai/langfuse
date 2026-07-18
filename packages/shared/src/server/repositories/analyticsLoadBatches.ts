@@ -1,10 +1,37 @@
 import type {
   AnalyticsIngestionOperationStatus,
   AnalyticsLoadBatch,
+  Prisma,
   PrismaClient,
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+
+async function quarantineLoadCandidates(input: {
+  transaction: Prisma.TransactionClient;
+  loadBatchId: string;
+  projectId: string;
+  reasonCode: string;
+}): Promise<void> {
+  const loadBatch = await input.transaction.analyticsLoadBatch.findFirstOrThrow(
+    {
+      where: { id: input.loadBatchId, projectId: input.projectId },
+      select: { operation: { select: { recoverableUntil: true } } },
+    },
+  );
+  await input.transaction.analyticsIngestionCandidate.updateMany({
+    where: {
+      projectId: input.projectId,
+      loadBatchId: input.loadBatchId,
+      disposition: "LOAD_REQUIRED",
+    },
+    data: {
+      disposition: "QUARANTINED",
+      reasonCode: input.reasonCode,
+      quarantineExpiresAt: loadBatch.operation.recoverableUntil,
+    },
+  });
+}
 
 export type AnalyticsLoadBatchClaim =
   | {
@@ -125,26 +152,37 @@ export async function recordAnalyticsLoadOutcome(input: {
     throw new TypeError("Invalid analytics load outcome");
   }
 
-  const updated = await client.analyticsLoadBatch.updateMany({
-    where: {
-      id: input.loadBatchId,
-      projectId: input.projectId,
-      fenceGeneration: input.fence,
-      leaseOwner: input.leaseOwner,
-      status: "LOADING",
-    },
-    data: {
-      status: input.outcome,
-      transactionId: input.transactionId,
-      totalRows: input.totalRows,
-      filteredRows: input.filteredRows,
-      lastErrorCode: input.errorCode,
-      visibleAt: input.outcome === "VISIBLE" ? input.now : null,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-    },
+  return client.$transaction(async (transaction) => {
+    const updated = await transaction.analyticsLoadBatch.updateMany({
+      where: {
+        id: input.loadBatchId,
+        projectId: input.projectId,
+        fenceGeneration: input.fence,
+        leaseOwner: input.leaseOwner,
+        status: "LOADING",
+      },
+      data: {
+        status: input.outcome,
+        transactionId: input.transactionId,
+        totalRows: input.totalRows,
+        filteredRows: input.filteredRows,
+        lastErrorCode: input.errorCode,
+        visibleAt: input.outcome === "VISIBLE" ? input.now : null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    if (updated.count !== 1) return false;
+    if (input.outcome === "FAILED") {
+      await quarantineLoadCandidates({
+        transaction,
+        loadBatchId: input.loadBatchId,
+        projectId: input.projectId,
+        reasonCode: input.errorCode!,
+      });
+    }
+    return true;
   });
-  return updated.count === 1;
 }
 
 export async function recordAnalyticsLoadReconciliation(input: {
@@ -176,25 +214,36 @@ export async function recordAnalyticsLoadReconciliation(input: {
       : input.status === "ABORTED"
         ? "FAILED"
         : "UNKNOWN";
-  const updated = await client.analyticsLoadBatch.updateMany({
-    where: {
-      id: input.loadBatchId,
-      projectId: input.projectId,
-      fenceGeneration: input.fence,
-      status: { in: ["LOADING", "UNKNOWN"] },
-    },
-    data: {
-      status,
-      transactionId: input.transactionId,
-      totalRows: input.totalRows,
-      filteredRows: input.filteredRows,
-      lastErrorCode: input.status === "ABORTED" ? "LOAD_ABORTED" : null,
-      visibleAt: input.status === "VISIBLE" ? input.now : null,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-    },
+  return client.$transaction(async (transaction) => {
+    const updated = await transaction.analyticsLoadBatch.updateMany({
+      where: {
+        id: input.loadBatchId,
+        projectId: input.projectId,
+        fenceGeneration: input.fence,
+        status: { in: ["LOADING", "UNKNOWN"] },
+      },
+      data: {
+        status,
+        transactionId: input.transactionId,
+        totalRows: input.totalRows,
+        filteredRows: input.filteredRows,
+        lastErrorCode: input.status === "ABORTED" ? "LOAD_ABORTED" : null,
+        visibleAt: input.status === "VISIBLE" ? input.now : null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    if (updated.count !== 1) return false;
+    if (input.status === "ABORTED") {
+      await quarantineLoadCandidates({
+        transaction,
+        loadBatchId: input.loadBatchId,
+        projectId: input.projectId,
+        reasonCode: "LOAD_ABORTED",
+      });
+    }
+    return true;
   });
-  return updated.count === 1;
 }
 
 export async function completeAnalyticsIngestionOperation(input: {
