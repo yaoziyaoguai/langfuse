@@ -96,7 +96,7 @@ function owningTraceId(entity: CanonicalAnalyticsEntity): string | null {
     ? entity.traceId
     : entity.kind === "score"
       ? entity.traceId
-      : null;
+      : entity.owningTraceId;
 }
 
 function candidateBaseKey(claim: CanonicalAnalyticsEntityClaim): string {

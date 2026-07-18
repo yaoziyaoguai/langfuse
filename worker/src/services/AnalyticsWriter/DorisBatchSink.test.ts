@@ -103,6 +103,7 @@ function entities(): readonly CanonicalAnalyticsEntity[] {
     {
       ...common,
       kind: "fileReference",
+      owningTraceId: null,
       sourceContract: "file-reference",
       sourceVersion: sourceVersion + 2n,
       canonicalPayloadHash: canonicalPayloadHash({ kind: "fileReference" }),

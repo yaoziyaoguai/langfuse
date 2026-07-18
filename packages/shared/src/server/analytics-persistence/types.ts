@@ -79,7 +79,12 @@ export interface CanonicalAnalyticsScore extends CanonicalEntityBase {
   readonly timestamp: bigint;
   readonly name: string;
   readonly source: string;
-  readonly dataType: "NUMERIC" | "BOOLEAN" | "CATEGORICAL";
+  readonly dataType:
+    | "NUMERIC"
+    | "BOOLEAN"
+    | "CATEGORICAL"
+    | "TEXT"
+    | "CORRECTION";
   readonly numericValue: number | null;
   readonly stringValue: string | null;
   readonly longStringValue: string | null;
@@ -96,6 +101,7 @@ export interface CanonicalAnalyticsFileReference extends CanonicalEntityBase {
   readonly kind: "fileReference";
   readonly entityType: "EVENT" | "SCORE";
   readonly entityId: string;
+  readonly owningTraceId: string | null;
   readonly fileId: string;
   readonly eventId: string | null;
   readonly bucketName: string | null;

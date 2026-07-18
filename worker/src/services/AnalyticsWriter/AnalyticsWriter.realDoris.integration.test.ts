@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
-
 import { PrismaClient } from "@prisma/client";
 import type { Job } from "bullmq";
 import {
   canonicalPayloadHash,
+  acceptAnalyticsIngestion,
+  encodeRawAnalyticsIngestionEnvelope,
   normalizeVersionToken,
   type CanonicalAnalyticsBatch,
   type CanonicalAnalyticsEvent,
@@ -11,7 +11,6 @@ import {
   type CanonicalAnalyticsScore,
 } from "@langfuse/shared/analytics-persistence";
 import {
-  createAnalyticsIngestionReceipt,
   StorageServiceFactory,
   type StorageService,
 } from "@langfuse/shared/src/server";
@@ -46,7 +45,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   const scoreId = `writer-e2e-score-${suffix}`;
   const fileId = `writer-e2e-file-${suffix}`;
   const canonicalPrefix = `writer-e2e/${suffix}/`;
-  const rawObjectKey = `${canonicalPrefix}raw/${operationId}.json`;
+  const rawObjectKey = `${canonicalPrefix}analytics-ingestion/raw/${projectId}/${operationId}.json`;
   const prisma = new PrismaClient({
     datasourceUrl: process.env.DORIS_CONTROL_TEST_DATABASE_URL,
   });
@@ -186,6 +185,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
     const fileReference: CanonicalAnalyticsFileReference = {
       ...base,
       kind: "fileReference",
+      owningTraceId: traceId,
       sourceContract: "file-reference",
       sourceVersion: sourceVersion + 2n,
       canonicalPayloadHash: canonicalPayloadHash({ fileId, entityId: spanId }),
@@ -214,25 +214,29 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   }
 
   it("persists event, score, file reference, artifact, and durable ledgers", async () => {
-    const rawBody = JSON.stringify({ operationId, projectId, format: "v4" });
-    await storage.uploadFile({
-      fileName: rawObjectKey,
-      fileType: "application/json",
-      data: rawBody,
-    });
-    await createAnalyticsIngestionReceipt({
+    const rawEnvelope = {
+      formatVersion: 1 as const,
+      source: "internal-event" as const,
+      payload: [{ operationId }],
+      attribution: {
+        ingestionApiKey: "pk-writer-e2e",
+        ingestionSdkName: "langfuse-js",
+        ingestionSdkVersion: "4.0.0",
+      },
+    };
+    const rawBody = encodeRawAnalyticsIngestionEnvelope(rawEnvelope);
+    await acceptAnalyticsIngestion({
       client: prisma,
       operationId,
       projectId,
       sourceOperationId: `source-${operationId}`,
-      sourceChecksum: createHash("sha256").update(rawBody).digest("hex"),
-      rawObjectKey,
+      envelope: rawEnvelope,
+      storageService: storage,
+      rawPrefix: canonicalPrefix,
       acceptedAt: new Date("2026-07-18T12:30:00.123Z"),
       acceptedAtNanos: acceptedAt,
       canonicalizerVersion: "1",
       schemaVersion: 3,
-      recoverableUntil: new Date("2026-07-25T12:30:00.000Z"),
-      statusExpiresAt: new Date("2026-08-24T12:30:00.000Z"),
     });
     const streamLoad = new DorisPoCStreamLoadClient({
       feHttpOrigin:

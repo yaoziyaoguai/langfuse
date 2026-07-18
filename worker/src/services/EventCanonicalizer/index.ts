@@ -118,7 +118,7 @@ function parsePromptVersion(
     : null;
 }
 
-function toCanonicalJson(value: unknown): CanonicalJsonValue {
+export function toCanonicalJson(value: unknown): CanonicalJsonValue {
   if (value == null) return null;
   if (typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -138,7 +138,7 @@ function toCanonicalJson(value: unknown): CanonicalJsonValue {
   throw new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
 }
 
-function toCanonicalRecord(
+export function toCanonicalRecord(
   value: unknown,
 ): Readonly<Record<string, CanonicalJsonValue>> {
   const canonical = toCanonicalJson(value);
