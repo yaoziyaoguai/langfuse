@@ -33,6 +33,138 @@ async function quarantineLoadCandidates(input: {
   });
 }
 
+export type AnalyticsLoadDeletionRevalidation = {
+  readonly outcome:
+    | "current"
+    | "cancelled"
+    | "terminal"
+    | "reconciliation_required"
+    | "mixed_generation"
+    | "lost_race";
+};
+
+/**
+ * 将 deletion generation 的最后一次 control-plane 检查与仍为 PENDING 的
+ * load/candidate 取消放在同一事务中。load batch 按 owning trace 隔离，因而正常
+ * 情况下不会出现只取消一个 batch 中部分 rows 的语义。
+ */
+export async function cancelAnalyticsLoadBatchIfDeleted(input: {
+  client?: PrismaClient;
+  loadBatchId: string;
+  projectId: string;
+  claimedFence?: bigint;
+  leaseOwner?: string;
+}): Promise<AnalyticsLoadDeletionRevalidation> {
+  const client = input.client ?? prisma;
+  if (
+    !input.loadBatchId ||
+    !input.projectId ||
+    (input.claimedFence === undefined) !== (input.leaseOwner === undefined) ||
+    (input.claimedFence !== undefined && input.claimedFence <= 0n) ||
+    input.leaseOwner === ""
+  ) {
+    throw new TypeError("Invalid analytics load deletion revalidation");
+  }
+
+  return client.$transaction(async (transaction) => {
+    const loadBatch = await transaction.analyticsLoadBatch.findFirstOrThrow({
+      where: { id: input.loadBatchId, projectId: input.projectId },
+    });
+    if (loadBatch.status === "UNKNOWN") {
+      return { outcome: "reconciliation_required" as const };
+    }
+    const ownsClaimedLoad =
+      loadBatch.status === "LOADING" &&
+      input.claimedFence === loadBatch.fenceGeneration &&
+      input.leaseOwner === loadBatch.leaseOwner;
+    if (loadBatch.status === "LOADING" && !ownsClaimedLoad) {
+      return { outcome: "reconciliation_required" as const };
+    }
+    if (loadBatch.status !== "PENDING" && !ownsClaimedLoad) {
+      return { outcome: "terminal" as const };
+    }
+
+    const candidates = await transaction.analyticsIngestionCandidate.findMany({
+      where: {
+        projectId: input.projectId,
+        loadBatchId: input.loadBatchId,
+        disposition: "LOAD_REQUIRED",
+      },
+    });
+    if (candidates.length === 0) {
+      throw new TypeError("Analytics load batch has no required candidates");
+    }
+    const traceIds = [
+      ...new Set(
+        candidates.flatMap(({ owningTraceId }) =>
+          owningTraceId ? [owningTraceId] : [],
+        ),
+      ),
+    ];
+    const [projectGeneration, traceTombstones] = await Promise.all([
+      transaction.analyticsProjectDeletionGeneration.findUnique({
+        where: { projectId: input.projectId },
+        select: { generation: true },
+      }),
+      transaction.analyticsDeletionTombstone.findMany({
+        where: {
+          projectId: input.projectId,
+          traceId: { in: traceIds },
+        },
+        select: { traceId: true, generation: true },
+      }),
+    ]);
+    const traceGenerationById = new Map(
+      traceTombstones.map(({ traceId, generation }) => [traceId, generation]),
+    );
+    const stale = candidates.map(
+      ({ owningTraceId, traceDeletionGeneration, projectDeletionGeneration }) =>
+        (projectGeneration?.generation ?? 0n) > projectDeletionGeneration ||
+        (owningTraceId
+          ? (traceGenerationById.get(owningTraceId) ?? 0n) >
+            traceDeletionGeneration
+          : false),
+    );
+    if (!stale.some(Boolean)) return { outcome: "current" as const };
+    if (!stale.every(Boolean)) {
+      return { outcome: "mixed_generation" as const };
+    }
+
+    const cancelled = await transaction.analyticsLoadBatch.updateMany({
+      where: {
+        id: input.loadBatchId,
+        projectId: input.projectId,
+        status: ownsClaimedLoad ? "LOADING" : "PENDING",
+        fenceGeneration: loadBatch.fenceGeneration,
+        ...(ownsClaimedLoad ? { leaseOwner: input.leaseOwner } : {}),
+      },
+      data: {
+        status: "CANCELLED_BY_DELETION",
+        lastErrorCode: "DELETION_BARRIER",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    if (cancelled.count !== 1) return { outcome: "lost_race" as const };
+    const cancelledCandidates =
+      await transaction.analyticsIngestionCandidate.updateMany({
+        where: {
+          projectId: input.projectId,
+          loadBatchId: input.loadBatchId,
+          disposition: "LOAD_REQUIRED",
+        },
+        data: {
+          disposition: "CANCELLED_BY_DELETION",
+          reasonCode: "DELETION_BARRIER",
+        },
+      });
+    if (cancelledCandidates.count !== candidates.length) {
+      throw new Error("Analytics load candidate cancellation was incomplete");
+    }
+    return { outcome: "cancelled" as const };
+  });
+}
+
 export type AnalyticsLoadBatchClaim =
   | {
       readonly outcome: "claimed";

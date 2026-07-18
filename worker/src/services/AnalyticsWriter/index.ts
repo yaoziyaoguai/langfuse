@@ -11,6 +11,7 @@ import {
 import {
   claimAnalyticsEntityHead,
   claimAnalyticsLoadBatch,
+  cancelAnalyticsLoadBatchIfDeleted,
   completeAnalyticsIngestionOperation,
   findAnalyticsIngestionOperationForProject,
   freezeAnalyticsIngestionManifest,
@@ -442,6 +443,40 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       }
     }
 
+    const descriptorByKey = new Map(
+      descriptors.map((descriptor) => [descriptor.candidateKey, descriptor]),
+    );
+    for (const disposition of dispositionResults) {
+      if (disposition.disposition !== "LOAD_REQUIRED") continue;
+      const descriptor = descriptorByKey.get(disposition.candidateKey);
+      if (!descriptor) {
+        throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false);
+      }
+      const [projectGeneration, traceGeneration] = await Promise.all([
+        getProjectDeletionGeneration({
+          client: this.dependencies.client,
+          projectId: operation.projectId,
+        }),
+        descriptor.owningTraceId
+          ? getTraceDeletionGeneration({
+              client: this.dependencies.client,
+              projectId: operation.projectId,
+              traceId: descriptor.owningTraceId,
+            })
+          : 0n,
+      ]);
+      if (
+        projectGeneration <= descriptor.claim.projectDeletionGeneration &&
+        traceGeneration <= descriptor.claim.traceDeletionGeneration
+      ) {
+        continue;
+      }
+      requiredKeys.delete(descriptor.candidateKey);
+      disposition.disposition = "CANCELLED_BY_DELETION";
+      disposition.loadBatchId = null;
+      disposition.reasonCode = "DELETION_BARRIER";
+    }
+
     const prepared = prepareDorisLoadBatches(batch, requiredKeys);
     const loadManifests = prepared.map((loadBatch) => {
       const identity = loadBatchIdentity({
@@ -519,6 +554,32 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         throw new AnalyticsPersistenceError("ANALYTICS_QUARANTINED", false);
       }
 
+      const deletionRevalidation = await cancelAnalyticsLoadBatchIfDeleted({
+        client: this.dependencies.client,
+        loadBatchId: ledger.id,
+        projectId: operation.projectId,
+      });
+      if (
+        deletionRevalidation.outcome === "cancelled" ||
+        deletionRevalidation.outcome === "terminal"
+      ) {
+        continue;
+      }
+      if (deletionRevalidation.outcome !== "current") {
+        throw new AnalyticsPersistenceError(
+          deletionRevalidation.outcome === "mixed_generation"
+            ? "ANALYTICS_CONFLICT"
+            : "ANALYTICS_UNAVAILABLE",
+          deletionRevalidation.outcome !== "mixed_generation",
+          {
+            tags: {
+              operationId: operation.id,
+              phase: "pre_load_deletion_revalidation",
+            },
+          },
+        );
+      }
+
       const now = this.now();
       const claimed = await claimAnalyticsLoadBatch({
         client: this.dependencies.client,
@@ -537,6 +598,30 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       }
       if (claimed.outcome !== "claimed") {
         throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true);
+      }
+
+      const claimedDeletionRevalidation =
+        await cancelAnalyticsLoadBatchIfDeleted({
+          client: this.dependencies.client,
+          loadBatchId: ledger.id,
+          projectId: operation.projectId,
+          claimedFence: claimed.fence,
+          leaseOwner: this.dependencies.workerId,
+        });
+      if (claimedDeletionRevalidation.outcome === "cancelled") continue;
+      if (claimedDeletionRevalidation.outcome !== "current") {
+        throw new AnalyticsPersistenceError(
+          claimedDeletionRevalidation.outcome === "mixed_generation"
+            ? "ANALYTICS_CONFLICT"
+            : "ANALYTICS_UNAVAILABLE",
+          claimedDeletionRevalidation.outcome !== "mixed_generation",
+          {
+            tags: {
+              operationId: operation.id,
+              phase: "claimed_load_deletion_revalidation",
+            },
+          },
+        );
       }
 
       try {

@@ -228,6 +228,25 @@ describe("DorisBatchSink", () => {
     });
   });
 
+  it("isolates load batches by owning trace so deletion can cancel atomically", () => {
+    const first = entities()[0]!;
+    if (first.kind !== "event") throw new Error("Expected event fixture");
+    const second: CanonicalAnalyticsEntity = {
+      ...first,
+      traceId: "trace-2",
+      spanId: "span-2",
+      canonicalPayloadHash: canonicalPayloadHash({
+        kind: "event",
+        traceId: "trace-2",
+      }),
+    };
+
+    const prepared = prepareDorisLoadBatches(batch([first, second]));
+
+    expect(prepared).toHaveLength(2);
+    expect(prepared.map(({ rowCount }) => rowCount)).toEqual([1, 1]);
+  });
+
   it("bounds in-flight loads and rejects buffered-byte overflow", async () => {
     const controller = new AnalyticsLoadAdmissionController({
       maxBatchBytes: 8,

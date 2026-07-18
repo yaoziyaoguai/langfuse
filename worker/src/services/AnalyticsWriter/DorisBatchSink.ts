@@ -451,7 +451,13 @@ export function prepareDorisLoadBatches(
   const groups = new Map<string, CanonicalCandidateDescriptor[]>();
   for (const candidate of candidates) {
     const table = TABLE_BY_KIND[candidate.claim.entity.kind];
-    const key = `${table}\0${candidate.partitionDate}`;
+    const key = JSON.stringify([
+      table,
+      candidate.partitionDate,
+      candidate.owningTraceId,
+      candidate.claim.traceDeletionGeneration.toString(),
+      candidate.claim.projectDeletionGeneration.toString(),
+    ]);
     groups.set(key, [...(groups.get(key) ?? []), candidate]);
   }
 

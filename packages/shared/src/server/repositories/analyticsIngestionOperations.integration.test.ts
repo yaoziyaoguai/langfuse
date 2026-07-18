@@ -139,6 +139,100 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
     ).rejects.toThrow("Ingestion source operation conflicts with its receipt");
   });
 
+  it("cancels a claimed trace-isolated load immediately before Stream Load", async () => {
+    const operationId = `delete-race-operation-${suffix}`;
+    const loadBatchId = `delete-race-load-${suffix}`;
+    const traceId = `delete-race-trace-${suffix}`;
+    await prisma.analyticsIngestionOperation.create({
+      data: {
+        id: operationId,
+        projectId,
+        sourceOperationId: `delete-race-source-${suffix}`,
+        sourceChecksum: "d".repeat(64),
+        rawObjectKey: `events/${projectId}/raw/delete-race.json`,
+        acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+        acceptedAtNanos: 1_784_376_000_000_000_000n,
+        canonicalizerVersion: "1",
+        schemaVersion: 3,
+        canonicalizationFence: 1n,
+        canonicalObjectKey: `events/${projectId}/canonical/delete-race.json`,
+        manifestState: "FROZEN",
+        status: "PERSISTED",
+        recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
+        statusExpiresAt: new Date("2026-08-24T12:00:00.000Z"),
+      },
+    });
+    await prisma.analyticsLoadBatch.create({
+      data: {
+        id: loadBatchId,
+        operationId,
+        projectId,
+        databaseName: "langfuse",
+        targetTable: "events_current",
+        logicalBatchId: `delete-race-logical-${suffix}`,
+        fenceGeneration: 2n,
+        status: "LOADING",
+        leaseOwner: "delete-race-worker",
+        leaseExpiresAt: new Date("2026-07-18T12:01:00.000Z"),
+        label: `delete_race_${suffix}`,
+        payloadHash: "e".repeat(64),
+        canonicalObjectKey: `events/${projectId}/canonical/delete-race.json`,
+        partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+      },
+    });
+    await prisma.analyticsIngestionCandidate.create({
+      data: {
+        operationId,
+        projectId,
+        candidateKey: `delete-race-candidate-${suffix}`,
+        entityType: "EVENT",
+        entityKey: `delete-race-entity-${suffix}`,
+        owningTraceId: traceId,
+        partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+        sourceVersion: 1n,
+        canonicalPayloadHash: "f".repeat(64),
+        disposition: "LOAD_REQUIRED",
+        loadBatchId,
+        traceDeletionGeneration: 0n,
+        projectDeletionGeneration: 0n,
+      },
+    });
+    await prisma.analyticsDeletionTombstone.create({
+      data: {
+        projectId,
+        traceId,
+        generation: 1n,
+        status: "SCHEDULED",
+      },
+    });
+
+    await expect(
+      loadRepository.cancelAnalyticsLoadBatchIfDeleted({
+        client: prisma,
+        loadBatchId,
+        projectId,
+        claimedFence: 2n,
+        leaseOwner: "delete-race-worker",
+      }),
+    ).resolves.toEqual({ outcome: "cancelled" });
+    await expect(
+      prisma.analyticsLoadBatch.findUniqueOrThrow({
+        where: { id: loadBatchId },
+      }),
+    ).resolves.toMatchObject({
+      status: "CANCELLED_BY_DELETION",
+      lastErrorCode: "DELETION_BARRIER",
+    });
+    await expect(
+      prisma.analyticsIngestionCandidate.findFirstOrThrow({
+        where: { operationId },
+      }),
+    ).resolves.toMatchObject({
+      disposition: "CANCELLED_BY_DELETION",
+      reasonCode: "DELETION_BARRIER",
+    });
+  });
+
   it("requires absence reconciliation before an expired lease can advance its fence", async () => {
     const operationId = `takeover-operation-${suffix}`;
     await repository.createAnalyticsIngestionReceipt({
