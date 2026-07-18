@@ -17,12 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../../../../packages/shared/doris/scripts/migrate";
 import { DorisPoCMysqlClient } from "../../../../packages/shared/src/server/doris-poc/mysqlClient";
 import { DorisPoCStreamLoadClient } from "../../../../packages/shared/src/server/doris-poc/streamLoadClient";
-import {
-  CanonicalIngestionArtifactStore,
-  StorageServiceCanonicalObjectStore,
-} from "../CanonicalIngestionArtifactStore";
-import { AnalyticsWriter } from ".";
-import { DorisBatchSink } from "./DorisBatchSink";
+import { createDorisAnalyticsPersistence } from "../dorisAnalyticsPersistence";
 
 const ENABLED =
   process.env.DORIS_POC_ENABLED === "1" &&
@@ -243,37 +238,35 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
         return { status, visible: status === "VISIBLE" };
       },
     });
-    const writer = new AnalyticsWriter({
-      client: prisma,
-      artifactStore: new CanonicalIngestionArtifactStore(
-        new StorageServiceCanonicalObjectStore(storage),
-      ),
-      doris: new DorisBatchSink(
-        {
-          load: async (input) => {
-            const result = await streamLoad.streamLoad({
-              table: input.table,
-              database: input.database,
-              label: input.label,
-              ndjsonBody: input.ndjsonBody.toString(),
-            });
-            return {
-              status: result.status,
-              label: result.label,
-              numberTotalRows: result.numberTotalRows,
-              numberFilteredRows: result.numberFilteredRows,
-              committed: result.committed,
-              requiresReconciliation: streamLoad.isUnknownOutcome(result),
-            };
-          },
-          reconcile: (input) => streamLoad.reconcile({ label: input.label }),
+    const { writer } = createDorisAnalyticsPersistence({
+      runtimeEnv: {
+        LANGFUSE_S3_EVENT_UPLOAD_BUCKET:
+          process.env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET!,
+        LANGFUSE_S3_EVENT_UPLOAD_PREFIX: canonicalPrefix,
+      },
+      prismaClient: prisma,
+      storageService: storage,
+      streamLoadTransport: {
+        load: async (input) => {
+          const result = await streamLoad.streamLoad({
+            table: input.table,
+            database: input.database,
+            label: input.label,
+            ndjsonBody: input.ndjsonBody.toString(),
+          });
+          return {
+            status: result.status,
+            label: result.label,
+            numberTotalRows: result.numberTotalRows,
+            numberFilteredRows: result.numberFilteredRows,
+            committed: result.committed,
+            requiresReconciliation: streamLoad.isUnknownOutcome(result),
+          };
         },
-        DB,
-      ),
+        reconcile: (input) => streamLoad.reconcile({ label: input.label }),
+      },
       databaseName: DB,
-      canonicalPrefix,
       workerId: "writer-e2e-worker",
-      now: () => new Date("2026-07-18T12:30:10.000Z"),
     });
     const batch = canonicalBatch();
 

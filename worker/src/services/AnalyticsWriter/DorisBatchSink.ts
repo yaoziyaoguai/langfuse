@@ -42,7 +42,7 @@ export interface PreparedDorisLoadBatch {
   readonly rowCount: number;
 }
 
-interface DorisStreamLoadTransport {
+export interface DorisStreamLoadTransport {
   load(input: {
     readonly database?: string;
     readonly table: string;
