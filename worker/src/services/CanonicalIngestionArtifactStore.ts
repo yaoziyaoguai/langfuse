@@ -316,4 +316,17 @@ export class CanonicalIngestionArtifactStore {
     }
     return decodeCanonicalArtifact(body, expectedChecksum);
   }
+
+  async getIfExists(key: string): Promise<{
+    readonly batch: CanonicalAnalyticsBatch;
+    readonly checksum: string;
+  } | null> {
+    const body = await this.objectStore.get(key);
+    if (body === null) return null;
+    const artifactChecksum = checksum(body);
+    return {
+      batch: decodeCanonicalArtifact(body, artifactChecksum),
+      checksum: artifactChecksum,
+    };
+  }
 }

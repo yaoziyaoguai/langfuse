@@ -341,6 +341,21 @@ export async function getProjectDeletionGeneration({
   return current?.generation ?? 0n;
 }
 
+export async function getTraceDeletionGeneration({
+  client = prisma,
+  projectId,
+  traceId,
+}: {
+  client?: AnalyticsControlClient;
+  projectId: string;
+  traceId: string;
+}): Promise<bigint> {
+  const current = await client.analyticsDeletionTombstone.findUnique({
+    where: { projectId_traceId: { projectId, traceId } },
+  });
+  return current?.generation ?? 0n;
+}
+
 export function findDeletionOperationForOrganization({
   client = prisma,
   operationId,

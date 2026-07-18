@@ -147,6 +147,10 @@ describe("CanonicalIngestionArtifactStore", () => {
       "Canonical artifact conditional-create collision",
     );
     await expect(store.get(key, created.checksum)).resolves.toEqual(original);
+    await expect(store.getIfExists(key)).resolves.toEqual({
+      batch: original,
+      checksum: created.checksum,
+    });
   });
 
   it("rejects a missing or checksum-mismatched artifact", async () => {
