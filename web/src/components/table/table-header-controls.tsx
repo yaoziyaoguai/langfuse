@@ -8,6 +8,7 @@ import {
   TABLE_AGGREGATION_OPTIONS,
   type TimeRange,
 } from "@/src/utils/date-range-utils";
+import type { Ref } from "react";
 
 type RefreshControls = {
   onRefresh: () => void;
@@ -30,10 +31,12 @@ export function TableHeaderControls({
   timeRange,
   setTimeRange,
   refresh,
+  timeRangeTriggerRef,
 }: {
   timeRange: TimeRange;
   setTimeRange: (timeRange: TimeRange) => void;
   refresh?: RefreshControls;
+  timeRangeTriggerRef?: Ref<HTMLButtonElement>;
 }) {
   return (
     <PageHeaderControlsPortal>
@@ -43,6 +46,7 @@ export function TableHeaderControls({
         timeRangePresets={TABLE_AGGREGATION_OPTIONS}
         className="my-0 max-w-full overflow-x-auto"
         triggerClassName="px-2"
+        triggerRef={timeRangeTriggerRef}
       />
       {refresh && (
         <DataTableRefreshButton

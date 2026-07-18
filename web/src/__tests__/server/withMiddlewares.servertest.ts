@@ -6,6 +6,7 @@ import {
 import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
 import {
   BaseError,
+  InvalidRequestError,
   LangfuseNotFoundError,
   UnauthorizedError,
   ServiceUnavailableError,
@@ -67,6 +68,51 @@ describe("withMiddlewares error handling", () => {
   });
 
   describe("BaseError handling", () => {
+    it("preserves structured Doris time-range validation metadata", async () => {
+      const error = Object.assign(
+        new InvalidRequestError(
+          "Analytics query requires a valid bounded UTC time range",
+        ),
+        {
+          code: "InvalidTimeRange",
+          maxDays: 30,
+          acceptedRange: {
+            from: new Date("2026-01-01T00:00:00.000Z"),
+            to: new Date("2026-02-01T00:00:00.001Z"),
+          },
+        },
+      );
+
+      const handler = withMiddlewares({
+        GET: async () => {
+          throw error;
+        },
+      });
+
+      const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+        method: "GET",
+        headers: {
+          "x-langfuse-public-key": "test-key",
+        },
+      });
+
+      await handler(req, res);
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(JSON.parse(res._getData())).toEqual({
+        message: "Analytics query requires a valid bounded UTC time range",
+        error: "InvalidTimeRange",
+        code: "InvalidTimeRange",
+        maxDays: 30,
+        acceptedRange: {
+          from: "2026-01-01T00:00:00.000Z",
+          to: "2026-02-01T00:00:00.001Z",
+        },
+      });
+      expect(logger.warn).toHaveBeenCalledWith(error);
+      expect(traceException).not.toHaveBeenCalled();
+    });
+
     it("should handle BaseError with 4xx status code", async () => {
       const error = new BaseError("BadRequest", 400, "Bad Request", false);
 

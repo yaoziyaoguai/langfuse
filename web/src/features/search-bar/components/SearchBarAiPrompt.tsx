@@ -58,7 +58,7 @@ export function SearchBarAiPrompt({
    *  otherwise apply as a dead filter that silently matches nothing). */
   scoreNames?: ObservedScoreNames;
   /** Apply generated filters via the bar's setFilterState (apply-immediately). */
-  onApply: (filters: FilterState) => void;
+  onApply: (filters: FilterState) => boolean;
   /** Leave AI mode and restore the grammar composer. */
   onExit: () => void;
 }) {
@@ -162,13 +162,13 @@ export function SearchBarAiPrompt({
         );
         return;
       }
+      if (!onApply(result.filters as FilterState)) return;
       capture("filters:ai_generate_applied", {
         tableName,
         refineMode,
         generatedFilterCount: result.filters.length,
         isV4: true,
       });
-      onApply(result.filters as FilterState);
       if (result.unknownScoreNames.length > 0) {
         // Partial apply: the rest of the filters went through, so exit as
         // usual but surface which score clause was dropped and why.

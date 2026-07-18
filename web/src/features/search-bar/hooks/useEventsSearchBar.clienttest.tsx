@@ -59,3 +59,36 @@ describe("useEventsSearchBar.applyFilters", () => {
     expect(setSearchType).not.toHaveBeenCalled();
   });
 });
+
+describe("useEventsSearchBar.commit", () => {
+  it("keeps the draft and applies no URL state when preflight rejects", () => {
+    const beforeApply = vi.fn(() => false);
+    const { result, setFilterState, setSearchQuery, setSearchType } = setup({
+      beforeApply,
+    });
+    act(() => {
+      result.current.store.getState().actions.setDraft("refund policy");
+    });
+
+    let committed: string | null = null;
+    act(() => {
+      committed = result.current.commit("enter");
+    });
+
+    expect(committed).toBeNull();
+    expect(beforeApply).toHaveBeenCalledWith({
+      filters: [],
+      searchQuery: "refund policy",
+      searchType: DEFAULT_SEARCH_TYPE,
+    });
+    expect(result.current.store.getState().draft).toBe("refund policy");
+    expect(setFilterState).not.toHaveBeenCalled();
+    expect(setSearchQuery).not.toHaveBeenCalled();
+    expect(setSearchType).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current.commit("blur");
+    });
+    expect(beforeApply).toHaveBeenCalledTimes(1);
+  });
+});

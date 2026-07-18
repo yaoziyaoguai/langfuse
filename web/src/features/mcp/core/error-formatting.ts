@@ -28,7 +28,6 @@ export function formatErrorForUser(error: unknown): McpError {
   // Log server errors for monitoring (sanitized to avoid PII exposure)
   if (isApiServerError(error)) {
     logger.error("MCP API Server Error", {
-      message: error.message,
       name: error.name,
     });
     return new McpError(
@@ -103,7 +102,6 @@ export function formatErrorForUser(error: unknown): McpError {
   // Generic errors (sanitized logging)
   if (error instanceof Error) {
     logger.error("MCP Unexpected Error", {
-      message: error.message,
       name: error.name,
     });
     return new McpError(

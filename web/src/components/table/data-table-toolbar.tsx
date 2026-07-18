@@ -138,6 +138,7 @@ interface DataTableToolbarProps<TData, TValue> {
   columnsWithCustomSelect?: string[];
   timeRange?: TimeRange;
   setTimeRange?: (timeRange: TimeRange) => void;
+  timeRangeTriggerRef?: React.Ref<HTMLButtonElement>;
   refreshConfig?: RefreshConfig;
   multiSelect?: MultiSelect;
   environmentFilter?: {
@@ -217,6 +218,7 @@ export function DataTableToolbar<TData, TValue>({
   columnsWithCustomSelect,
   timeRange,
   setTimeRange,
+  timeRangeTriggerRef,
   refreshConfig,
   multiSelect,
   environmentFilter,
@@ -448,6 +450,7 @@ export function DataTableToolbar<TData, TValue>({
             onTimeRangeChange={setTimeRange}
             timeRangePresets={TABLE_AGGREGATION_OPTIONS}
             className="my-0 max-w-full overflow-x-auto"
+            triggerRef={timeRangeTriggerRef}
           />
         )}
         {refreshConfig && (

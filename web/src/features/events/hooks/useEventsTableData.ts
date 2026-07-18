@@ -37,6 +37,7 @@ type UseEventsTableDataParams = {
   selectAll: boolean;
   setSelectedRows: (rows: Record<string, boolean>) => void;
   appRootFallbackEnabled?: boolean;
+  queryEnabled?: boolean;
 };
 
 export function useEventsTableData({
@@ -50,6 +51,7 @@ export function useEventsTableData({
   selectAll,
   setSelectedRows,
   appRootFallbackEnabled = false,
+  queryEnabled = true,
 }: UseEventsTableDataParams) {
   // Prepare query payloads
   const getCountPayload = useMemo(
@@ -81,6 +83,7 @@ export function useEventsTableData({
   const silentHttpCodes = [422];
 
   const observations = api.events.all.useQuery(getAllPayload, {
+    enabled: queryEnabled,
     refetchOnWindowFocus: true,
     placeholderData: (prev) => prev,
     meta: {
@@ -96,7 +99,7 @@ export function useEventsTableData({
     [getAllPayload],
   );
   const shouldRunAppRootFallback = shouldRunAppRootFallbackQuery({
-    enabled: appRootFallbackEnabled,
+    enabled: appRootFallbackEnabled && queryEnabled,
     filters: getAllPayload.filter,
     page: paginationState.page,
     rootQuerySucceeded: observations.isSuccess,
@@ -176,6 +179,9 @@ export function useEventsTableData({
   // Memoize joined data to prevent infinite re-renders
   // Handle loading, error, and success states
   const joinedData = useMemo(() => {
+    if (!queryEnabled) {
+      return { status: "success" as const, rows: [] };
+    }
     if (activeObservations.isLoading || activeObservations.isPlaceholderData) {
       return { status: "loading" as const, rows: undefined };
     }
@@ -200,11 +206,12 @@ export function useEventsTableData({
     activeObservations.data?.observations,
     ioDataQuery.data,
     isSilencedError,
+    queryEnabled,
   ]);
 
   // Fetch the exact count only after the user selects all matching rows.
   const totalCountQuery = api.events.countAll.useQuery(getCountPayload, {
-    enabled: selectAll,
+    enabled: selectAll && queryEnabled,
     refetchOnWindowFocus: true,
   });
 

@@ -113,6 +113,7 @@ import { RunEvaluationDialog } from "@/src/features/batch-actions/components/Run
 import { AddObservationsToDatasetDialog } from "@/src/features/batch-actions/components/AddObservationsToDatasetDialog/index";
 import { useHasEntitlement } from "@/src/features/entitlements/hooks";
 import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
+import { showErrorToast } from "@/src/features/notifications/showErrorToast";
 import { useSearchBarEnabled } from "@/src/features/search-bar/hooks/useSearchBarEnabled";
 import { useEventsSearchBar } from "@/src/features/search-bar/hooks/useEventsSearchBar";
 import { EventsSearchBarRow } from "@/src/features/search-bar/components/EventsSearchBarRow";
@@ -128,6 +129,7 @@ import {
   useObservedMetadataPaths,
   useObservedMetadataRecorder,
 } from "@/src/features/search-bar/hooks/useObservedMetadata";
+import { validateFullContentSearchRange } from "@/src/features/events/lib/fullContentSearchRange";
 
 export type EventsTableRow = {
   // Identity fields
@@ -313,6 +315,7 @@ export default function ObservationsEventsTable({
   });
 
   const { timeRange, setTimeRange } = useTableDateRange(projectId);
+  const timeRangeTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Disabled for now because perhaps confusing — replaced by "Is Root Observation"
   // boolean facet in the sidebar (see filter-config.ts).
@@ -577,6 +580,28 @@ export default function ObservationsEventsTable({
     setFilterState: setFiltersWrapper,
     setSearchQuery,
     setSearchType,
+    beforeApply: ({
+      filters,
+      searchQuery: nextQuery,
+      searchType: nextType,
+    }) => {
+      const rangeStatus = validateFullContentSearchRange({
+        filters,
+        searchQuery: nextQuery,
+        searchType: nextType,
+        range: dateRange,
+      });
+      if (rangeStatus === "valid") return true;
+      showErrorToast(
+        "Choose a narrower time range",
+        rangeStatus === "missing"
+          ? "Full-content search requires an explicit date range of at most 30 days. Your query was kept."
+          : "Full-content search is limited to 30 days. Your query was kept; choose a narrower date range.",
+        "WARNING",
+      );
+      timeRangeTriggerRef.current?.focus();
+      return false;
+    },
   });
 
   // Non-destructive preview: while a category-chip preset row is hovered or
@@ -648,6 +673,13 @@ export default function ObservationsEventsTable({
     ? externalFilterState.concat(dateRangeFilter)
     : combinedFilterState;
 
+  const fullContentRangeStatus = validateFullContentSearchRange({
+    filters: filterState,
+    searchQuery,
+    searchType,
+    range: dateRange,
+  });
+
   // Use the custom hook for observations data fetching
   const {
     observations,
@@ -674,6 +706,7 @@ export default function ObservationsEventsTable({
     selectAll,
     setSelectedRows,
     appRootFallbackEnabled: appRootDefault.isAutoManaged,
+    queryEnabled: fullContentRangeStatus === "valid",
   });
 
   useApplyAppRootFallback({
@@ -1726,6 +1759,7 @@ export default function ObservationsEventsTable({
             timeRange={timeRange}
             setTimeRange={setTimeRange}
             refresh={refreshConfig}
+            timeRangeTriggerRef={timeRangeTriggerRef}
           />
         )}
         {!hideControls && (
@@ -1804,6 +1838,9 @@ export default function ObservationsEventsTable({
               setRowHeight={setRowHeight}
               timeRange={showControlsInPageHeader ? undefined : timeRange}
               setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
+              timeRangeTriggerRef={
+                showControlsInPageHeader ? undefined : timeRangeTriggerRef
+              }
               // Disabled, for now moved to filter sidebar
               // TODO: remove this toggle once v4 looks good as is
               // viewModeToggle={

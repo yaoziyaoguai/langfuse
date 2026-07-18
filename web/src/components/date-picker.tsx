@@ -313,6 +313,7 @@ export type TimeRangePickerProps = {
   triggerClassName?: string;
   disabled?: boolean | { before?: Date; after?: Date } | Date | Date[];
   maxRangeMs?: number;
+  triggerRef?: React.Ref<HTMLButtonElement>;
 };
 
 export function TimeRangePicker({
@@ -323,6 +324,7 @@ export function TimeRangePicker({
   onTimeRangeChange,
   disabled,
   maxRangeMs,
+  triggerRef,
 }: TimeRangePickerProps) {
   // Determine the range type
   const rangeType: "named" | "custom" | null = timeRange
@@ -531,6 +533,7 @@ export function TimeRangePicker({
       <Popover open={isOpen} onOpenChange={handleOpenChange}>
         <PopoverTrigger asChild>
           <Button
+            ref={triggerRef}
             variant="outline"
             className={cn(
               "hover:bg-accent hover:text-accent-foreground w-fit justify-start text-left font-normal",

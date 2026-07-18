@@ -37,6 +37,12 @@ import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePos
 /** How a search-bar commit was triggered — the `trigger` analytics dimension. */
 export type SearchCommitTrigger = "enter" | "blur" | "pick";
 
+export type SearchApplyPlan = {
+  readonly filters: FilterState;
+  readonly searchQuery: string | null;
+  readonly searchType: TracingSearchType[];
+};
+
 /** Order-independent scope-set equality (scopes are unique). */
 function sameScopes(a: TracingSearchType[], b: TracingSearchType[]): boolean {
   if (a.length !== b.length) return false;
@@ -75,6 +81,7 @@ export function useEventsSearchBar({
   setFilterState,
   setSearchQuery,
   setSearchType,
+  beforeApply,
 }: {
   projectId: string;
   /** Table this bar filters — the `tableName` analytics dimension. */
@@ -89,10 +96,11 @@ export function useEventsSearchBar({
   setFilterState: (filters: FilterState) => void;
   setSearchQuery: (query: string | null) => void;
   setSearchType: (type: TracingSearchType[]) => void;
+  beforeApply?: (plan: SearchApplyPlan) => boolean;
 }): {
   store: SearchBarStore;
   commit: (trigger?: SearchCommitTrigger) => string | null;
-  applyFilters: (filters: FilterState) => void;
+  applyFilters: (filters: FilterState) => boolean;
 } {
   const capture = usePostHogClientCapture();
 
@@ -147,6 +155,9 @@ export function useEventsSearchBar({
   const searchTypeRef = useRef(searchType);
   searchTypeRef.current = searchType;
 
+  const beforeApplyRef = useRef(beforeApply);
+  beforeApplyRef.current = beforeApply;
+
   // Re-attach the filters the grammar can't represent so neither a grammar
   // commit nor an AI apply ever drops them (no-silent-drop contract) — but drop
   // any skipped filter whose (column, key) the new set just produced, so an
@@ -172,11 +183,22 @@ export function useEventsSearchBar({
     (filters: FilterState) => {
       const { setFilterState, setSearchQuery, setSearchType } =
         applyRef.current;
-      setFilterState(mergeWithSkipped(filters));
+      const committedFilters = mergeWithSkipped(filters);
+      if (
+        beforeApplyRef.current?.({
+          filters: committedFilters,
+          searchQuery: null,
+          searchType: DEFAULT_SEARCH_TYPE,
+        }) === false
+      ) {
+        return false;
+      }
+      setFilterState(committedFilters);
       setSearchQuery(null);
       if (!sameScopes(DEFAULT_SEARCH_TYPE, searchTypeRef.current)) {
         setSearchType(DEFAULT_SEARCH_TYPE);
       }
+      return true;
     },
     [mergeWithSkipped],
   );
@@ -190,6 +212,7 @@ export function useEventsSearchBar({
   // re-fails the SAME input does not double-emit (an explicit enter/pick retry
   // still counts — a repeated attempt is signal).
   const lastErrorTextRef = useRef<string | null>(null);
+  const lastPreflightRejectedTextRef = useRef<string | null>(null);
 
   const commit = useCallback(
     (trigger: SearchCommitTrigger = "enter"): string | null => {
@@ -227,6 +250,12 @@ export function useEventsSearchBar({
         lastErrorTextRef.current = draftText;
         return null;
       }
+      if (
+        trigger === "blur" &&
+        draftText === lastPreflightRejectedTextRef.current
+      ) {
+        return null;
+      }
       // A valid commit clears the error-dedup baseline so a later re-failure of
       // the same text still emits.
       lastErrorTextRef.current = null;
@@ -235,6 +264,17 @@ export function useEventsSearchBar({
       // Re-attach the filters the grammar can't represent so the commit never
       // drops them (no-silent-drop contract; shared with the AI apply path).
       const committedFilters = mergeWithSkipped(result.filters);
+      if (
+        beforeApplyRef.current?.({
+          filters: committedFilters,
+          searchQuery: result.searchQuery,
+          searchType: result.searchType,
+        }) === false
+      ) {
+        lastPreflightRejectedTextRef.current = draftText;
+        return null;
+      }
+      lastPreflightRejectedTextRef.current = null;
       setFilterState(committedFilters);
       setSearchQuery(result.searchQuery);
       // Only write searchType when it actually changed. planCommit coerces a

@@ -56,7 +56,7 @@ export function EventsSearchBarRow({
    * Preserves filters the grammar can't represent (no-silent-drop contract) —
    * comes from `useEventsSearchBar.applyFilters`, not a raw `setFilterState`.
    */
-  onApplyFilters: (filters: FilterState) => void;
+  onApplyFilters: (filters: FilterState) => boolean;
   /**
    * Lazy filter-options: widen the requested column set on demand. Threaded to
    * the composer (request a field's values when typed) and fired on Ask AI open
