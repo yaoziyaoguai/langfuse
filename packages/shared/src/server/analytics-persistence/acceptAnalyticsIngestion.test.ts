@@ -7,6 +7,7 @@ import {
   acceptAnalyticsIngestion,
   assertRawAnalyticsBodySize,
   encodeRawAnalyticsIngestionEnvelope,
+  reconcileRawAnalyticsIngestionReceipts,
 } from "./acceptAnalyticsIngestion";
 
 const acceptedAt = new Date("2026-07-18T14:00:00.123Z");
@@ -54,7 +55,15 @@ describe("acceptAnalyticsIngestion", () => {
       }),
     ).resolves.toEqual({ operationId: "operation-1", status: "ACCEPTED" });
 
-    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope, {
+      operationId: "operation-1",
+      projectId: "project-1",
+      sourceOperationId: "source-1",
+      acceptedAt,
+      acceptedAtNanos: 1_784_383_200_123_000_000n,
+      canonicalizerVersion: "r1a-v1",
+      schemaVersion: 3,
+    });
     const checksum = createHash("sha256").update(body).digest("hex");
     expect(order).toEqual(["raw", "receipt"]);
     expect(uploadFileIfAbsent).toHaveBeenCalledWith({
@@ -81,7 +90,15 @@ describe("acceptAnalyticsIngestion", () => {
   });
 
   it("reconciles an identical prior raw write but rejects a checksum collision", async () => {
-    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope, {
+      operationId: "operation-1",
+      projectId: "project-1",
+      sourceOperationId: "operation-1",
+      acceptedAt,
+      acceptedAtNanos: 1_784_383_200_123_000_000n,
+      canonicalizerVersion: "r1a-v1",
+      schemaVersion: 3,
+    });
     const createReceipt = vi.fn(async (input) => ({
       operation: { id: input.operationId } as AnalyticsIngestionOperation,
       created: true,
@@ -142,6 +159,55 @@ describe("acceptAnalyticsIngestion", () => {
       expect.objectContaining({
         code: "ANALYTICS_RESOURCE_EXHAUSTED",
         retryable: false,
+      }),
+    );
+  });
+
+  it("recreates a missing receipt and outbox from a self-describing raw object", async () => {
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope, {
+      operationId: "orphan-operation",
+      projectId: "project-1",
+      sourceOperationId: "orphan-source",
+      acceptedAt,
+      acceptedAtNanos: 1_784_383_200_123_000_000n,
+      canonicalizerVersion: "r1a-v1",
+      schemaVersion: 3,
+    });
+    const createReceipt = vi.fn(async (input) => ({
+      operation: { id: input.operationId } as AnalyticsIngestionOperation,
+      created: true,
+    }));
+
+    await expect(
+      reconcileRawAnalyticsIngestionReceipts({
+        storageService: {
+          listFiles: vi.fn(async () => [
+            {
+              file: "prefix/analytics-ingestion/raw/project-1/orphan-operation.json",
+              createdAt: acceptedAt,
+            },
+          ]),
+          download: vi.fn(async () => body),
+        } as never,
+        rawPrefix: "prefix/",
+        createReceipt: createReceipt as never,
+      }),
+    ).resolves.toEqual({
+      scanned: 1,
+      recovered: 1,
+      existing: 0,
+      invalid: 0,
+    });
+    expect(createReceipt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "orphan-operation",
+        projectId: "project-1",
+        sourceOperationId: "orphan-source",
+        sourceChecksum: createHash("sha256").update(body).digest("hex"),
+        acceptedAt,
+        acceptedAtNanos: 1_784_383_200_123_000_000n,
+        rawObjectKey:
+          "prefix/analytics-ingestion/raw/project-1/orphan-operation.json",
       }),
     );
   });

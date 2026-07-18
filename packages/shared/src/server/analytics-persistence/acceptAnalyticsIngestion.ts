@@ -23,12 +23,28 @@ export type RawAnalyticsIngestionEnvelope = {
   };
 };
 
+export type RawAnalyticsIngestionReceiptSeed = {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly sourceOperationId: string;
+  readonly acceptedAt: Date;
+  readonly acceptedAtNanos: bigint;
+  readonly canonicalizerVersion: string;
+  readonly schemaVersion: number;
+};
+
+export type DecodedRawAnalyticsIngestionEnvelope =
+  RawAnalyticsIngestionEnvelope & {
+    readonly receipt: RawAnalyticsIngestionReceiptSeed | null;
+  };
+
 function validationError(): AnalyticsPersistenceError {
   return new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
 }
 
 export function encodeRawAnalyticsIngestionEnvelope(
   envelope: RawAnalyticsIngestionEnvelope,
+  receipt?: RawAnalyticsIngestionReceiptSeed,
 ): string {
   if (
     envelope.formatVersion !== RAW_FORMAT_VERSION ||
@@ -41,12 +57,26 @@ export function encodeRawAnalyticsIngestionEnvelope(
   ) {
     throw validationError();
   }
+  if (receipt) assertReceiptSeed(receipt);
   try {
     const body = JSON.stringify({
       formatVersion: RAW_FORMAT_VERSION,
       source: envelope.source,
       payload: envelope.payload,
       attribution: envelope.attribution,
+      ...(receipt
+        ? {
+            receipt: {
+              operationId: receipt.operationId,
+              projectId: receipt.projectId,
+              sourceOperationId: receipt.sourceOperationId,
+              acceptedAt: receipt.acceptedAt.toISOString(),
+              acceptedAtNanos: receipt.acceptedAtNanos.toString(),
+              canonicalizerVersion: receipt.canonicalizerVersion,
+              schemaVersion: receipt.schemaVersion,
+            },
+          }
+        : {}),
     });
     if (!body) throw validationError();
     JSON.parse(body);
@@ -59,7 +89,7 @@ export function encodeRawAnalyticsIngestionEnvelope(
 
 export function decodeRawAnalyticsIngestionEnvelope(
   body: string,
-): RawAnalyticsIngestionEnvelope {
+): DecodedRawAnalyticsIngestionEnvelope {
   try {
     const parsed: unknown = JSON.parse(body);
     if (
@@ -91,6 +121,7 @@ export function decodeRawAnalyticsIngestionEnvelope(
     ) {
       throw validationError();
     }
+    const receipt = decodeReceiptSeed(envelope.receipt);
     return {
       formatVersion: RAW_FORMAT_VERSION,
       source: envelope.source,
@@ -100,7 +131,61 @@ export function decodeRawAnalyticsIngestionEnvelope(
         ingestionSdkName: typedAttribution.ingestionSdkName,
         ingestionSdkVersion: typedAttribution.ingestionSdkVersion,
       },
+      receipt,
     };
+  } catch (error) {
+    if (error instanceof AnalyticsPersistenceError) throw error;
+    throw validationError();
+  }
+}
+
+function assertReceiptSeed(seed: RawAnalyticsIngestionReceiptSeed): void {
+  if (
+    !seed.operationId ||
+    !seed.projectId ||
+    !seed.sourceOperationId ||
+    !Number.isFinite(seed.acceptedAt.getTime()) ||
+    seed.acceptedAtNanos < 0n ||
+    seed.acceptedAtNanos / 1_000_000n !== BigInt(seed.acceptedAt.getTime()) ||
+    !seed.canonicalizerVersion ||
+    !Number.isSafeInteger(seed.schemaVersion) ||
+    seed.schemaVersion <= 0
+  ) {
+    throw validationError();
+  }
+}
+
+function decodeReceiptSeed(
+  value: unknown,
+): RawAnalyticsIngestionReceiptSeed | null {
+  if (value === undefined) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw validationError();
+  }
+  const seed = value as Record<string, unknown>;
+  if (
+    typeof seed.operationId !== "string" ||
+    typeof seed.projectId !== "string" ||
+    typeof seed.sourceOperationId !== "string" ||
+    typeof seed.acceptedAt !== "string" ||
+    typeof seed.acceptedAtNanos !== "string" ||
+    typeof seed.canonicalizerVersion !== "string" ||
+    typeof seed.schemaVersion !== "number"
+  ) {
+    throw validationError();
+  }
+  try {
+    const decoded = {
+      operationId: seed.operationId,
+      projectId: seed.projectId,
+      sourceOperationId: seed.sourceOperationId,
+      acceptedAt: new Date(seed.acceptedAt),
+      acceptedAtNanos: BigInt(seed.acceptedAtNanos),
+      canonicalizerVersion: seed.canonicalizerVersion,
+      schemaVersion: seed.schemaVersion,
+    };
+    assertReceiptSeed(decoded);
+    return decoded;
   } catch (error) {
     if (error instanceof AnalyticsPersistenceError) throw error;
     throw validationError();
@@ -165,7 +250,16 @@ export async function acceptAnalyticsIngestion(input: {
     throw validationError();
   }
 
-  const body = encodeRawAnalyticsIngestionEnvelope(input.envelope);
+  const sourceOperationId = input.sourceOperationId ?? operationId;
+  const body = encodeRawAnalyticsIngestionEnvelope(input.envelope, {
+    operationId,
+    projectId: input.projectId,
+    sourceOperationId,
+    acceptedAt,
+    acceptedAtNanos,
+    canonicalizerVersion: input.canonicalizerVersion,
+    schemaVersion: input.schemaVersion,
+  });
   assertRawAnalyticsBodySize(body);
   const sourceChecksum = sha256(body);
   const rawObjectKey = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/${safeBlobKeySegment(input.projectId)}/${safeBlobKeySegment(operationId)}.json`;
@@ -193,7 +287,7 @@ export async function acceptAnalyticsIngestion(input: {
     client: input.client,
     operationId,
     projectId: input.projectId,
-    sourceOperationId: input.sourceOperationId ?? operationId,
+    sourceOperationId,
     sourceChecksum,
     rawObjectKey,
     acceptedAt,
@@ -204,4 +298,73 @@ export async function acceptAnalyticsIngestion(input: {
     statusExpiresAt: new Date(acceptedAt.getTime() + STATUS_RETENTION_MS),
   });
   return { operationId, status: "ACCEPTED" };
+}
+
+export async function reconcileRawAnalyticsIngestionReceipts(input: {
+  readonly storageService: StorageService;
+  readonly client?: PrismaClient;
+  readonly rawPrefix?: string;
+  readonly limit?: number;
+  readonly createReceipt?: typeof createAnalyticsIngestionReceipt;
+}): Promise<{
+  readonly scanned: number;
+  readonly recovered: number;
+  readonly existing: number;
+  readonly invalid: number;
+}> {
+  const limit = input.limit ?? 100;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new TypeError("Invalid raw analytics reconciliation limit");
+  }
+  const prefix = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/`;
+  const objects = (await input.storageService.listFiles(prefix)).slice(
+    0,
+    limit,
+  );
+  const createReceipt = input.createReceipt ?? createAnalyticsIngestionReceipt;
+  let recovered = 0;
+  let existing = 0;
+  let invalid = 0;
+
+  for (const object of objects) {
+    const body = await input.storageService.download(object.file);
+    let decoded: DecodedRawAnalyticsIngestionEnvelope;
+    try {
+      decoded = decodeRawAnalyticsIngestionEnvelope(body);
+    } catch (error) {
+      if (!(error instanceof AnalyticsPersistenceError)) throw error;
+      invalid += 1;
+      continue;
+    }
+    const seed = decoded.receipt;
+    if (!seed) {
+      invalid += 1;
+      continue;
+    }
+    const expectedKey = `${prefix}${safeBlobKeySegment(seed.projectId)}/${safeBlobKeySegment(seed.operationId)}.json`;
+    if (object.file !== expectedKey) {
+      invalid += 1;
+      continue;
+    }
+    const result = await createReceipt({
+      client: input.client,
+      operationId: seed.operationId,
+      projectId: seed.projectId,
+      sourceOperationId: seed.sourceOperationId,
+      sourceChecksum: sha256(body),
+      rawObjectKey: object.file,
+      acceptedAt: seed.acceptedAt,
+      acceptedAtNanos: seed.acceptedAtNanos,
+      canonicalizerVersion: seed.canonicalizerVersion,
+      schemaVersion: seed.schemaVersion,
+      recoverableUntil: new Date(seed.acceptedAt.getTime() + REPLAY_HORIZON_MS),
+      statusExpiresAt: new Date(
+        seed.acceptedAt.getTime() + STATUS_RETENTION_MS,
+      ),
+    });
+    if (result.created) recovered += 1;
+    else existing += 1;
+  }
+
+  return { scanned: objects.length, recovered, existing, invalid };
 }
