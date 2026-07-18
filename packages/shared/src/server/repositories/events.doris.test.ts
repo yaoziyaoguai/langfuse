@@ -11,11 +11,36 @@ const mocks = vi.hoisted(() => ({
   },
   traces: {
     list: vi.fn(),
+    get: vi.fn(),
   },
+  observations: {
+    list: vi.fn(),
+    listForTrace: vi.fn(),
+    count: vi.fn(),
+    counts: vi.fn(),
+    countForTrace: vi.fn(),
+    get: vi.fn(),
+    filterOptionValues: vi.fn(),
+    numericStats: vi.fn(),
+    latestSdkMetadata: vi.fn(),
+  },
+  modelFindMany: vi.fn(),
+  traceControlFindMany: vi.fn(),
+  traceControlFindUnique: vi.fn(),
   publicObservations: vi.fn(),
   publicObservationCount: vi.fn(),
   publicTraces: vi.fn(),
   publicTraceCount: vi.fn(),
+}));
+
+vi.mock("../../db", () => ({
+  prisma: {
+    model: { findMany: mocks.modelFindMany },
+    traceControlState: {
+      findMany: mocks.traceControlFindMany,
+      findUnique: mocks.traceControlFindUnique,
+    },
+  },
 }));
 
 vi.mock("./telemetry/doris/runtime", () => ({
@@ -35,15 +60,32 @@ vi.mock("./telemetry/doris/publicTraces", () => ({
 
 import {
   getSessionMetricsFromEvents,
+  getObservationByIdFromEventsTable,
+  getAgentGraphDataFromEventsTable,
+  getEventsFilterOptionsForColumns,
+  getEventsFilterOptionValuesPage,
+  getEventsGroupedByTraceName,
+  getEventsGroupedByTraceTags,
+  getEventsGroupedByUserId,
+  getEventsNumericStatsByFilterColumn,
+  getLatestSdkVersionInfoFromEvents,
+  getObservationsCountsFromEventsTable,
+  getObservationsBatchIOFromEventsTable,
+  getObservationsForTraceFromEventsTable,
+  getObservationsTraceIdsFromEventsTable,
+  getObservationsWithModelDataFromEventsTable,
+  getObservationFullIOForSessionFromEventsTable,
   getObservationsCountFromEventsTableForPublicApi,
   getObservationsV2FromEventsTableForPublicApi,
   getTracesCountFromEventsTableForPublicApi,
+  getTraceByIdFromEventsTable,
   getTracesFromEventsTableForPublicApi,
   getTracesIdentifierForSessionFromEvents,
   getUserMetricsFromEventsTable,
   getUsersCountFromEventsTable,
   getUsersFromEventsTable,
   hasAnySessionFromEventsTable,
+  hasAnyTraceFromEventsTable,
   hasAnyUserFromEventsTable,
 } from "./events";
 
@@ -81,9 +123,400 @@ const session = {
   duration: 3,
 };
 
+const observation = {
+  id: "span-1",
+  traceId: "trace-1",
+  projectId: "project-1",
+  partitionDate: "2026-07-17",
+  parentObservationId: null,
+  type: "GENERATION",
+  name: "generation",
+  environment: "production",
+  userId: "user-1",
+  sessionId: "session-1",
+  traceName: "trace",
+  release: null,
+  version: null,
+  level: "DEFAULT",
+  statusMessage: null,
+  isAppRoot: true,
+  bookmarked: false,
+  public: false,
+  startTime: new Date("2026-07-17T10:00:00.000Z"),
+  endTime: new Date("2026-07-17T10:00:02.000Z"),
+  completionStartTime: null,
+  createdAt: new Date("2026-07-17T10:00:00.000Z"),
+  updatedAt: new Date("2026-07-17T10:00:02.000Z"),
+  providedModelName: "gpt-test",
+  internalModelId: null,
+  promptId: null,
+  promptName: null,
+  promptVersion: null,
+  totalInputTokens: 10,
+  totalOutputTokens: 5,
+  totalUsage: 15,
+  totalCost: 0.1,
+  latency: 2,
+  timeToFirstToken: null,
+  tags: ["prod"],
+  usageDetails: { input: 10, output: 5, total: 15 },
+  costDetails: { total: 0.1 },
+  providedUsageDetails: {},
+  providedCostDetails: {},
+  toolDefinitionsCount: 0,
+  toolCallsCount: 0,
+  inputPreview: "preview",
+  outputPreview: "preview",
+};
+
 describe("events repository Doris routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.modelFindMany.mockResolvedValue([]);
+    mocks.traceControlFindMany.mockResolvedValue([]);
+    mocks.traceControlFindUnique.mockResolvedValue(null);
+  });
+
+  it("routes the events table list and stable order through Doris", async () => {
+    mocks.observations.list.mockResolvedValue({
+      items: [observation],
+      nextCursor: null,
+    });
+
+    await expect(
+      getObservationsWithModelDataFromEventsTable({
+        projectId: "project-1",
+        filter: [
+          {
+            type: "datetime",
+            column: "startTime",
+            operator: ">=",
+            value: new Date("2026-07-17T00:00:00.000Z"),
+          },
+          {
+            type: "datetime",
+            column: "startTime",
+            operator: "<",
+            value: new Date("2026-07-18T00:00:00.000Z"),
+          },
+        ],
+        orderBy: { column: "totalCost", order: "ASC" },
+        limit: 50,
+        offset: 100,
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "span-1",
+        traceTags: ["prod"],
+        modelId: null,
+      }),
+    ]);
+    expect(mocks.observations.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        range: {
+          from: new Date("2026-07-17T00:00:00.000Z"),
+          to: new Date("2026-07-18T00:00:00.000Z"),
+        },
+        orderBy: { column: "totalCost", order: "ASC" },
+        offset: 100,
+        limit: 50,
+      }),
+    );
+  });
+
+  it("routes direct events point readers through locator-backed Doris detail", async () => {
+    mocks.observations.get.mockResolvedValue({
+      ...observation,
+      input: { question: "full" },
+      output: { answer: "full" },
+      metadata: { region: "eu" },
+    });
+    mocks.traces.get.mockResolvedValue({
+      id: "trace-1",
+      projectId: "project-1",
+      timestamp: observation.startTime,
+      endTime: observation.endTime,
+      name: "trace",
+      environment: "production",
+      userId: "user-1",
+      sessionId: "session-1",
+      release: null,
+      version: null,
+      tags: ["prod"],
+      inputPreview: "preview",
+      outputPreview: "preview",
+      input: { question: "full" },
+      output: { answer: "full" },
+      metadata: { region: "eu" },
+      rootObservationId: "span-1",
+      fallbackObservationId: "span-1",
+      incomplete: false,
+      observationCount: 1,
+      totalInputTokens: 10,
+      totalOutputTokens: 5,
+      totalUsage: 15,
+      totalCost: 0.1,
+      latency: 2,
+    });
+
+    await expect(
+      getObservationByIdFromEventsTable({
+        projectId: "project-1",
+        id: "span-1",
+        fetchWithInputOutput: true,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ id: "span-1", input: { question: "full" } }),
+    );
+    await expect(
+      getTraceByIdFromEventsTable({
+        projectId: "project-1",
+        traceId: "trace-1",
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ id: "trace-1", input: { question: "full" } }),
+    );
+  });
+
+  it("routes event counts and trace-scoped detail through Doris", async () => {
+    mocks.observations.counts.mockResolvedValue({
+      totalCount: 3,
+      uniqueTraceCount: 2,
+    });
+    mocks.observations.listForTrace.mockResolvedValue({
+      items: [observation],
+      nextCursor: null,
+    });
+
+    await expect(
+      getObservationsCountsFromEventsTable({
+        projectId: "project-1",
+        filter: [
+          {
+            type: "datetime",
+            column: "startTime",
+            operator: ">=",
+            value: new Date("2026-07-17T00:00:00.000Z"),
+          },
+          {
+            type: "datetime",
+            column: "startTime",
+            operator: "<",
+            value: new Date("2026-07-18T00:00:00.000Z"),
+          },
+        ],
+      }),
+    ).resolves.toEqual({ totalCount: 3, uniqueTraceCount: 2 });
+    await expect(
+      getObservationsForTraceFromEventsTable({
+        projectId: "project-1",
+        traceId: "trace-1",
+        selectIOAndMetadata: true,
+      }),
+    ).resolves.toEqual({
+      observations: [expect.objectContaining({ id: "span-1" })],
+      totalCount: 1,
+    });
+    expect(mocks.observations.listForTrace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        traceId: "trace-1",
+        includeFullContent: true,
+      }),
+    );
+  });
+
+  it("routes the bounded trace existence probe through Doris", async () => {
+    mocks.observations.count.mockResolvedValue(1);
+
+    await expect(hasAnyTraceFromEventsTable("project-1")).resolves.toBe(true);
+    expect(mocks.observations.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        range: { from: expect.any(Date), to: expect.any(Date) },
+        filters: [],
+      }),
+    );
+  });
+
+  it("routes batch and session-scoped full content through Doris", async () => {
+    const fullObservation = {
+      ...observation,
+      input: { question: "full" },
+      output: { answer: "full" },
+      metadata: { region: "eu" },
+      toolCalls: ["search"],
+      toolCallNames: ["search"],
+    };
+    mocks.observations.list.mockResolvedValue({
+      items: [fullObservation],
+      nextCursor: null,
+    });
+    mocks.observations.get.mockResolvedValue(fullObservation);
+
+    await expect(
+      getObservationsBatchIOFromEventsTable({
+        projectId: "project-1",
+        observations: [{ id: "span-1", traceId: "trace-1" }],
+        minStartTime: new Date("2026-07-17T09:59:59.000Z"),
+        maxStartTime: new Date("2026-07-17T10:00:01.000Z"),
+        truncated: false,
+        includeToolCallFields: true,
+      }),
+    ).resolves.toEqual([
+      {
+        id: "span-1",
+        input: '{"question":"full"}',
+        output: '{"answer":"full"}',
+        metadata: { region: "eu" },
+        toolCalls: ["search"],
+        toolCallNames: ["search"],
+      },
+    ]);
+    await expect(
+      getObservationFullIOForSessionFromEventsTable({
+        projectId: "project-1",
+        sessionId: "session-1",
+        traceId: "trace-1",
+        observationId: "span-1",
+        startTime: observation.startTime,
+      }),
+    ).resolves.toEqual({
+      id: "span-1",
+      input: '{"question":"full"}',
+      output: '{"answer":"full"}',
+      metadata: { region: "eu" },
+    });
+
+    await expect(
+      getObservationsTraceIdsFromEventsTable({
+        projectId: "project-1",
+        observationIds: ["span-1"],
+      }),
+    ).resolves.toEqual([{ id: "span-1", traceId: "trace-1" }]);
+  });
+
+  it("routes trace graph rows through the bounded Doris detail reader", async () => {
+    mocks.observations.listForTrace.mockResolvedValue({
+      items: [
+        {
+          ...observation,
+          metadata: { langgraph_node: "agent", langgraph_step: 2 },
+        },
+      ],
+      nextCursor: null,
+    });
+
+    await expect(
+      getAgentGraphDataFromEventsTable({
+        projectId: "project-1",
+        traceId: "trace-1",
+        chMinStartTime: "2026-07-17 09:59:00.000",
+        chMaxStartTime: "2026-07-17 10:01:00.000",
+      }),
+    ).resolves.toEqual([
+      {
+        id: "span-1",
+        parent_observation_id: null,
+        type: "GENERATION",
+        name: "generation",
+        start_time: "2026-07-17T10:00:00.000Z",
+        end_time: "2026-07-17T10:00:02.000Z",
+        node: "agent",
+        step: 2,
+      },
+    ]);
+  });
+
+  it("routes event filter options and numeric ranges through bounded Doris scans", async () => {
+    mocks.observations.filterOptionValues.mockImplementation(
+      async ({ column }: { column: string }) => [
+        { column, value: `${column}-value`, count: 2 },
+      ],
+    );
+    mocks.observations.numericStats.mockResolvedValue({
+      min: 0.25,
+      max: 2,
+      avg: 1.125,
+      count: 4,
+    });
+    const filter = [
+      {
+        type: "datetime" as const,
+        column: "startTime",
+        operator: ">=" as const,
+        value: new Date("2026-07-17T00:00:00.000Z"),
+      },
+      {
+        type: "datetime" as const,
+        column: "startTime",
+        operator: "<" as const,
+        value: new Date("2026-07-18T00:00:00.000Z"),
+      },
+    ];
+
+    await expect(
+      getEventsFilterOptionsForColumns({
+        projectId: "project-1",
+        filter,
+        columns: ["name", "traceTags", "experimentId"],
+      }),
+    ).resolves.toEqual([
+      { column: "name", value: "name-value", count: 2 },
+      { column: "traceTags", value: "traceTags-value", count: 2 },
+    ]);
+    await expect(
+      getEventsFilterOptionValuesPage({
+        projectId: "project-1",
+        filter,
+        column: "userId",
+        limit: 20,
+        offset: 40,
+      }),
+    ).resolves.toEqual([{ column: "userId", value: "userId-value", count: 2 }]);
+    await expect(
+      getEventsNumericStatsByFilterColumn("project-1", filter, "latency"),
+    ).resolves.toEqual({ min: 0.25, max: 2, avg: 1.125, count: 4 });
+    await expect(
+      getEventsGroupedByTraceName("project-1", filter),
+    ).resolves.toEqual([{ traceName: "traceName-value", count: 2 }]);
+    await expect(
+      getEventsGroupedByTraceTags("project-1", filter),
+    ).resolves.toEqual([{ tag: "traceTags-value" }]);
+    await expect(
+      getEventsGroupedByUserId("project-1", filter),
+    ).resolves.toEqual([{ userId: "userId-value", count: 2 }]);
+
+    expect(mocks.observations.filterOptionValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: {
+          from: new Date("2026-07-17T00:00:00.000Z"),
+          to: new Date("2026-07-18T00:00:00.000Z"),
+        },
+      }),
+    );
+    expect(mocks.observations.filterOptionValues).not.toHaveBeenCalledWith(
+      expect.objectContaining({ column: "experimentId" }),
+    );
+  });
+
+  it("routes recent SDK attribution lookup through Doris", async () => {
+    mocks.observations.latestSdkMetadata.mockResolvedValue({
+      isOtel: true,
+      name: "js",
+      version: "4.1.0",
+      language: "javascript",
+    });
+
+    await expect(
+      getLatestSdkVersionInfoFromEvents({ projectId: "project-1" }),
+    ).resolves.toEqual({
+      isOtel: true,
+      name: "js",
+      version: "4.1.0",
+      language: "javascript",
+    });
   });
 
   it("paginates user rows and preserves their existing shape", async () => {

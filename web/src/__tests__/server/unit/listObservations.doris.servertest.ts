@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AnalyticsQueryValidationError } from "@langfuse/shared/src/server";
-import type { ServerContext } from "../../../types";
+import type { ServerContext } from "../../../features/mcp/types";
 
 const mocks = vi.hoisted(() => ({
   getObservations: vi.fn(),
@@ -12,7 +12,7 @@ vi.mock("@langfuse/shared/src/server", async () => ({
   getObservationsV2FromEventsTableForPublicApi: mocks.getObservations,
 }));
 
-vi.mock("../../../core/run-mcp-tool", () => ({
+vi.mock("../../../features/mcp/core/run-mcp-tool", () => ({
   runMcpTool: vi.fn(async ({ fn }) =>
     fn({
       setAttribute: vi.fn(),
@@ -21,7 +21,7 @@ vi.mock("../../../core/run-mcp-tool", () => ({
   ),
 }));
 
-import { handleListObservations } from "./listObservations";
+import { handleListObservations } from "../../../features/mcp/features/observations/tools/listObservations";
 
 const context: ServerContext = {
   projectId: "project-1",

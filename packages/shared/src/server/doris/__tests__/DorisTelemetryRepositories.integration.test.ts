@@ -1,13 +1,33 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { DorisClientManager } from "../../doris/client";
 import { DorisPoCMysqlClient } from "../../doris-poc/mysqlClient";
+import { prisma } from "../../../db";
+import {
+  getObservationByIdFromEventsTable,
+  getObservationsCountFromEventsTableForPublicApi,
+  getObservationsFromEventsTableForPublicApi,
+  getObservationsTraceIdsFromEventsTable,
+  getTraceByIdFromEventsTable,
+  getTracesCountFromEventsTableForPublicApi,
+  getTracesFromEventsTableForPublicApi,
+  getUsersCountFromEventsTable,
+  getUsersFromEventsTable,
+} from "../../repositories/events";
+import { getAgentGraphData } from "../../repositories/traces";
+import { hasAnySession } from "../../repositories/trace-sessions";
 import { DorisObservationsRepository } from "../../repositories/telemetry/doris/observations";
 import { DorisSessionsRepository } from "../../repositories/telemetry/doris/sessions";
 import { DorisTracesRepository } from "../../repositories/telemetry/doris/traces";
 import { DorisUsersRepository } from "../../repositories/telemetry/doris/users";
+import {
+  getSessionsTable,
+  getSessionsTableCount,
+} from "../../services/sessions-ui-table-service";
 
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
 const DB = "langfuse_poc";
+const TEST_ORGANIZATION_ID = "doris-telemetry-read-integration";
 
 describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
   let db: DorisPoCMysqlClient;
@@ -17,6 +37,70 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
   let users: DorisUsersRepository;
 
   beforeAll(async () => {
+    await prisma.organization.deleteMany({
+      where: { id: TEST_ORGANIZATION_ID },
+    });
+    await prisma.organization.create({
+      data: { id: TEST_ORGANIZATION_ID, name: "Doris telemetry read test" },
+    });
+    for (const projectId of [
+      "repository-project",
+      "trace-repository-project",
+    ]) {
+      await prisma.project.create({
+        data: {
+          id: projectId,
+          name: `Doris telemetry read test ${projectId}`,
+          orgId: TEST_ORGANIZATION_ID,
+        },
+      });
+      await prisma.analyticsIngestionOperation.create({
+        data: {
+          id: `operation-${projectId}`,
+          projectId,
+          sourceOperationId: `source-${projectId}`,
+          sourceChecksum: "a".repeat(64),
+          rawObjectKey: `raw/${projectId}.json`,
+          acceptedAt: new Date("2026-07-17T00:00:00.000Z"),
+          acceptedAtNanos: 1_768_435_200_000_000_000n,
+          canonicalizerVersion: "r1a-v1",
+          schemaVersion: 1,
+          recoverableUntil: new Date("2030-01-01T00:00:00.000Z"),
+          statusExpiresAt: new Date("2030-01-08T00:00:00.000Z"),
+        },
+      });
+    }
+    await prisma.analyticsEntityHead.createMany({
+      data: [
+        {
+          projectId: "repository-project",
+          entityType: "EVENT",
+          entityKey: "event:trace-1:span-b",
+          lookupId: "span-b",
+          owningTraceId: "trace-1",
+          sourceVersion: 1n,
+          canonicalPayloadHash: "b".repeat(64),
+          partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+          canonicalizerVersion: "r1a-v1",
+          fenceGeneration: 0n,
+          operationId: "operation-repository-project",
+        },
+        ...["root-span", "child-span"].map((observationId, index) => ({
+          projectId: "trace-repository-project",
+          entityType: "EVENT" as const,
+          entityKey: `event:rooted-trace:${observationId}`,
+          lookupId: observationId,
+          owningTraceId: "rooted-trace",
+          sourceVersion: BigInt(index + 1),
+          canonicalPayloadHash: String(index + 1).repeat(64),
+          partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+          canonicalizerVersion: "r1a-v1",
+          fenceGeneration: 0n,
+          operationId: "operation-trace-repository-project",
+        })),
+      ],
+    });
+
     db = new DorisPoCMysqlClient({
       host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
       port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
@@ -84,6 +168,10 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       environment?: string;
       userId?: string;
       sessionId?: string;
+      source?: string;
+      sdkName?: string;
+      sdkVersion?: string;
+      sdkLanguage?: string;
     }) =>
       db.execute(
         `INSERT INTO events_current
@@ -92,13 +180,13 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
            session_id, start_time,
            end_time, completion_start_time,
            created_at, updated_at, source, ingestion_sdk_name,
-           ingestion_sdk_version, tags, metadata, usage_details, cost_details,
+           ingestion_sdk_version, telemetry_sdk_language, tags, metadata, usage_details, cost_details,
            tool_definitions, tool_calls, tool_call_names, input, output,
            input_preview, output_preview, total_input_tokens, total_output_tokens,
          total_cost)
          VALUES (?, '2026-07-17', ?, ?, ?, ?, 1000, 'GENERATION', ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
-           'api', 'js', '5.0.0', ARRAY('prod'), CAST(? AS VARIANT),
+           ?, ?, ?, ?, ARRAY('prod'), CAST(? AS VARIANT),
            CAST(? AS VARIANT), CAST(? AS VARIANT), CAST(? AS VARIANT),
            ARRAY('search'), ARRAY('search'), ?, ?, ?, ?, 10, 5, 0.125)`,
         [
@@ -116,6 +204,10 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
           input.startTime,
           input.startTime,
           input.startTime,
+          input.source ?? "api",
+          input.sdkName ?? "js",
+          input.sdkVersion ?? "5.0.0",
+          input.sdkLanguage ?? null,
           JSON.stringify({ region: "eu" }),
           JSON.stringify({ input: 10, output: 5, total: 15 }),
           JSON.stringify({ input: 0.1, output: 0.025, total: 0.125 }),
@@ -140,6 +232,8 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       spanId: "span-b",
       name: "b",
       startTime: "2026-07-17 10:00:00.000000",
+      source: "otel",
+      sdkLanguage: "javascript",
     });
     await insert({
       projectId: "other-project",
@@ -235,6 +329,10 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
 
   afterAll(async () => {
     await db?.end();
+    await DorisClientManager.getInstance().closeAllConnections();
+    await prisma.organization.deleteMany({
+      where: { id: TEST_ORGANIZATION_ID },
+    });
   });
 
   it("paginates without gaps, duplicates, or cross-project rows", async () => {
@@ -298,6 +396,97 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
 
     expect(first.items.map(({ id }) => id)).toEqual(["span-a"]);
     expect(last.items.map(({ id }) => id)).toEqual(["span-b"]);
+  });
+
+  it("loads event/trace facets, numeric ranges, and SDK attribution without ClickHouse", async () => {
+    const bounded = {
+      projectId: "repository-project",
+      range: {
+        from: new Date("2026-07-17T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      filters: [],
+    };
+
+    await expect(
+      observations.filterOptionValues({
+        ...bounded,
+        column: "name",
+        limit: 10,
+      }),
+    ).resolves.toEqual([
+      { column: "name", value: "a", count: 1 },
+      { column: "name", value: "b", count: 1 },
+    ]);
+    await expect(
+      observations.filterOptionValues({
+        ...bounded,
+        column: "traceTags",
+        limit: 10,
+      }),
+    ).resolves.toEqual([{ column: "traceTags", value: "prod", count: 2 }]);
+    await expect(
+      observations.filterOptionValues({
+        ...bounded,
+        column: "toolNames",
+        limit: 10,
+      }),
+    ).resolves.toEqual([{ column: "toolNames", value: "search", count: 2 }]);
+    await expect(
+      observations.filterOptionValues({
+        ...bounded,
+        column: "calledToolNames",
+        limit: 10,
+      }),
+    ).resolves.toEqual([
+      { column: "calledToolNames", value: "search", count: 2 },
+    ]);
+    await expect(
+      observations.numericStats({
+        ...bounded,
+        column: "totalCost",
+      }),
+    ).resolves.toEqual({ min: 0.125, max: 0.125, avg: 0.125, count: 2 });
+    await expect(
+      observations.numericStats({
+        ...bounded,
+        column: "toolDefinitions",
+      }),
+    ).resolves.toEqual({ min: 1, max: 1, avg: 1, count: 2 });
+    await expect(
+      observations.numericStats({
+        ...bounded,
+        column: "toolCalls",
+      }),
+    ).resolves.toEqual({ min: 1, max: 1, avg: 1, count: 2 });
+    await expect(observations.latestSdkMetadata(bounded)).resolves.toEqual({
+      isOtel: true,
+      name: "js",
+      version: "5.0.0",
+      language: "javascript",
+    });
+
+    await expect(
+      traces.filterOptionValues({
+        projectId: "trace-repository-project",
+        range: bounded.range,
+        filters: [],
+        column: "name",
+        limit: 10,
+      }),
+    ).resolves.toEqual([
+      { value: "fallback", count: 1 },
+      { value: "real root", count: 1 },
+    ]);
+    await expect(
+      traces.filterOptionValues({
+        projectId: "trace-repository-project",
+        range: bounded.range,
+        filters: [],
+        column: "tags",
+        limit: 10,
+      }),
+    ).resolves.toEqual([{ value: "prod", count: 2 }]);
   });
 
   it("uses the locator for full detail and decodes canonical fields", async () => {
@@ -508,5 +697,135 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
         },
       ],
     });
+  });
+
+  it("routes high-level trace, observation, session, and user reads to Doris", async () => {
+    const from = new Date("2026-07-17T00:00:00.000Z");
+    const to = new Date("2026-07-18T00:00:00.000Z");
+    const observationQuery = {
+      projectId: "repository-project",
+      page: 1,
+      limit: 10,
+      fromStartTime: from.toISOString(),
+      toStartTime: to.toISOString(),
+      advancedFilters: [],
+    };
+    const [observationRows, observationCount] = await Promise.all([
+      getObservationsFromEventsTableForPublicApi(observationQuery),
+      getObservationsCountFromEventsTableForPublicApi(observationQuery),
+    ]);
+    expect(observationRows.map(({ id }) => id)).toEqual(["span-b", "span-a"]);
+    expect(observationCount).toBe(2);
+
+    const traceQuery = {
+      projectId: "trace-repository-project",
+      page: 1,
+      limit: 10,
+      fromTimestamp: from.toISOString(),
+      toTimestamp: to.toISOString(),
+      fields: ["core", "observations"],
+    };
+    const [traceRows, traceCount] = await Promise.all([
+      getTracesFromEventsTableForPublicApi(traceQuery),
+      getTracesCountFromEventsTableForPublicApi(traceQuery),
+    ]);
+    expect(traceRows.map(({ id }) => id)).toEqual([
+      "rooted-trace",
+      "fallback-trace",
+    ]);
+    expect(traceRows[0]?.observations).toEqual(["child-span", "root-span"]);
+    expect(traceCount).toBe(2);
+
+    await expect(
+      getObservationByIdFromEventsTable({
+        projectId: "repository-project",
+        id: "span-b",
+        fetchWithInputOutput: true,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ id: "span-b", input: { question: "价格" } }),
+    );
+    await expect(
+      getTraceByIdFromEventsTable({
+        projectId: "trace-repository-project",
+        traceId: "rooted-trace",
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ id: "rooted-trace", name: "real root" }),
+    );
+    await expect(
+      getObservationsTraceIdsFromEventsTable({
+        projectId: "repository-project",
+        observationIds: ["span-b"],
+      }),
+    ).resolves.toEqual([{ id: "span-b", traceId: "trace-1" }]);
+    await expect(
+      getAgentGraphData({
+        projectId: "trace-repository-project",
+        traceId: "rooted-trace",
+        chMinStartTime: "2026-07-17 00:00:00.000",
+        chMaxStartTime: "2026-07-18 00:00:00.000",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "root-span" }),
+      expect.objectContaining({ id: "child-span" }),
+    ]);
+
+    const boundedFilter = [
+      {
+        type: "datetime" as const,
+        column: "createdAt",
+        operator: ">=" as const,
+        value: from,
+      },
+      {
+        type: "datetime" as const,
+        column: "createdAt",
+        operator: "<" as const,
+        value: to,
+      },
+    ];
+    const [sessionRows, sessionCount] = await Promise.all([
+      getSessionsTable({
+        projectId: "derived-repository-project",
+        filter: boundedFilter,
+        limit: 10,
+        page: 0,
+      }),
+      getSessionsTableCount({
+        projectId: "derived-repository-project",
+        filter: boundedFilter,
+      }),
+    ]);
+    expect(sessionRows).toEqual([
+      expect.objectContaining({
+        session_id: "session-shared",
+        trace_environment: "production",
+      }),
+    ]);
+    expect(sessionCount).toBe(1);
+    await expect(hasAnySession("derived-repository-project")).resolves.toBe(
+      true,
+    );
+
+    const userFilter = boundedFilter.map((filter) => ({
+      ...filter,
+      column: "timestamp",
+    }));
+    const [userRows, userCount] = await Promise.all([
+      getUsersFromEventsTable(
+        "derived-repository-project",
+        userFilter,
+        undefined,
+        10,
+        0,
+      ),
+      getUsersCountFromEventsTable("derived-repository-project", userFilter),
+    ]);
+    expect(userRows.map(({ user }) => user).sort()).toEqual([
+      "user-a",
+      "user-b",
+    ]);
+    expect(userCount).toEqual([{ totalCount: "2" }]);
   });
 });

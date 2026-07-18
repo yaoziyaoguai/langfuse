@@ -157,6 +157,26 @@ describe("Doris traces repository", () => {
     );
   });
 
+  it("applies an allowlisted trace order with stable offset pagination", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisTracesRepository({ query });
+
+    await repository.list({
+      projectId: "project-1",
+      range,
+      filters: [],
+      orderBy: { column: "name", order: "ASC" },
+      offset: 100,
+      limit: 50,
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "ORDER BY name ASC, trace_timestamp ASC, trace_id ASC",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain("LIMIT ? OFFSET ?");
+    expect(query.mock.calls[0]?.[1].slice(-2)).toEqual([51, 100]);
+  });
+
   it("derives an exact multi-partition detail bound from entity heads", async () => {
     const locateTrace = vi.fn().mockResolvedValue([
       {
@@ -251,6 +271,40 @@ describe("Doris traces repository", () => {
       }),
     ).rejects.toEqual(
       expect.objectContaining({ code: "InvalidTimeRange", maxDays: 30 }),
+    );
+  });
+
+  it("returns bounded representative trace filter options", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce([{ value: "root name", count: "3" }])
+      .mockResolvedValueOnce([{ value: "prod", count: "2" }]);
+    const repository = new DorisTracesRepository({ query });
+
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "name",
+        limit: 100,
+      }),
+    ).resolves.toEqual([{ value: "root name", count: 3 }]);
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "tags",
+        limit: 100,
+      }),
+    ).resolves.toEqual([{ value: "prod", count: 2 }]);
+
+    expect(query.mock.calls[0]?.[0]).toContain("matched_trace_ids AS");
+    expect(query.mock.calls[0]?.[0]).toContain("representative_rank = 1");
+    expect(query.mock.calls[0]?.[0]).toContain("r.name AS value");
+    expect(query.mock.calls[1]?.[0]).toContain(
+      "LATERAL VIEW explode(r.tags) exploded AS value",
     );
   });
 });

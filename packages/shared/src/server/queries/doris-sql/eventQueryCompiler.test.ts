@@ -103,6 +103,24 @@ describe("Doris event query compiler", () => {
     expect(compiled.sql).not.toContain("e.output AS output");
   });
 
+  it("compiles an allowlisted order with stable tie-breakers and offset", () => {
+    const compiled = compileDorisVisibleEventsQuery({
+      projectId: "project-1",
+      range,
+      projection: "list",
+      filters: [],
+      orderBy: { column: "totalCost", order: "ASC" },
+      offset: 40,
+      limit: 20,
+    });
+
+    expect(compiled.sql).toContain(
+      "ORDER BY e.total_cost ASC, e.start_time ASC, e.trace_id ASC, e.span_id ASC",
+    );
+    expect(compiled.sql).toContain("LIMIT ? OFFSET ?");
+    expect(compiled.params.slice(-2)).toEqual([20, 40]);
+  });
+
   it("compiles every storage-local filter family with bound values", () => {
     const compiled = compileDorisVisibleEventsQuery({
       projectId: "project-1",

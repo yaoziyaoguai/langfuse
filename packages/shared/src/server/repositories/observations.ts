@@ -12,6 +12,7 @@ import { logger } from "../logger";
 import { scoreBooleansAggregation } from "../queries/clickhouse-sql/query-fragments";
 import {
   InternalServerError,
+  InvalidRequestError,
   LangfuseNotFoundError,
   PayloadTooLargeError,
 } from "../../errors";
@@ -61,6 +62,14 @@ import {
 import { recordDistribution } from "../instrumentation";
 import { DEFAULT_RENDERING_PROPS, RenderingProps } from "../utils/rendering";
 import { shouldSkipObservationsFinal } from "../queries/clickhouse-sql/query-options";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
+import { toDorisEventsObservation } from "./telemetry/doris/adapters";
+import type { DorisEventOrderBy } from "../queries/doris-sql/eventQueryCompiler";
+import type { EventsTableFilterState } from "../../types";
+import type { DorisObservation } from "./telemetry/doris/observations";
 
 /**
  * Checks if observation exists in clickhouse.
@@ -146,6 +155,60 @@ export const getObservationsForTrace = async <IncludeIO extends boolean>(
     includeIO = false,
     preferredClickhouseService,
   } = opts;
+
+  if (isDorisAnalyticsBackend()) {
+    const observations: DorisObservation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page =
+        await getDorisTelemetryRepositories().observations.listForTrace({
+          projectId,
+          traceId,
+          filters: timestamp
+            ? [
+                {
+                  type: "datetime",
+                  column: "startTime",
+                  operator: ">=",
+                  value: new Date(timestamp.getTime() - 60 * 60 * 1_000),
+                },
+              ]
+            : [],
+          cursor,
+          limit: 999,
+          includeFullContent: includeIO,
+        });
+      observations.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+
+    let payloadSize = 0;
+    const result = observations.map(toDorisEventsObservation);
+    if (includeIO) {
+      for (const observation of result) {
+        for (const value of [observation.input, observation.output]) {
+          const rendered =
+            typeof value === "string"
+              ? value
+              : value === null || value === undefined
+                ? ""
+                : (JSON.stringify(value) ?? "");
+          payloadSize += rendered.length;
+        }
+        for (const value of Object.values(observation.metadata ?? {})) {
+          const rendered =
+            typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+          payloadSize += rendered.length;
+        }
+      }
+      if (payloadSize >= env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES) {
+        throw new PayloadTooLargeError(
+          `Observations in trace are too large: ${(payloadSize / 1e6).toFixed(2)}MB exceeds limit of ${(env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES / 1e6).toFixed(2)}MB`,
+        );
+      }
+    }
+    return result;
+  }
 
   // OTel projects use immutable spans - no need for deduplication
   const skipDedup = await shouldSkipObservationsFinal(projectId);
@@ -554,9 +617,155 @@ export type ObservationsTableQueryResult = ObservationRecordReadType & {
   tool_calls_count?: string;
 };
 
+function buildDorisLegacyObservationQuery(filter: FilterState): {
+  readonly range: { readonly from: Date; readonly to: Date } | null;
+  readonly filters: EventsTableFilterState;
+} {
+  const lowerBounds: Date[] = [];
+  const upperBounds: Date[] = [];
+  const mapped = filter.map((item) => {
+    const column =
+      item.column === "Start Time"
+        ? "startTime"
+        : item.column === "End Time"
+          ? "endTime"
+          : item.column === "model"
+            ? "providedModelName"
+            : item.column === "tokens"
+              ? "totalTokens"
+              : item.column === "tags"
+                ? "traceTags"
+                : item.column === "traceEnvironment"
+                  ? "environment"
+                  : item.column;
+    const mappedItem = { ...item, column };
+    if (mappedItem.type === "datetime" && column === "startTime") {
+      if (mappedItem.operator === ">" || mappedItem.operator === ">=") {
+        lowerBounds.push(mappedItem.value);
+      } else {
+        upperBounds.push(
+          mappedItem.operator === "<="
+            ? new Date(mappedItem.value.getTime() + 1)
+            : mappedItem.value,
+        );
+      }
+    }
+    return mappedItem;
+  });
+  return {
+    range:
+      lowerBounds.length > 0 || !exactDorisLegacyFilterValue(filter, "traceId")
+        ? {
+            from:
+              lowerBounds.length > 0
+                ? new Date(
+                    Math.max(...lowerBounds.map((value) => value.getTime())),
+                  )
+                : new Date(0),
+            to:
+              upperBounds.length > 0
+                ? new Date(
+                    Math.min(...upperBounds.map((value) => value.getTime())),
+                  )
+                : new Date(),
+          }
+        : null,
+    filters: mapped as EventsTableFilterState,
+  };
+}
+
+function exactDorisLegacyFilterValue(
+  filters: FilterState,
+  column: string,
+): string | undefined {
+  const filter = filters.find((item) => item.column === column);
+  if (filter?.type === "string" && filter.operator === "=") {
+    return filter.value;
+  }
+  if (
+    filter?.type === "stringOptions" &&
+    filter.operator === "any of" &&
+    filter.value.length === 1
+  ) {
+    return filter.value[0];
+  }
+  return undefined;
+}
+
+function toDorisLegacyObservationOrderBy(
+  orderBy: OrderByState | undefined,
+): DorisEventOrderBy | undefined {
+  if (!orderBy) return undefined;
+  const aliases: Readonly<Record<string, DorisEventOrderBy["column"]>> = {
+    model: "providedModelName",
+    tokens: "totalTokens",
+  };
+  const column = aliases[orderBy.column] ?? orderBy.column;
+  const supported = new Set<DorisEventOrderBy["column"]>([
+    "startTime",
+    "endTime",
+    "completionStartTime",
+    "id",
+    "traceId",
+    "parentObservationId",
+    "name",
+    "type",
+    "environment",
+    "version",
+    "level",
+    "statusMessage",
+    "providedModelName",
+    "modelId",
+    "promptName",
+    "promptVersion",
+    "totalCost",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "inputCost",
+    "outputCost",
+    "latency",
+    "timeToFirstToken",
+    "tokensPerSecond",
+    "toolDefinitions",
+    "toolCalls",
+  ]);
+  if (!supported.has(column as DorisEventOrderBy["column"])) {
+    throw new InvalidRequestError(
+      `Unsupported Doris observation order column: ${orderBy.column}`,
+    );
+  }
+  return {
+    column: column as DorisEventOrderBy["column"],
+    order: orderBy.order,
+  };
+}
+
 export const getObservationsTableCount = async (
   opts: ObservationTableQuery,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisLegacyObservationQuery(opts.filter);
+    const traceId = exactDorisLegacyFilterValue(opts.filter, "traceId");
+    return !query.range && traceId
+      ? getDorisTelemetryRepositories().observations.countForTrace({
+          projectId: opts.projectId,
+          traceId,
+          filters: query.filters,
+          search: opts.searchQuery
+            ? { query: opts.searchQuery, searchType: opts.searchType }
+            : undefined,
+        })
+      : getDorisTelemetryRepositories().observations.count({
+          projectId: opts.projectId,
+          range: query.range,
+          filters: query.filters,
+          search: opts.searchQuery
+            ? { query: opts.searchQuery, searchType: opts.searchType }
+            : undefined,
+        });
+  }
+
   const count = await getObservationsTableInternal<{
     count: string;
   }>({
@@ -570,6 +779,63 @@ export const getObservationsTableCount = async (
 export const getObservationsTableWithModelData = async (
   opts: ObservationTableQuery,
 ): Promise<FullObservations> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisLegacyObservationQuery(opts.filter);
+    const traceId = exactDorisLegacyFilterValue(opts.filter, "traceId");
+    const common = {
+      projectId: opts.projectId,
+      filters: query.filters,
+      search: opts.searchQuery
+        ? { query: opts.searchQuery, searchType: opts.searchType }
+        : undefined,
+      orderBy: toDorisLegacyObservationOrderBy(opts.orderBy),
+      offset: opts.offset,
+      limit: opts.limit ?? 999,
+      includeFullContent: Boolean(opts.selectIOAndMetadata),
+    };
+    const page =
+      !query.range && traceId
+        ? await getDorisTelemetryRepositories().observations.listForTrace({
+            ...common,
+            traceId,
+          })
+        : await getDorisTelemetryRepositories().observations.list({
+            ...common,
+            range: query.range,
+          });
+    const modelIds = [
+      ...new Set(
+        page.items.flatMap(({ internalModelId }) =>
+          internalModelId ? [internalModelId] : [],
+        ),
+      ),
+    ];
+    const models =
+      modelIds.length > 0
+        ? await prisma.model.findMany({
+            where: {
+              id: { in: modelIds },
+              OR: [{ projectId: opts.projectId }, { projectId: null }],
+            },
+            include: { Price: true },
+          })
+        : [];
+    const modelsById = new Map(models.map((model) => [model.id, model]));
+    return page.items.map((observation) => ({
+      ...toDorisEventsObservation(observation),
+      traceName: observation.traceName,
+      traceTags: [...observation.tags],
+      traceTimestamp: null,
+      toolDefinitionsCount: observation.toolDefinitionsCount,
+      toolCallsCount: observation.toolCallsCount,
+      ...enrichObservationWithModelData(
+        observation.internalModelId
+          ? modelsById.get(observation.internalModelId)
+          : undefined,
+      ),
+    }));
+  }
+
   const observationRecords = await getObservationsTableInternal<
     Omit<
       ObservationsTableQueryResult,
@@ -867,10 +1133,49 @@ const getObservationsTableInternal = async <T>(
   });
 };
 
+async function getDorisLegacyObservationFacet(
+  projectId: string,
+  filter: FilterState,
+  column:
+    | "providedModelName"
+    | "modelId"
+    | "name"
+    | "promptName"
+    | "toolNames"
+    | "calledToolNames",
+  additionalFilters: EventsTableFilterState = [],
+) {
+  const query = buildDorisLegacyObservationQuery(filter);
+  const to = query.range?.to ?? new Date();
+  const range =
+    query.range ??
+    ({
+      from: new Date(0),
+      to,
+    } as const);
+  return getDorisTelemetryRepositories().observations.filterOptionValues({
+    projectId,
+    range,
+    filters: [...query.filters, ...additionalFilters],
+    column,
+    limit: 1_000,
+  });
+}
+
 export const getObservationsGroupedByModel = async (
   projectId: string,
   filter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "providedModelName",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ model: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -918,6 +1223,16 @@ export const getObservationsGroupedByModelId = async (
   projectId: string,
   filter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "modelId",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ modelId: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -966,6 +1281,18 @@ export const getObservationsGroupedByName = async (
   filter: FilterState,
   type: ObservationType | null = "GENERATION",
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "name",
+      type
+        ? [{ type: "string", column: "type", operator: "=", value: type }]
+        : [],
+    );
+    return rows.map(({ value }) => ({ name: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -1014,6 +1341,15 @@ export const getObservationsGroupedByToolName = async (
   projectId: string,
   filter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "toolNames",
+    );
+    return rows.map(({ value }) => ({ toolName: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -1059,6 +1395,15 @@ export const getObservationsGroupedByCalledToolName = async (
   projectId: string,
   filter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "calledToolNames",
+    );
+    return rows.map(({ value }) => ({ calledToolName: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -1104,6 +1449,16 @@ export const getObservationsGroupedByPromptName = async (
   projectId: string,
   filter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "promptName",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ promptName: value }));
+  }
+
   const observationsFilter = new FilterList([
     new StringFilter({
       clickhouseTable: "observations",
@@ -1174,6 +1529,15 @@ export const getCostForTraces = async (
   timestamp: Date,
   traceIds: string[],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const traces = await Promise.all(
+      traceIds.map((traceId) =>
+        getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
+      ),
+    );
+    return traces.reduce((total, trace) => total + (trace?.totalCost ?? 0), 0);
+  }
+
   // Wrapping the query in a CTE allows us to skip FINAL which allows Clickhouse to use skip indexes.
   const query = `
     WITH selected_observations AS (
@@ -1515,6 +1879,25 @@ export const getLatencyAndTotalCostForObservationsByTraces = async (
   traceIds: string[],
   timestamp?: Date,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const traces = await Promise.all(
+      traceIds.map((traceId) =>
+        getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
+      ),
+    );
+    return traces.flatMap((trace, index) =>
+      trace
+        ? [
+            {
+              traceId: traceIds[index]!,
+              totalCost: trace.totalCost ?? 0,
+              latency: trace.latency,
+            },
+          ]
+        : [],
+    );
+  }
+
   const query = `
     SELECT
         trace_id,
@@ -1574,6 +1957,50 @@ export const getObservationsGroupedByTraceId = async (
   timestamp?: Date,
 ): Promise<Map<string, ObservationTuple[]>> => {
   if (traceIds.length === 0) return new Map();
+
+  if (isDorisAnalyticsBackend()) {
+    const grouped = await Promise.all(
+      traceIds.map(async (traceId) => {
+        const observations: DorisObservation[] = [];
+        let cursor: string | undefined;
+        do {
+          const page =
+            await getDorisTelemetryRepositories().observations.listForTrace({
+              projectId,
+              traceId,
+              filters: timestamp
+                ? [
+                    {
+                      type: "datetime",
+                      column: "startTime",
+                      operator: ">=",
+                      value: timestamp,
+                    },
+                  ]
+                : [],
+              cursor,
+              limit: 999,
+            });
+          observations.push(...page.items);
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor);
+        return [
+          traceId,
+          observations.map(
+            (observation): ObservationTuple => [
+              observation.id,
+              observation.parentObservationId,
+              String(observation.costDetails.total ?? 0),
+              String(observation.costDetails.input ?? 0),
+              String(observation.costDetails.output ?? 0),
+              observation.latency === null ? 0 : observation.latency * 1_000,
+            ],
+          ),
+        ] as const;
+      }),
+    );
+    return new Map(grouped);
+  }
 
   const query = `
     SELECT
@@ -1675,6 +2102,20 @@ export const getTraceIdsForObservations = async (
   projectId: string,
   observationIds: string[],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const observations = await Promise.all(
+      observationIds.map((observationId) =>
+        getDorisTelemetryRepositories().observations.get({
+          projectId,
+          observationId,
+        }),
+      ),
+    );
+    return observations.flatMap((observation) =>
+      observation ? [{ id: observation.id, traceId: observation.traceId }] : [],
+    );
+  }
+
   const query = `
     SELECT
       trace_id,

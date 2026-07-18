@@ -59,6 +59,54 @@ export type DorisTracesPage = {
   readonly nextCursor: string | null;
 };
 
+export type DorisTraceOrderBy = {
+  readonly column:
+    | "timestamp"
+    | "name"
+    | "userId"
+    | "sessionId"
+    | "environment"
+    | "version"
+    | "release";
+  readonly order: "ASC" | "DESC";
+};
+
+export type DorisTraceFilterOptionColumn =
+  | "name"
+  | "userId"
+  | "sessionId"
+  | "tags";
+
+const TRACE_FILTER_OPTION_EXPRESSIONS: Readonly<
+  Record<DorisTraceFilterOptionColumn, string>
+> = {
+  name: "r.name",
+  userId: "r.user_id",
+  sessionId: "r.session_id",
+  tags: "r.tags",
+};
+
+function traceFilterOptionColumn(column: string): DorisTraceFilterOptionColumn {
+  if (!Object.hasOwn(TRACE_FILTER_OPTION_EXPRESSIONS, column)) {
+    throw new InvalidRequestError(
+      `Unsupported Doris trace filter option column: ${column}`,
+    );
+  }
+  return column as DorisTraceFilterOptionColumn;
+}
+
+const TRACE_ORDER_BY_EXPRESSIONS: Readonly<
+  Record<DorisTraceOrderBy["column"], string>
+> = {
+  timestamp: "trace_timestamp",
+  name: "name",
+  userId: "user_id",
+  sessionId: "session_id",
+  environment: "environment",
+  version: "`version`",
+  release: "`release`",
+};
+
 function dateTime(value: unknown): Date {
   if (value instanceof Date) return value;
   if (typeof value !== "string") {
@@ -198,13 +246,18 @@ function compileTraceList(input: {
   };
   readonly cursor?: string;
   readonly limit: number;
+  readonly offset?: number;
+  readonly orderBy?: DorisTraceOrderBy;
   readonly partitionDates?: readonly string[];
   readonly includeFullContent?: boolean;
 }): { readonly sql: string; readonly params: readonly unknown[] } {
   if (
     !Number.isSafeInteger(input.limit) ||
     input.limit < 1 ||
-    input.limit > MAX_PAGE_SIZE
+    input.limit > MAX_PAGE_SIZE ||
+    !Number.isSafeInteger(input.offset ?? 0) ||
+    (input.offset ?? 0) < 0 ||
+    (input.cursor && input.orderBy)
   ) {
     throw new InvalidRequestError("Invalid Doris trace page size");
   }
@@ -231,6 +284,18 @@ function compileTraceList(input: {
       OR (trace_timestamp = ? AND trace_id < ?)
     )`
     : "";
+  const direction = input.orderBy?.order ?? "DESC";
+  const primaryOrder = input.orderBy
+    ? TRACE_ORDER_BY_EXPRESSIONS[input.orderBy.column]
+    : "trace_timestamp";
+  const orderSql = [
+    primaryOrder,
+    ...(primaryOrder === "trace_timestamp" ? [] : ["trace_timestamp"]),
+    "trace_id",
+  ]
+    .map((expression) => `${expression} ${direction}`)
+    .join(", ");
+  const offsetSql = input.offset ? " OFFSET ?" : "";
   const rankedFullContent = input.includeFullContent
     ? ",\n    e.input,\n    e.output,\n    e.metadata"
     : "";
@@ -244,6 +309,7 @@ function compileTraceList(input: {
     ...partitionDates,
     ...(cursor ? [cursor.timestamp, cursor.timestamp, cursor.traceId] : []),
     input.limit + 1,
+    ...(input.offset ? [input.offset] : []),
   ];
   const sql = `WITH matched_trace_ids AS (
   SELECT DISTINCT e.trace_id
@@ -306,8 +372,8 @@ SELECT
 FROM ranked_events
 WHERE representative_rank = 1
 ${cursorSql}
-ORDER BY trace_timestamp DESC, trace_id DESC
-LIMIT ?`;
+ORDER BY ${orderSql}
+LIMIT ?${offsetSql}`;
   return { sql, params };
 }
 
@@ -333,6 +399,8 @@ export class DorisTracesRepository {
     };
     readonly cursor?: string;
     readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisTraceOrderBy;
     readonly includeFullContent?: boolean;
   }): Promise<DorisTracesPage> {
     if (input.includeFullContent) {
@@ -350,7 +418,7 @@ export class DorisTracesRepository {
     return {
       items,
       nextCursor:
-        rows.length > input.limit && items.length > 0
+        !input.orderBy && rows.length > input.limit && items.length > 0
           ? encodeCursor(items[items.length - 1]!)
           : null,
     };
@@ -371,6 +439,95 @@ export class DorisTracesRepository {
       scope.params,
     );
     return numberValue(rows[0]?.count);
+  }
+
+  async filterOptionValues(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly column: string;
+    readonly limit: number;
+    readonly offset?: number;
+    readonly valueQuery?: string;
+  }): Promise<readonly { readonly value: string; readonly count: number }[]> {
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 1_000 ||
+      !Number.isSafeInteger(input.offset ?? 0) ||
+      (input.offset ?? 0) < 0
+    ) {
+      throw new InvalidRequestError("Invalid Doris trace facet page size");
+    }
+    const column = traceFilterOptionColumn(input.column);
+    const matchedEvents = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: input.filters,
+    });
+    const allEvents = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: [],
+    });
+    const isTags = column === "tags";
+    const expression = isTags
+      ? "value"
+      : TRACE_FILTER_OPTION_EXPRESSIONS[column];
+    const lateralView = isTags
+      ? "\nLATERAL VIEW explode(r.tags) exploded AS value"
+      : "";
+    const valueQuery = input.valueQuery?.trim();
+    const includeWhen = `${expression} IS NOT NULL AND ${expression} != ''${valueQuery ? ` AND LOWER(${expression}) LIKE CONCAT('%', LOWER(?), '%')` : ""}`;
+    const offsetSql = input.offset ? " OFFSET ?" : "";
+    const rows = await this.dependencies.query<{
+      readonly value: unknown;
+      readonly count: unknown;
+    }>(
+      `WITH matched_trace_ids AS (
+  SELECT DISTINCT e.trace_id
+  ${matchedEvents.fromSql}
+  WHERE ${matchedEvents.whereSql}
+), ranked_events AS (
+  SELECT
+    e.trace_id,
+    e.name,
+    e.user_id,
+    e.session_id,
+    e.tags,
+    ROW_NUMBER() OVER (
+      PARTITION BY e.trace_id
+      ORDER BY e.is_app_root DESC,
+        CASE WHEN e.parent_span_id IS NULL OR e.parent_span_id = '' THEN 0 ELSE 1 END,
+        e.start_time ASC,
+        e.span_id ASC
+    ) AS representative_rank
+  ${allEvents.fromSql}
+  INNER JOIN matched_trace_ids matched ON matched.trace_id = e.trace_id
+  WHERE ${allEvents.whereSql}
+), representatives AS (
+  SELECT name, user_id, session_id, tags
+  FROM ranked_events
+  WHERE representative_rank = 1
+)
+SELECT ${expression} AS value, COUNT(*) AS count
+FROM representatives r${lateralView}
+WHERE ${includeWhen}
+GROUP BY value
+ORDER BY ${isTags ? "value ASC" : "count DESC, value ASC"}
+LIMIT ?${offsetSql}`,
+      [
+        ...matchedEvents.params,
+        ...allEvents.params,
+        ...(valueQuery ? [valueQuery] : []),
+        input.limit,
+        ...(input.offset ? [input.offset] : []),
+      ],
+    );
+    return rows.map((row) => ({
+      value: String(row.value),
+      count: numberValue(row.count),
+    }));
   }
 
   async get(input: {

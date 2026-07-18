@@ -49,6 +49,18 @@ import { DEFAULT_RENDERING_PROPS, RenderingProps } from "../utils/rendering";
 import { logger } from "../logger";
 import { traceException } from "../instrumentation";
 import { prisma } from "../../db";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
+import type { EventsTableFilterState } from "../../types";
+import {
+  buildDorisDerivedQuery,
+  toDorisUserMetricsRow,
+} from "./telemetry/doris/derivedUi";
+import { toDorisTraceDomain } from "./telemetry/doris/adapters";
+import type { DorisTrace } from "./telemetry/doris/traces";
+import type { DorisUser } from "./telemetry/doris/users";
 
 /**
  * Checks if trace exists in clickhouse.
@@ -268,6 +280,69 @@ export const getTracesBySessionId = async (
   sessionIds: string[],
   timestamp?: Date,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    if (sessionIds.length === 0) return [];
+    const query = buildDorisDerivedQuery(
+      [
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "any of",
+          value: sessionIds,
+        },
+        ...(timestamp
+          ? ([
+              {
+                type: "datetime",
+                column: "createdAt",
+                operator: ">=",
+                value: timestamp,
+              },
+            ] as const)
+          : []),
+      ],
+      "session",
+    );
+    const traces: DorisTrace[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().traces.list({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        cursor,
+        limit: 999,
+      });
+      traces.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+
+    const controls = await prisma.traceControlState.findMany({
+      where: {
+        projectId,
+        traceId: { in: traces.map((trace) => trace.id) },
+      },
+      select: { traceId: true, bookmarked: true, public: true },
+    });
+    const controlsByTraceId = new Map(
+      controls.map((control) => [control.traceId, control]),
+    );
+    const result = traces.map((trace) => {
+      const control = controlsByTraceId.get(trace.id);
+      return toDorisTraceDomain(trace, {
+        bookmarked: control?.bookmarked ?? false,
+        public: control?.public ?? false,
+      });
+    });
+    result.forEach((trace) => {
+      recordDistribution(
+        "langfuse.traces_by_session_id_age",
+        new Date().getTime() - trace.timestamp.getTime(),
+      );
+    });
+    return result;
+  }
+
   const records = await measureAndReturn({
     operationName: "getTracesBySessionId",
     projectId,
@@ -600,11 +675,76 @@ export const getTraceByIdFromTracesTable = async ({
   return res.shift();
 };
 
+function buildDorisTraceFacetQuery(filter: FilterState): {
+  readonly range: { readonly from: Date; readonly to: Date };
+  readonly filters: EventsTableFilterState;
+} {
+  const mapped: FilterState = [];
+  const lowerBounds: Date[] = [];
+  const upperBounds: Date[] = [];
+  const now = new Date();
+
+  for (const item of filter) {
+    const column =
+      item.column === "timestamp" ||
+      item.column === "Timestamp" ||
+      item.column === "createdAt"
+        ? "startTime"
+        : item.column === "id"
+          ? "traceId"
+          : item.column === "traceName"
+            ? "name"
+            : item.column === "tags"
+              ? "traceTags"
+              : item.column;
+    const mappedItem = { ...item, column };
+    mapped.push(mappedItem);
+    if (mappedItem.type === "datetime" && column === "startTime") {
+      if (mappedItem.operator === ">" || mappedItem.operator === ">=") {
+        lowerBounds.push(mappedItem.value);
+      } else {
+        upperBounds.push(
+          mappedItem.operator === "<="
+            ? new Date(mappedItem.value.getTime() + 1)
+            : mappedItem.value,
+        );
+      }
+    }
+  }
+
+  return {
+    range: {
+      from:
+        lowerBounds.length > 0
+          ? new Date(Math.max(...lowerBounds.map((value) => value.getTime())))
+          : new Date(0),
+      to:
+        upperBounds.length > 0
+          ? new Date(Math.min(...upperBounds.map((value) => value.getTime())))
+          : now,
+    },
+    filters: mapped as EventsTableFilterState,
+  };
+}
+
 export const getTracesGroupedByName = async (
   projectId: string,
   tableDefinitions: UiColumnMappings = tracesTableUiColumnDefinitions,
   timestampFilter?: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisTraceFacetQuery(timestampFilter ?? []);
+    const rows =
+      await getDorisTelemetryRepositories().traces.filterOptionValues({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        column: "name",
+        limit: 1_000,
+      });
+    return rows.map((row) => ({ name: row.value, count: String(row.count) }));
+  }
+
   const chFilter = timestampFilter
     ? createFilterFromFilterState(timestampFilter, tableDefinitions)
     : undefined;
@@ -661,6 +801,24 @@ export const getTracesGroupedBySessionId = async (
   columns?: UiColumnMappings,
   columnDefinitions?: ColumnDefinition[],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisTraceFacetQuery(filter);
+    const rows =
+      await getDorisTelemetryRepositories().traces.filterOptionValues({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        column: "sessionId",
+        valueQuery: searchQuery,
+        limit: limit ?? 1_000,
+        offset,
+      });
+    return rows.map((row) => ({
+      session_id: row.value,
+      count: String(row.count),
+    }));
+  }
+
   const { tracesFilter } = getProjectIdDefaultFilter(projectId, {
     tracesPrefix: "t",
   });
@@ -732,6 +890,21 @@ export const getTracesGroupedByUsers = async (
   columns?: UiColumnMappings,
   columnDefinitions?: ColumnDefinition[],
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisTraceFacetQuery(filter);
+    const rows =
+      await getDorisTelemetryRepositories().traces.filterOptionValues({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        column: "userId",
+        valueQuery: searchQuery,
+        limit: limit ?? 1_000,
+        offset,
+      });
+    return rows.map((row) => ({ user: row.value, count: String(row.count) }));
+  }
+
   const { tracesFilter } = getProjectIdDefaultFilter(projectId, {
     tracesPrefix: "t",
   });
@@ -803,6 +976,19 @@ export type GroupedTracesQueryProp = {
 
 export const getTracesGroupedByTags = async (props: GroupedTracesQueryProp) => {
   const { projectId, filter, columns, columnDefinitions } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisTraceFacetQuery(filter);
+    const rows =
+      await getDorisTelemetryRepositories().traces.filterOptionValues({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        column: "tags",
+        limit: 1_000,
+      });
+    return rows.map((row) => ({ value: row.value }));
+  }
 
   const chFilter = createFilterFromFilterState(
     filter,
@@ -1069,6 +1255,17 @@ export const deleteTracesByProjectId = async (
 };
 
 export const hasAnyUser = async (projectId: string) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery([], "user");
+    return (
+      (await getDorisTelemetryRepositories().users.count({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+      })) > 0
+    );
+  }
+
   return measureAndReturn({
     operationName: "hasAnyUser",
     projectId,
@@ -1104,6 +1301,17 @@ export const getTotalUserCount = async (
   filter: FilterState,
   searchQuery?: string,
 ): Promise<{ totalCount: bigint }[]> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(filter, "user");
+    const count = await getDorisTelemetryRepositories().users.count({
+      projectId,
+      range: query.range,
+      filters: query.filters,
+      identifierQuery: searchQuery,
+    });
+    return [{ totalCount: BigInt(count) }];
+  }
+
   const { tracesFilter } = getProjectIdDefaultFilter(projectId, {
     tracesPrefix: "t",
   });
@@ -1158,6 +1366,35 @@ export const getUserMetrics = async (
 ) => {
   if (userIds.length === 0) {
     return [];
+  }
+
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisDerivedQuery(
+      [
+        ...filter,
+        {
+          type: "stringOptions",
+          column: "userId",
+          operator: "any of",
+          value: userIds,
+        },
+      ],
+      "user",
+    );
+    const users: DorisUser[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().users.list({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        cursor,
+        limit: Math.min(999, userIds.length),
+      });
+      users.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return users.map(toDorisUserMetricsRow);
   }
 
   // filter state contains date range filter for traces so far.
@@ -1514,6 +1751,68 @@ export async function getAgentGraphData(params: {
   chMaxStartTime: string;
 }) {
   const { projectId, traceId, chMinStartTime, chMaxStartTime } = params;
+
+  if (isDorisAnalyticsBackend()) {
+    const records: Array<{
+      id: string;
+      parent_observation_id: string | null;
+      type: string;
+      name: string;
+      start_time: string;
+      end_time: string | null;
+      node: string | null;
+      step: unknown;
+    }> = [];
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const page =
+        await getDorisTelemetryRepositories().observations.listForTrace({
+          projectId,
+          traceId,
+          filters: [
+            {
+              type: "datetime",
+              column: "startTime",
+              operator: ">=",
+              value: parseClickhouseUTCDateTimeFormat(chMinStartTime),
+            },
+            {
+              type: "datetime",
+              column: "startTime",
+              operator: "<=",
+              value: parseClickhouseUTCDateTimeFormat(chMaxStartTime),
+            },
+          ],
+          includeFullContent: true,
+          orderBy: { column: "startTime", order: "ASC" },
+          offset,
+          limit: 999,
+        });
+
+      records.push(
+        ...page.items.map((observation) => ({
+          id: observation.id,
+          parent_observation_id: observation.parentObservationId,
+          type: observation.type,
+          name: observation.name ?? "",
+          start_time: observation.startTime.toISOString(),
+          end_time: observation.endTime?.toISOString() ?? null,
+          node:
+            typeof observation.metadata?.langgraph_node === "string"
+              ? observation.metadata.langgraph_node
+              : null,
+          step: observation.metadata?.langgraph_step ?? null,
+        })),
+      );
+
+      hasMore = page.items.length === 999;
+      offset += page.items.length;
+    }
+
+    return records;
+  }
 
   const query = `
           SELECT

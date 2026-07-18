@@ -130,6 +130,28 @@ describe("Doris public observation reads", () => {
     );
   });
 
+  it("preserves the V2/MCP lookahead row for cursor pagination", async () => {
+    const deps = dependencies();
+    deps.repository.list.mockResolvedValue({ items: [], nextCursor: null });
+
+    await getDorisObservationsForPublicApi(
+      {
+        projectId: "project-1",
+        page: 0,
+        limit: 10,
+        fields: ["core"],
+        fromStartTime: "2026-07-17T00:00:00.000Z",
+        toStartTime: "2026-07-18T00:00:00.000Z",
+        includeLookahead: true,
+      },
+      deps,
+    );
+
+    expect(deps.repository.list).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 11 }),
+    );
+  });
+
   it("passes explicit time bounds and filters to list and count", async () => {
     const deps = dependencies();
     deps.repository.list.mockResolvedValue({ items: [], nextCursor: null });
@@ -158,7 +180,52 @@ describe("Doris public observation reads", () => {
         filters: expect.arrayContaining([
           expect.objectContaining({ column: "environment" }),
         ]),
+        limit: 10,
+        offset: 0,
       }),
     );
+  });
+
+  it("bounds compact all-history reads without imposing retention", async () => {
+    const deps = dependencies();
+    deps.repository.list.mockResolvedValue({ items: [], nextCursor: null });
+    deps.repository.count.mockResolvedValue(0);
+    const input = {
+      projectId: "project-1",
+      page: 1,
+      limit: 10,
+      fields: ["core"] as const,
+    };
+
+    await getDorisObservationsForPublicApi(input, deps);
+    await getDorisObservationsCountForPublicApi(input, deps);
+
+    expect(deps.repository.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: { from: new Date(0), to: expect.any(Date) },
+      }),
+    );
+    expect(deps.repository.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: { from: new Date(0), to: expect.any(Date) },
+      }),
+    );
+  });
+
+  it("rejects unbounded full-content reads before repository dispatch", async () => {
+    const deps = dependencies();
+
+    await expect(
+      getDorisObservationsForPublicApi(
+        {
+          projectId: "project-1",
+          page: 1,
+          limit: 10,
+          fields: ["core", "io"],
+        },
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: "InvalidTimeRange" });
+    expect(deps.repository.list).not.toHaveBeenCalled();
   });
 });

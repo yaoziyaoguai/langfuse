@@ -1,6 +1,10 @@
 import { LISTABLE_SCORE_TYPES } from "../../domain/scores";
 import { env } from "../../env";
 import { queryClickhouse } from "./clickhouse";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
 
 export type EnvironmentFilterProps = {
   projectId: string;
@@ -11,6 +15,22 @@ export const getEnvironmentsForProject = async (
   props: EnvironmentFilterProps,
 ): Promise<{ environment: string }[]> => {
   const { projectId, fromTimestamp } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    const to = new Date();
+    const from = fromTimestamp ?? new Date(0);
+    const rows =
+      await getDorisTelemetryRepositories().observations.filterOptionValues({
+        projectId,
+        range: { from, to },
+        filters: [],
+        column: "environment",
+        limit: 1_000,
+      });
+    return [...new Set([...rows.map(({ value }) => value), "default"])].map(
+      (environment) => ({ environment }),
+    );
+  }
 
   // In dual and events_only write modes all tracing data lands in the events
   // tables: a single events_core scan covers traces and observations and is

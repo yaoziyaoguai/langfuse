@@ -23,6 +23,11 @@ import {
   getSessionsTableFromEvents,
   getSessionsWithMetricsFromEvents,
 } from "./sessions-ui-table-events-service";
+import {
+  getSessionsTable,
+  getSessionsTableCount,
+  getSessionsWithMetrics,
+} from "./sessions-ui-table-service";
 
 const session = {
   id: "session-1",
@@ -127,5 +132,38 @@ describe("Doris sessions UI service", () => {
         userId: "user-1",
       },
     ]);
+  });
+
+  it("routes legacy session entry points through Doris without changing their row contract", async () => {
+    mocks.sessions.count.mockResolvedValue(1);
+
+    await expect(
+      getSessionsTable({
+        projectId: "project-1",
+        filter: [],
+        page: 0,
+        limit: 50,
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        session_id: "session-1",
+        trace_environment: "production",
+      }),
+    ]);
+    await expect(
+      getSessionsTableCount({ projectId: "project-1", filter: [] }),
+    ).resolves.toBe(1);
+    await expect(
+      getSessionsWithMetrics({ projectId: "project-1", filter: [] }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        session_id: "session-1",
+        trace_environment: "production",
+        session_total_usage: "18",
+      }),
+    ]);
+
+    expect(mocks.sessions.list).toHaveBeenCalledTimes(2);
+    expect(mocks.sessions.count).toHaveBeenCalledTimes(1);
   });
 });

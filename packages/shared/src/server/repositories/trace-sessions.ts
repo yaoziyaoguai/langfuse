@@ -1,6 +1,10 @@
 import z from "zod";
 import { prisma } from "../../db";
 import { singleFilter } from "../../interfaces/filters";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
 
 export const getPublicSessionsFilter = async (
   projectId: string,
@@ -75,6 +79,16 @@ export const getPublicSessionsFilter = async (
 };
 
 export const hasAnySession = async (projectId: string) => {
+  if (isDorisAnalyticsBackend()) {
+    return (
+      (await getDorisTelemetryRepositories().sessions.count({
+        projectId,
+        range: { from: new Date(0), to: new Date() },
+        filters: [],
+      })) > 0
+    );
+  }
+
   const session = await prisma.traceSession.findFirst({
     where: {
       projectId,

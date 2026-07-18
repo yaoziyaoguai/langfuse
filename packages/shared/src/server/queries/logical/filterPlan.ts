@@ -63,14 +63,30 @@ const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
     expression:
       "(e.parent_span_id IS NULL OR e.parent_span_id = '' OR e.is_app_root = TRUE)",
   },
-  hasInput: { expression: "e.input IS NOT NULL AND e.input != ''" },
-  hasOutput: { expression: "e.output IS NOT NULL AND e.output != ''" },
-  calledToolNames: { expression: "e.tool_call_names" },
-  toolNames: { expression: "JSON_KEYS(e.tool_definitions)" },
+  hasInput: {
+    expression: "e.input IS NOT NULL AND e.input != ''",
+    requiresFullContent: true,
+  },
+  hasOutput: {
+    expression: "e.output IS NOT NULL AND e.output != ''",
+    requiresFullContent: true,
+  },
+  calledToolNames: {
+    expression: "e.tool_call_names",
+    requiresFullContent: true,
+  },
+  toolNames: {
+    expression: "JSON_KEYS(e.tool_definitions)",
+    requiresFullContent: true,
+  },
   toolDefinitions: {
     expression: "CARDINALITY(JSON_KEYS(e.tool_definitions))",
+    requiresFullContent: true,
   },
-  toolCalls: { expression: "CARDINALITY(e.tool_calls)" },
+  toolCalls: {
+    expression: "CARDINALITY(e.tool_calls)",
+    requiresFullContent: true,
+  },
 };
 
 const U6_COLUMNS = new Set([

@@ -56,7 +56,7 @@ describe("Doris derived UI query adapter", () => {
     );
   });
 
-  it("maps user filters and supplies the bounded retention window", () => {
+  it("maps user filters without imposing an implicit retention limit", () => {
     const result = buildDorisDerivedQuery(
       [
         {
@@ -71,7 +71,7 @@ describe("Doris derived UI query adapter", () => {
     );
 
     expect(result.range).toEqual({
-      from: new Date("2025-07-18T00:00:00.000Z"),
+      from: new Date(0),
       to: now,
     });
     expect(result.filters).toEqual([

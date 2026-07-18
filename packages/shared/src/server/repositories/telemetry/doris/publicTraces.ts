@@ -3,8 +3,12 @@ import type { AnalyticsEntityType } from "@prisma/client";
 import { prisma } from "../../../../db";
 import type { EventsTableFilterState } from "../../../../types";
 import type { TraceDomain } from "../../../../domain";
-import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
+import {
+  buildSearchPlan,
+  type AnalyticsTimeRange,
+} from "../../../queries/logical/searchPlan";
 import type { TraceRecordExtraFieldsType } from "../../definitions";
+import { InvalidRequestError } from "../../../../errors";
 import { toDorisTraceDomain } from "./adapters";
 import { getDorisTelemetryRepositories } from "./runtime";
 
@@ -23,6 +27,10 @@ export type DorisPublicApiTracesQuery = {
   readonly toTimestamp?: string;
   readonly fields?: readonly string[];
   readonly advancedFilters?: EventsTableFilterState;
+  readonly orderBy?: {
+    readonly column: string;
+    readonly order: "ASC" | "DESC";
+  } | null;
 };
 
 type TraceRepository = Pick<
@@ -134,6 +142,43 @@ function buildRange(
   };
 }
 
+function buildOrderBy(input: DorisPublicApiTracesQuery):
+  | {
+      readonly column:
+        | "timestamp"
+        | "name"
+        | "userId"
+        | "sessionId"
+        | "environment"
+        | "version"
+        | "release";
+      readonly order: "ASC" | "DESC";
+    }
+  | undefined {
+  if (!input.orderBy) return undefined;
+  const columns = [
+    "timestamp",
+    "name",
+    "userId",
+    "sessionId",
+    "environment",
+    "version",
+    "release",
+  ] as const;
+  type OrderColumn = (typeof columns)[number];
+  const isOrderColumn = (column: string): column is OrderColumn =>
+    columns.some((candidate) => candidate === column);
+  if (!isOrderColumn(input.orderBy.column)) {
+    throw new InvalidRequestError(
+      `Unsupported Doris trace order: ${input.orderBy.column}`,
+    );
+  }
+  return {
+    column: input.orderBy.column,
+    order: input.orderBy.order,
+  };
+}
+
 export async function getDorisTracesForPublicApi(
   input: DorisPublicApiTracesQuery,
   dependencies: DorisTraceReadDependencies = defaultDependencies(),
@@ -142,14 +187,27 @@ export async function getDorisTracesForPublicApi(
   const requestedFields = new Set(
     input.fields ?? ["core", "io", "scores", "observations", "metrics"],
   );
+  const explicitRange = buildRange(input);
+  if (requestedFields.has("io")) {
+    buildSearchPlan({
+      range: explicitRange,
+      filtersRequireFullContent: true,
+    });
+  }
   const page = await dependencies.repository.list({
     projectId: input.projectId,
-    range: buildRange(input),
+    range:
+      explicitRange ??
+      (requestedFields.has("io")
+        ? null
+        : { from: new Date(0), to: new Date() }),
     filters: buildFilters(input),
-    limit: offset + input.limit,
+    limit: input.limit,
+    offset,
+    orderBy: buildOrderBy(input),
     includeFullContent: requestedFields.has("io"),
   });
-  const traces = page.items.slice(offset);
+  const traces = page.items;
   const traceIds = traces.map(({ id }) => id);
   const [controls, observationIds] = await Promise.all([
     dependencies.findTraceControls({ projectId: input.projectId, traceIds }),
@@ -187,9 +245,13 @@ export async function getDorisTracesCountForPublicApi(
   input: DorisPublicApiTracesQuery,
   dependencies: DorisTraceReadDependencies = defaultDependencies(),
 ): Promise<number> {
+  const range = buildRange(input);
+  if ((input.fields ?? ["core", "io"]).includes("io")) {
+    buildSearchPlan({ range, filtersRequireFullContent: true });
+  }
   return dependencies.repository.count({
     projectId: input.projectId,
-    range: buildRange(input),
+    range: range ?? { from: new Date(0), to: new Date() },
     filters: buildFilters(input),
   });
 }

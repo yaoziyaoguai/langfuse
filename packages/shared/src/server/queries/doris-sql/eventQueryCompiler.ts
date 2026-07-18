@@ -37,6 +37,7 @@ const LIST_PROJECTION = `
   e.updated_at,
   e.provided_model_name,
   e.internal_model_id,
+  e.model_parameters AS model_parameters,
   e.prompt_id,
   e.prompt_name,
   e.prompt_version,
@@ -57,7 +58,6 @@ const DETAIL_PROJECTION = `${LIST_PROJECTION},
   e.input AS input,
   e.output AS output,
   e.metadata AS metadata,
-  e.model_parameters AS model_parameters,
   e.tool_definitions AS tool_definitions,
   e.tool_calls AS tool_calls,
   e.tool_call_names AS tool_call_names`;
@@ -76,6 +76,89 @@ export type DorisEventCursor = {
   readonly startTime: Date;
   readonly traceId: string;
   readonly spanId: string;
+};
+
+export type DorisEventOrderBy = {
+  readonly column:
+    | "startTime"
+    | "endTime"
+    | "completionStartTime"
+    | "id"
+    | "traceId"
+    | "parentObservationId"
+    | "name"
+    | "type"
+    | "environment"
+    | "userId"
+    | "sessionId"
+    | "traceName"
+    | "version"
+    | "level"
+    | "statusMessage"
+    | "providedModelName"
+    | "modelId"
+    | "promptName"
+    | "promptVersion"
+    | "totalCost"
+    | "inputTokens"
+    | "outputTokens"
+    | "totalTokens"
+    | "inputCost"
+    | "outputCost"
+    | "latency"
+    | "timeToFirstToken"
+    | "tokensPerSecond"
+    | "toolDefinitions"
+    | "toolCalls"
+    | "hasParentObservation"
+    | "isRootObservation"
+    | "hasInput"
+    | "hasOutput";
+  readonly order: "ASC" | "DESC";
+};
+
+const EVENT_ORDER_BY_EXPRESSIONS: Readonly<
+  Record<DorisEventOrderBy["column"], string>
+> = {
+  startTime: "e.start_time",
+  endTime: "e.end_time",
+  completionStartTime: "e.completion_start_time",
+  id: "e.span_id",
+  traceId: "e.trace_id",
+  parentObservationId: "e.parent_span_id",
+  name: "e.name",
+  type: "e.`type`",
+  environment: "e.environment",
+  userId: "e.user_id",
+  sessionId: "e.session_id",
+  traceName: "e.trace_name",
+  version: "e.`version`",
+  level: "e.`level`",
+  statusMessage: "e.status_message",
+  providedModelName: "e.provided_model_name",
+  modelId: "e.internal_model_id",
+  promptName: "e.prompt_name",
+  promptVersion: "e.prompt_version",
+  totalCost: "e.total_cost",
+  inputTokens: "e.total_input_tokens",
+  outputTokens: "e.total_output_tokens",
+  totalTokens:
+    "COALESCE(e.total_input_tokens, 0) + COALESCE(e.total_output_tokens, 0)",
+  inputCost: "JSON_EXTRACT_DOUBLE(e.cost_details, '$.input')",
+  outputCost: "JSON_EXTRACT_DOUBLE(e.cost_details, '$.output')",
+  latency: "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0",
+  timeToFirstToken:
+    "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.completion_start_time) / 1000000.0",
+  tokensPerSecond:
+    "e.total_output_tokens / NULLIF(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0, 0)",
+  toolDefinitions: "CARDINALITY(JSON_KEYS(e.tool_definitions))",
+  toolCalls: "CARDINALITY(e.tool_calls)",
+  hasParentObservation:
+    "(e.parent_span_id IS NOT NULL AND e.parent_span_id != '')",
+  isRootObservation:
+    "(e.parent_span_id IS NULL OR e.parent_span_id = '' OR e.is_app_root = TRUE)",
+  hasInput: "(e.input IS NOT NULL AND e.input != '')",
+  hasOutput: "(e.output IS NOT NULL AND e.output != '')",
 };
 
 type DorisVisibleEventScopeInput = {
@@ -238,6 +321,8 @@ export function compileDorisVisibleEventsQuery(
   input: DorisVisibleEventScopeInput & {
     readonly projection: "list" | "detail";
     readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisEventOrderBy;
   },
 ): {
   readonly sql: string;
@@ -247,20 +332,40 @@ export function compileDorisVisibleEventsQuery(
   if (
     !Number.isSafeInteger(input.limit) ||
     input.limit < 1 ||
-    input.limit > 1_000
+    input.limit > 1_000 ||
+    !Number.isSafeInteger(input.offset ?? 0) ||
+    (input.offset ?? 0) < 0 ||
+    (input.cursor && input.orderBy)
   ) {
     throw new InvalidRequestError("Invalid Doris event query input");
   }
   const scope = compileDorisVisibleEventScope(input);
+  const direction = input.orderBy?.order ?? "DESC";
+  const primaryOrder = input.orderBy
+    ? EVENT_ORDER_BY_EXPRESSIONS[input.orderBy.column]
+    : "e.start_time";
+  const stableOrder = [
+    primaryOrder,
+    ...(primaryOrder === "e.start_time" ? [] : ["e.start_time"]),
+    "e.trace_id",
+    "e.span_id",
+  ]
+    .map((expression) => `${expression} ${direction}`)
+    .join(", ");
+  const offsetSql = input.offset ? " OFFSET ?" : "";
   const sql = `SELECT
 ${input.projection === "detail" ? DETAIL_PROJECTION : LIST_PROJECTION}
 ${scope.fromSql}
 WHERE ${scope.whereSql}
-ORDER BY e.start_time DESC, e.trace_id DESC, e.span_id DESC
-LIMIT ?`;
+ORDER BY ${stableOrder}
+LIMIT ?${offsetSql}`;
   return {
     sql,
-    params: [...scope.params, input.limit],
+    params: [
+      ...scope.params,
+      input.limit,
+      ...(input.offset ? [input.offset] : []),
+    ],
     selectsFullContent:
       input.projection === "detail" || scope.selectsFullContent,
   };

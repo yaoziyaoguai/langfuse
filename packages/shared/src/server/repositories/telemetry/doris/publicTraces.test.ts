@@ -81,6 +81,8 @@ describe("Doris public trace reads", () => {
         filters: expect.arrayContaining([
           expect.objectContaining({ column: "environment" }),
         ]),
+        limit: 10,
+        offset: 0,
       }),
     );
   });
@@ -144,5 +146,56 @@ describe("Doris public trace reads", () => {
         output: { answer: "full output" },
       }),
     );
+  });
+
+  it("bounds compact all-history reads without imposing retention", async () => {
+    const deps = dependencies();
+
+    await getDorisTracesForPublicApi(
+      {
+        projectId: "project-1",
+        page: 1,
+        limit: 10,
+        fields: ["core"],
+      },
+      deps,
+    );
+    await getDorisTracesCountForPublicApi(
+      {
+        projectId: "project-1",
+        page: 1,
+        limit: 10,
+        fields: ["core"],
+      },
+      deps,
+    );
+
+    expect(deps.repository.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: { from: new Date(0), to: expect.any(Date) },
+      }),
+    );
+    expect(deps.repository.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: { from: new Date(0), to: expect.any(Date) },
+      }),
+    );
+  });
+
+  it("rejects unbounded full-content reads before repository dispatch", async () => {
+    const deps = dependencies();
+
+    await expect(
+      getDorisTracesForPublicApi(
+        {
+          projectId: "project-1",
+          page: 1,
+          limit: 10,
+          fields: ["core", "io"],
+        },
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: "InvalidTimeRange" });
+    expect(deps.repository.list).not.toHaveBeenCalled();
   });
 });

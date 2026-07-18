@@ -4,7 +4,10 @@ import type { ObservationFieldGroupPublicApi } from "../../../../domain/observat
 import type { EventsTableFilterState } from "../../../../types";
 import { prisma } from "../../../../db";
 import type { EventsObservationPublic } from "../../../queries/createGenerationsQuery";
-import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
+import {
+  buildSearchPlan,
+  type AnalyticsTimeRange,
+} from "../../../queries/logical/searchPlan";
 import { projectDorisObservation } from "./adapters";
 import type { DorisObservation } from "./observations";
 import { getDorisTelemetryRepositories } from "./runtime";
@@ -30,6 +33,7 @@ export type DorisPublicApiObservationsQuery = {
     readonly lastId: string;
   };
   readonly fields?: readonly ObservationFieldGroupPublicApi[] | null;
+  readonly includeLookahead?: boolean;
 };
 
 type ObservationRepository = Pick<
@@ -235,13 +239,24 @@ export async function getDorisObservationsForPublicApi(
   dependencies: DorisObservationReadDependencies = defaultDependencies(),
 ): Promise<EventsObservationPublic[]> {
   const filters = buildFilters(input);
-  const range = buildRange(input);
+  const explicitRange = buildRange(input);
   const observationId = exactFilterValue(filters, "id");
   const traceId = input.traceId ?? exactFilterValue(filters, "traceId");
   const fields = input.fields ?? ["core", "basic"];
   const includeFullContent = fields.some((field) =>
-    ["io", "metadata", "model"].includes(field),
+    ["io", "metadata"].includes(field),
   );
+  if (includeFullContent && !observationId && !traceId) {
+    buildSearchPlan({
+      range: explicitRange,
+      filtersRequireFullContent: true,
+    });
+  }
+  const range =
+    explicitRange ??
+    (observationId || traceId || includeFullContent
+      ? null
+      : { from: new Date(0), to: new Date() });
   let observations: readonly DorisObservation[];
   if (!range && observationId) {
     const observation = await dependencies.repository.get({
@@ -257,23 +272,23 @@ export async function getDorisObservationsForPublicApi(
         traceId,
         filters,
         cursor: encodeCursor(input.cursor),
-        limit: input.limit,
+        limit: input.limit + (input.includeLookahead ? 1 : 0),
         includeFullContent,
       })
     ).items;
   } else {
     const offset = input.cursor ? 0 : Math.max(0, input.page - 1) * input.limit;
-    const pageSize = offset + input.limit;
     observations = (
       await dependencies.repository.list({
         projectId: input.projectId,
         range,
         filters,
         cursor: encodeCursor(input.cursor),
-        limit: pageSize,
+        limit: input.limit + (input.includeLookahead ? 1 : 0),
+        offset,
         includeFullContent,
       })
-    ).items.slice(offset);
+    ).items;
   }
   const controlled = await applyTraceControls(
     observations,
@@ -296,9 +311,38 @@ export async function getDorisObservationsCountForPublicApi(
   dependencies: DorisObservationReadDependencies = defaultDependencies(),
 ): Promise<number> {
   const filters = buildFilters(input);
-  const range = buildRange(input);
+  const explicitRange = buildRange(input);
+  const observationId = exactFilterValue(filters, "id");
   const traceId = input.traceId ?? exactFilterValue(filters, "traceId");
-  return !range && traceId
+  const requestsFullContent = (
+    input.fields ?? [
+      "core",
+      "basic",
+      "time",
+      "usage-cost",
+      "model",
+      "prompt",
+      "metadata",
+      "io",
+      "metrics",
+    ]
+  ).some((field) => ["io", "metadata"].includes(field));
+  if (requestsFullContent && !observationId && !traceId) {
+    buildSearchPlan({
+      range: explicitRange,
+      filtersRequireFullContent: true,
+    });
+  }
+  if (!explicitRange && observationId) {
+    return (await dependencies.repository.get({
+      projectId: input.projectId,
+      observationId,
+      traceId,
+    }))
+      ? 1
+      : 0;
+  }
+  return !explicitRange && traceId
     ? dependencies.repository.countForTrace({
         projectId: input.projectId,
         traceId,
@@ -306,7 +350,7 @@ export async function getDorisObservationsCountForPublicApi(
       })
     : dependencies.repository.count({
         projectId: input.projectId,
-        range,
+        range: explicitRange ?? { from: new Date(0), to: new Date() },
         filters,
       });
 }

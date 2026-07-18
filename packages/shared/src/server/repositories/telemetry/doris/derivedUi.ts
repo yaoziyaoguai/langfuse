@@ -4,8 +4,6 @@ import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
 import type { DorisSession } from "./sessions";
 import type { DorisUser } from "./users";
 
-const DEFAULT_RETENTION_DAYS = 365;
-
 const SESSION_COLUMNS: Readonly<Record<string, string>> = {
   createdAt: "startTime",
   id: "sessionId",
@@ -20,12 +18,6 @@ const USER_COLUMNS: Readonly<Record<string, string>> = {
   userId: "userId",
   environment: "environment",
 };
-
-function retentionStart(now: Date): Date {
-  const from = new Date(now);
-  from.setUTCDate(from.getUTCDate() - DEFAULT_RETENTION_DAYS);
-  return from;
-}
 
 export function buildDorisDerivedQuery(
   filters: FilterState,
@@ -61,7 +53,7 @@ export function buildDorisDerivedQuery(
 
   const from = lowerBounds.length
     ? new Date(Math.max(...lowerBounds.map((value) => value.getTime())))
-    : retentionStart(now);
+    : new Date(0);
   const to = upperBounds.length
     ? new Date(Math.min(...upperBounds.map((value) => value.getTime())))
     : new Date(now);

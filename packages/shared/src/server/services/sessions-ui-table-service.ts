@@ -16,6 +16,12 @@ import {
   TRACE_TO_OBSERVATIONS_INTERVAL,
   queryClickhouse,
 } from "../repositories";
+import { isDorisAnalyticsBackend } from "../repositories/telemetry/doris/runtime";
+import {
+  getSessionsTableCountFromEvents,
+  getSessionsTableFromEvents,
+  getSessionsWithMetricsFromEvents,
+} from "./sessions-ui-table-events-service";
 
 export type SessionDataReturnType = {
   session_id: string;
@@ -51,6 +57,10 @@ export const getSessionsTableCount = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return getSessionsTableCountFromEvents(props);
+  }
+
   const rows = await getSessionsTableGeneric<{ count: string }>({
     select: "count",
     projectId: props.projectId,
@@ -70,6 +80,14 @@ export const getSessionsTable = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getSessionsTableFromEvents(props);
+    return rows.map(({ environment, ...row }) => ({
+      ...row,
+      trace_environment: environment,
+    }));
+  }
+
   const rows = await getSessionsTableGeneric<SessionDataReturnType>({
     select: "rows",
     projectId: props.projectId,
@@ -93,6 +111,14 @@ export const getSessionsWithMetrics = async (props: {
   page?: number;
   clickhouseConfigs?: ClickHouseClientConfigOptions | undefined;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getSessionsWithMetricsFromEvents(props);
+    return rows.map(({ environment, ...row }) => ({
+      ...row,
+      trace_environment: environment,
+    }));
+  }
+
   const rows = await getSessionsTableGeneric<SessionWithMetricsReturnType>({
     select: "metrics",
     projectId: props.projectId,

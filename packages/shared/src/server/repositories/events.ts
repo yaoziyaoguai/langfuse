@@ -4,6 +4,7 @@ import type {
   EventsObservation,
   MetadataDomain,
   ObservationType,
+  TraceDomain,
 } from "../../domain";
 import { env } from "../../env";
 import {
@@ -138,6 +139,10 @@ import {
   toDorisTraceDomain,
 } from "./telemetry/doris/adapters";
 import type { DorisTrace } from "./telemetry/doris/traces";
+import type { DorisObservation } from "./telemetry/doris/observations";
+import type { DorisSession } from "./telemetry/doris/sessions";
+import type { DorisUser } from "./telemetry/doris/users";
+import type { DorisEventOrderBy } from "../queries/doris-sql/eventQueryCompiler";
 import type { DorisPublicApiTracesQuery } from "./telemetry/doris/publicTraces";
 
 export type EventBatchIOStringOutput = {
@@ -211,6 +216,268 @@ export type ObservationIOSizeFields = {
   /** Shipped (capped) metadata weight in chars — for response budgeting. */
   metadataLength: number;
 };
+
+function buildDorisObservationReadQuery(filter: FilterState): {
+  readonly range: { readonly from: Date; readonly to: Date } | null;
+  readonly filters: EventsTableFilterState;
+} {
+  const lowerBounds: Date[] = [];
+  const upperBounds: Date[] = [];
+
+  for (const item of filter) {
+    if (item.type !== "datetime" || item.column !== "startTime") continue;
+    if (item.operator === ">" || item.operator === ">=") {
+      lowerBounds.push(item.value);
+    } else {
+      upperBounds.push(
+        item.operator === "<="
+          ? new Date(item.value.getTime() + 1)
+          : item.value,
+      );
+    }
+  }
+
+  if (
+    lowerBounds.length === 0 &&
+    exactDorisStringFilterValue(filter, "traceId")
+  ) {
+    return { range: null, filters: filter as EventsTableFilterState };
+  }
+  return {
+    range: {
+      from:
+        lowerBounds.length > 0
+          ? new Date(Math.max(...lowerBounds.map((value) => value.getTime())))
+          : new Date(0),
+      to:
+        upperBounds.length > 0
+          ? new Date(Math.min(...upperBounds.map((value) => value.getTime())))
+          : new Date(),
+    },
+    filters: filter as EventsTableFilterState,
+  };
+}
+
+function exactDorisStringFilterValue(
+  filters: FilterState,
+  column: string,
+): string | undefined {
+  for (const filter of filters) {
+    if (filter.column !== column) continue;
+    if (filter.type === "string" && filter.operator === "=") {
+      return filter.value;
+    }
+    if (
+      filter.type === "stringOptions" &&
+      filter.operator === "any of" &&
+      filter.value.length === 1
+    ) {
+      return filter.value[0];
+    }
+  }
+  return undefined;
+}
+
+function toDorisEventOrderBy(
+  orderBy: ObservationTableQuery["orderBy"],
+): DorisEventOrderBy | undefined {
+  if (!orderBy) return undefined;
+  const aliases: Readonly<Record<string, DorisEventOrderBy["column"]>> = {
+    model: "providedModelName",
+    tokens: "totalTokens",
+  };
+  const column = aliases[orderBy.column] ?? orderBy.column;
+  const supported = new Set<DorisEventOrderBy["column"]>([
+    "startTime",
+    "endTime",
+    "completionStartTime",
+    "id",
+    "traceId",
+    "parentObservationId",
+    "name",
+    "type",
+    "environment",
+    "userId",
+    "sessionId",
+    "traceName",
+    "version",
+    "level",
+    "statusMessage",
+    "providedModelName",
+    "modelId",
+    "promptName",
+    "promptVersion",
+    "totalCost",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "inputCost",
+    "outputCost",
+    "latency",
+    "timeToFirstToken",
+    "tokensPerSecond",
+    "toolDefinitions",
+    "toolCalls",
+    "hasParentObservation",
+    "isRootObservation",
+    "hasInput",
+    "hasOutput",
+  ]);
+  if (!supported.has(column as DorisEventOrderBy["column"])) {
+    throw new InvalidRequestError(
+      `Unsupported Doris observation order column: ${orderBy.column}`,
+    );
+  }
+  return {
+    column: column as DorisEventOrderBy["column"],
+    order: orderBy.order,
+  };
+}
+
+function rawDorisIo(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function unicodeLength(value: string | null): number {
+  return value === null ? 0 : Array.from(value).length;
+}
+
+function unicodeHead(value: string, length: number): string {
+  return Array.from(value).slice(0, length).join("");
+}
+
+function parseDorisDateTimeInput(value: string): Date {
+  const parsed = new Date(
+    value.includes("T")
+      ? value.replace(/Z?$/, "Z")
+      : `${value.replace(" ", "T")}Z`,
+  );
+  if (Number.isNaN(parsed.getTime())) {
+    throw new InvalidRequestError("Invalid Doris analytics time bound");
+  }
+  return parsed;
+}
+
+async function toDorisFullEventsObservations(
+  observations: readonly DorisObservation[],
+  projectId: string,
+  ioSizeCap?: ObservationTableQuery["ioSizeCap"],
+): Promise<Array<FullEventsObservation & Partial<ObservationIOSizeFields>>> {
+  if (observations.length === 0) return [];
+
+  const traceIds = [...new Set(observations.map(({ traceId }) => traceId))];
+  const modelIds = [
+    ...new Set(
+      observations.flatMap(({ internalModelId }) =>
+        internalModelId ? [internalModelId] : [],
+      ),
+    ),
+  ];
+  const [controls, models] = await Promise.all([
+    prisma.traceControlState.findMany({
+      where: { projectId, traceId: { in: traceIds } },
+      select: { traceId: true, bookmarked: true, public: true },
+    }),
+    modelIds.length > 0
+      ? prisma.model.findMany({
+          where: {
+            id: { in: modelIds },
+            OR: [{ projectId }, { projectId: null }],
+          },
+          include: { Price: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const controlsByTrace = new Map(
+    controls.map((control) => [control.traceId, control]),
+  );
+  const modelsById = new Map(models.map((model) => [model.id, model]));
+
+  return observations.map((observation) => {
+    const control = controlsByTrace.get(observation.traceId);
+    const domain = toDorisEventsObservation({
+      ...observation,
+      bookmarked: control?.bookmarked ?? false,
+      public: control?.public ?? false,
+    });
+    const { tags, ...withoutTags } = domain;
+    const model = observation.internalModelId
+      ? modelsById.get(observation.internalModelId)
+      : undefined;
+    const fullInput = rawDorisIo(observation.input);
+    const fullOutput = rawDorisIo(observation.output);
+    let input = fullInput;
+    let output = fullOutput;
+    let metadata = {
+      ...(observation.metadata ?? {}),
+    } as EventsObservation["metadata"];
+    let ioSizeFields: ObservationIOSizeFields | undefined;
+
+    if (ioSizeCap) {
+      const inputLength = unicodeLength(fullInput);
+      const outputLength = unicodeLength(fullOutput);
+      const inputTruncated = inputLength > ioSizeCap.inlineChars;
+      const outputTruncated = outputLength > ioSizeCap.inlineChars;
+      input =
+        inputTruncated && fullInput
+          ? unicodeHead(fullInput, ioSizeCap.previewChars)
+          : fullInput;
+      output =
+        outputTruncated && fullOutput
+          ? unicodeHead(fullOutput, ioSizeCap.previewChars)
+          : fullOutput;
+      let metadataTruncated = false;
+      let metadataLength = 0;
+      metadata = Object.fromEntries(
+        Object.entries(metadata).map(([key, value]) => {
+          const text =
+            typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+          const length = unicodeLength(text);
+          if (length > ioSizeCap.inlineChars) {
+            metadataTruncated = true;
+            metadataLength += ioSizeCap.previewChars;
+            return [key, unicodeHead(text, ioSizeCap.previewChars)];
+          }
+          metadataLength += length;
+          return [key, value];
+        }),
+      ) as EventsObservation["metadata"];
+      ioSizeFields = {
+        inputLength,
+        outputLength,
+        inputTruncated,
+        outputTruncated,
+        metadataTruncated,
+        metadataLength,
+      };
+    }
+
+    return {
+      ...withoutTags,
+      input,
+      output,
+      metadata,
+      modelId: model?.id ?? null,
+      inputPrice:
+        model?.Price.find(({ usageType }) => usageType === "input")?.price ??
+        null,
+      outputPrice:
+        model?.Price.find(({ usageType }) => usageType === "output")?.price ??
+        null,
+      totalPrice:
+        model?.Price.find(({ usageType }) => usageType === "total")?.price ??
+        null,
+      traceTags: [...(tags ?? [])],
+      traceTimestamp: null,
+      toolDefinitions: domain.toolDefinitions ?? null,
+      toolCalls: domain.toolCalls ?? null,
+      toolDefinitionsCount: observation.toolDefinitionsCount,
+      toolCallsCount: observation.toolCallsCount,
+      ...ioSizeFields,
+    };
+  });
+}
 
 /**
  * Internal helper: enrich observations with model pricing data
@@ -438,6 +705,49 @@ export const getObservationsForTraceFromEventsTable = async (params: {
     selectToolData = false,
   } = params;
 
+  if (isDorisAnalyticsBackend()) {
+    const filters: EventsTableFilterState = timestamp
+      ? [
+          {
+            column: "startTime",
+            operator: ">=",
+            value: new Date(timestamp.getTime() - 60 * 60 * 1_000),
+            type: "datetime",
+          },
+        ]
+      : [];
+    const observations: DorisObservation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page =
+        await getDorisTelemetryRepositories().observations.listForTrace({
+          projectId,
+          traceId,
+          filters,
+          cursor,
+          limit: Math.min(
+            999,
+            MAX_OBSERVATIONS_PER_TRACE + 1 - observations.length,
+          ),
+          includeFullContent: selectIOAndMetadata || selectToolData,
+        });
+      observations.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor && observations.length < MAX_OBSERVATIONS_PER_TRACE + 1);
+    observations.sort(
+      (left, right) =>
+        left.startTime.getTime() - right.startTime.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+    return {
+      observations: await toDorisFullEventsObservations(
+        observations.slice(0, MAX_OBSERVATIONS_PER_TRACE),
+        projectId,
+      ),
+      totalCount: observations.length,
+    };
+  }
+
   const filter: FilterState = [
     {
       column: "traceId",
@@ -487,6 +797,26 @@ export const getObservationsForTraceFromEventsTable = async (params: {
 export const getObservationsCountFromEventsTable = async (
   opts: ObservationTableQuery,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery(opts.filter);
+    const traceId = exactDorisStringFilterValue(opts.filter, "traceId");
+    const search = opts.searchQuery
+      ? { query: opts.searchQuery, searchType: opts.searchType }
+      : undefined;
+    return !query.range && traceId
+      ? getDorisTelemetryRepositories().observations.countForTrace({
+          projectId: opts.projectId,
+          traceId,
+          filters: query.filters,
+          search,
+        })
+      : getDorisTelemetryRepositories().observations.count({
+          projectId: opts.projectId,
+          range: query.range,
+          filters: query.filters,
+          search,
+        });
+  }
   const count = await getObservationsFromEventsTableInternal<{
     count: string;
   }>({
@@ -505,6 +835,29 @@ export const getObservationsCountFromEventsTable = async (
 export const getObservationsCountsFromEventsTable = async (
   opts: ObservationTableQuery,
 ): Promise<{ totalCount: number; uniqueTraceCount: number }> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery(opts.filter);
+    const traceId = exactDorisStringFilterValue(opts.filter, "traceId");
+    const search = opts.searchQuery
+      ? { query: opts.searchQuery, searchType: opts.searchType }
+      : undefined;
+    if (!query.range && traceId) {
+      const totalCount =
+        await getDorisTelemetryRepositories().observations.countForTrace({
+          projectId: opts.projectId,
+          traceId,
+          filters: query.filters,
+          search,
+        });
+      return { totalCount, uniqueTraceCount: totalCount > 0 ? 1 : 0 };
+    }
+    return getDorisTelemetryRepositories().observations.counts({
+      projectId: opts.projectId,
+      range: query.range,
+      filters: query.filters,
+      search,
+    });
+  }
   const counts = await getObservationsFromEventsTableInternal<{
     count: string;
     unique_trace_count: string;
@@ -530,6 +883,36 @@ export async function getObservationsWithModelDataFromEventsTable(
 export async function getObservationsWithModelDataFromEventsTable(
   opts: ObservationTableQuery,
 ): Promise<FullEventsObservations> {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery(opts.filter);
+    const traceId = exactDorisStringFilterValue(opts.filter, "traceId");
+    const common = {
+      projectId: opts.projectId,
+      filters: query.filters,
+      search: opts.searchQuery
+        ? { query: opts.searchQuery, searchType: opts.searchType }
+        : undefined,
+      orderBy: toDorisEventOrderBy(opts.orderBy),
+      offset: opts.offset,
+      limit: opts.limit ?? 999,
+      includeFullContent: Boolean(opts.selectIOAndMetadata),
+    };
+    const page =
+      !query.range && traceId
+        ? await getDorisTelemetryRepositories().observations.listForTrace({
+            ...common,
+            traceId,
+          })
+        : await getDorisTelemetryRepositories().observations.list({
+            ...common,
+            range: query.range,
+          });
+    return (await toDorisFullEventsObservations(
+      page.items,
+      opts.projectId,
+      opts.ioSizeCap,
+    )) as FullEventsObservations;
+  }
   const observationRecords = await getObservationsFromEventsTableInternal<
     ObservationsTableQueryResultWitouhtTraceFields & Partial<IOSizeCapRowFields>
   >({
@@ -809,16 +1192,7 @@ async function getObservationsFromEventsTableInternal<T>(
   });
 }
 
-export const getObservationByIdFromEventsTable = async ({
-  id,
-  projectId,
-  fetchWithInputOutput = false,
-  startTime,
-  type,
-  traceId,
-  renderingProps = DEFAULT_RENDERING_PROPS,
-  preferredClickhouseService,
-}: {
+type ObservationByIdReadParams = {
   id: string;
   projectId: string;
   fetchWithInputOutput?: boolean;
@@ -827,7 +1201,76 @@ export const getObservationByIdFromEventsTable = async ({
   traceId?: string;
   renderingProps?: RenderingProps;
   preferredClickhouseService?: PreferredClickhouseService;
-}) => {
+};
+
+async function getObservationByIdFromDoris(params: ObservationByIdReadParams) {
+  const observation = await getDorisTelemetryRepositories().observations.get({
+    projectId: params.projectId,
+    observationId: params.id,
+    traceId: params.traceId,
+  });
+  const matchesType = !params.type || observation?.type === params.type;
+  const matchesStartDate =
+    !params.startTime ||
+    observation?.startTime.toISOString().slice(0, 10) ===
+      params.startTime.toISOString().slice(0, 10);
+  if (!observation || !matchesType || !matchesStartDate) {
+    throw new LangfuseNotFoundError(
+      `Observation with id ${params.id} not found`,
+    );
+  }
+  const control = await prisma.traceControlState.findUnique({
+    where: {
+      projectId_traceId: {
+        projectId: params.projectId,
+        traceId: observation.traceId,
+      },
+    },
+    select: { bookmarked: true, public: true },
+  });
+  const mapped = toDorisEventsObservation({
+    ...observation,
+    bookmarked: control?.bookmarked ?? false,
+    public: control?.public ?? false,
+  });
+  const renderingProps = params.renderingProps ?? DEFAULT_RENDERING_PROPS;
+  const renderIo = (value: EventsObservation["input"]) =>
+    applyInputOutputRendering(
+      value === null
+        ? null
+        : typeof value === "string"
+          ? value
+          : JSON.stringify(value),
+      renderingProps,
+    );
+  recordDistribution(
+    "langfuse.query_by_id_age",
+    new Date().getTime() - mapped.startTime.getTime(),
+    { table: "events" },
+  );
+  return {
+    ...mapped,
+    input: params.fetchWithInputOutput ? renderIo(mapped.input) : null,
+    output: params.fetchWithInputOutput ? renderIo(mapped.output) : null,
+  };
+}
+
+export const getObservationByIdFromEventsTable = async (
+  params: ObservationByIdReadParams,
+) => {
+  if (isDorisAnalyticsBackend()) {
+    return getObservationByIdFromDoris(params);
+  }
+  const {
+    id,
+    projectId,
+    fetchWithInputOutput = false,
+    startTime,
+    type,
+    traceId,
+    renderingProps = DEFAULT_RENDERING_PROPS,
+    preferredClickhouseService,
+  } = params;
   const records = await getObservationByIdFromEventsTableInternal({
     id,
     projectId,
@@ -936,16 +1379,7 @@ async function getObservationByIdFromEventsTableInternal({
  * Avoid using the `excludeInputOutput` and `excludeMetadata` fields as they
  * are only for backwards compatibility with the existing `getTraceById` interface.
  */
-export const getTraceByIdFromEventsTable = async ({
-  traceId,
-  projectId,
-  timestamp,
-  fromTimestamp,
-  renderingProps = DEFAULT_RENDERING_PROPS,
-  preferredClickhouseService,
-  excludeInputOutput = false,
-  excludeMetadata = false,
-}: {
+type TraceByIdReadParams = {
   traceId: string;
   projectId: string;
   timestamp?: Date;
@@ -956,7 +1390,76 @@ export const getTraceByIdFromEventsTable = async ({
   excludeInputOutput?: boolean;
   /** When true, sets metadata column to empty in the query to reduce database load */
   excludeMetadata?: boolean;
-}) => {
+};
+
+async function getTraceByIdFromDoris(params: TraceByIdReadParams) {
+  const trace = await getDorisTelemetryRepositories().traces.get({
+    projectId: params.projectId,
+    traceId: params.traceId,
+  });
+  if (!trace) return undefined;
+  if (
+    params.timestamp &&
+    trace.timestamp.toISOString().slice(0, 10) !==
+      params.timestamp.toISOString().slice(0, 10)
+  ) {
+    return undefined;
+  }
+  if (params.fromTimestamp && trace.timestamp < params.fromTimestamp) {
+    return undefined;
+  }
+  const control = await prisma.traceControlState.findUnique({
+    where: {
+      projectId_traceId: {
+        projectId: params.projectId,
+        traceId: params.traceId,
+      },
+    },
+    select: { bookmarked: true, public: true },
+  });
+  const domain = toDorisTraceDomain(trace, {
+    bookmarked: control?.bookmarked ?? false,
+    public: control?.public ?? false,
+  });
+  const renderingProps = params.renderingProps ?? DEFAULT_RENDERING_PROPS;
+  const renderIo = (value: TraceDomain["input"]) =>
+    applyInputOutputRendering(
+      value === null || value === undefined
+        ? null
+        : typeof value === "string"
+          ? value
+          : JSON.stringify(value),
+      renderingProps,
+    );
+  recordDistribution(
+    "langfuse.query_by_id_age",
+    new Date().getTime() - domain.timestamp.getTime(),
+    { table: "events" },
+  );
+  return {
+    ...domain,
+    input: params.excludeInputOutput ? null : renderIo(domain.input),
+    output: params.excludeInputOutput ? null : renderIo(domain.output),
+    metadata: params.excludeMetadata ? {} : domain.metadata,
+  };
+}
+
+export const getTraceByIdFromEventsTable = async (
+  readParams: TraceByIdReadParams,
+) => {
+  if (isDorisAnalyticsBackend()) {
+    return getTraceByIdFromDoris(readParams);
+  }
+  const {
+    traceId,
+    projectId,
+    timestamp,
+    fromTimestamp,
+    renderingProps = DEFAULT_RENDERING_PROPS,
+    preferredClickhouseService,
+    excludeInputOutput = false,
+    excludeMetadata = false,
+  } = readParams;
   // Build traces CTE using eventsTracesAggregation
   // Pass truncated flag to select events_core (truncated) or events_full (full I/O)
   const tracesBuilder = eventsTracesAggregation({
@@ -1069,31 +1572,7 @@ export const getTraceById = async (
   params: Parameters<typeof getTraceByIdFromTracesTable>[0],
 ) => {
   if (isDorisAnalyticsBackend()) {
-    const trace = await getDorisTelemetryRepositories().traces.get({
-      projectId: params.projectId,
-      traceId: params.traceId,
-    });
-    if (!trace) return undefined;
-    if (
-      params.timestamp &&
-      trace.timestamp.toISOString().slice(0, 10) !==
-        params.timestamp.toISOString().slice(0, 10)
-    ) {
-      return undefined;
-    }
-    const control = await prisma.traceControlState.findUnique({
-      where: {
-        projectId_traceId: {
-          projectId: params.projectId,
-          traceId: params.traceId,
-        },
-      },
-      select: { bookmarked: true, public: true },
-    });
-    return toDorisTraceDomain(trace, {
-      bookmarked: control?.bookmarked ?? false,
-      public: control?.public ?? false,
-    });
+    return getTraceByIdFromDoris(params);
   }
   if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
     return getTraceByIdFromTracesTable(params);
@@ -1115,50 +1594,7 @@ export const getObservationById = async (
   params: Parameters<typeof getObservationByIdFromObservationsTable>[0],
 ) => {
   if (isDorisAnalyticsBackend()) {
-    const observation = await getDorisTelemetryRepositories().observations.get({
-      projectId: params.projectId,
-      observationId: params.id,
-      traceId: params.traceId,
-    });
-    const matchesType = !params.type || observation?.type === params.type;
-    const matchesStartDate =
-      !params.startTime ||
-      observation?.startTime.toISOString().slice(0, 10) ===
-        params.startTime.toISOString().slice(0, 10);
-    if (!observation || !matchesType || !matchesStartDate) {
-      throw new LangfuseNotFoundError(
-        `Observation with id ${params.id} not found`,
-      );
-    }
-    const control = await prisma.traceControlState.findUnique({
-      where: {
-        projectId_traceId: {
-          projectId: params.projectId,
-          traceId: observation.traceId,
-        },
-      },
-      select: { bookmarked: true, public: true },
-    });
-    const mapped = toDorisEventsObservation({
-      ...observation,
-      bookmarked: control?.bookmarked ?? false,
-      public: control?.public ?? false,
-    });
-    const renderingProps = params.renderingProps ?? DEFAULT_RENDERING_PROPS;
-    const renderIo = (value: EventsObservation["input"]) =>
-      applyInputOutputRendering(
-        value === null
-          ? null
-          : typeof value === "string"
-            ? value
-            : JSON.stringify(value),
-        renderingProps,
-      );
-    return {
-      ...mapped,
-      input: params.fetchWithInputOutput ? renderIo(mapped.input) : null,
-      output: params.fetchWithInputOutput ? renderIo(mapped.output) : null,
-    };
+    return getObservationByIdFromDoris(params);
   }
   if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
     return getObservationByIdFromObservationsTable(params);
@@ -1195,6 +1631,17 @@ export const getTracesIdentifierForSession = async (
 export const hasAnyTraceFromEventsTable = async (
   projectId: string,
 ): Promise<boolean> => {
+  if (isDorisAnalyticsBackend()) {
+    const to = new Date();
+    return (
+      (await getDorisTelemetryRepositories().observations.count({
+        projectId,
+        range: { from: new Date(0), to },
+        filters: [],
+      })) > 0
+    );
+  }
+
   const query = `
     SELECT 1
     FROM events_core
@@ -1232,7 +1679,10 @@ export const hasAnyTraceFromEventsTable = async (
  * flag as a read-through cache, so steady-state checks skip ClickHouse.
  */
 export const hasAnyTracingData = async (projectId: string) => {
-  if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only") {
+  if (
+    !isDorisAnalyticsBackend() &&
+    env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only"
+  ) {
     return hasAnyTrace(projectId);
   }
 
@@ -1603,7 +2053,10 @@ export const getObservationsV2FromEventsTableForPublicApi = async (
   if (isDorisAnalyticsBackend()) {
     const { getDorisObservationsForPublicApi } =
       await import("./telemetry/doris/publicApi.js");
-    return getDorisObservationsForPublicApi(opts);
+    return getDorisObservationsForPublicApi({
+      ...opts,
+      includeLookahead: true,
+    });
   }
   const { projectId, expandMetadataKeys } = opts;
 
@@ -2093,11 +2546,39 @@ export const getEventsFilterOptionsForColumns = async (params: {
   columns: readonly EventFilterOptionColumn[];
   topN?: number;
   scope?: EventFilterOptionScope;
-}) =>
-  queryEventsFilterOptionsForColumns({
+}) => {
+  if (isDorisAnalyticsBackend()) {
+    if (params.scope) {
+      throw new InvalidRequestError(
+        "Score-scoped Doris event facets are unavailable until the score query plan is active",
+      );
+    }
+    const query = buildDorisObservationReadQuery(params.filter);
+    const inactiveR1BColumns = new Set<EventFilterOptionColumn>([
+      "experimentDatasetId",
+      "experimentId",
+      "experimentName",
+    ]);
+    const rows = await Promise.all(
+      params.columns
+        .filter((column) => !inactiveR1BColumns.has(column))
+        .map((column) =>
+          getDorisTelemetryRepositories().observations.filterOptionValues({
+            projectId: params.projectId,
+            range: query.range,
+            filters: query.filters,
+            column,
+            limit: params.topN ?? EVENTS_FILTER_OPTION_TOP_N,
+          }),
+        ),
+    );
+    return rows.flat() as EventFilterOptionRow[];
+  }
+  return queryEventsFilterOptionsForColumns({
     ...params,
     limit: params.topN ?? EVENTS_FILTER_OPTION_TOP_N,
   });
+};
 
 export const getEventsFilterOptionValuesPage = async (params: {
   projectId: string;
@@ -2105,28 +2586,57 @@ export const getEventsFilterOptionValuesPage = async (params: {
   column: EventFilterOptionColumn;
   limit: number;
   offset: number;
-}) =>
-  queryEventsFilterOptionColumn({
+}) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery(params.filter);
+    return getDorisTelemetryRepositories().observations.filterOptionValues({
+      projectId: params.projectId,
+      range: query.range,
+      filters: query.filters,
+      column: params.column,
+      limit: params.limit,
+      offset: params.offset,
+    }) as Promise<EventFilterOptionRow[]>;
+  }
+  return queryEventsFilterOptionColumn({
     projectId: params.projectId,
     filter: params.filter,
     column: params.column,
     limit: params.limit,
     offset: params.offset,
   });
+};
 
 const getSingleEventsFilterOptionColumn = async (
   projectId: string,
   filter: FilterState,
   column: EventFilterOptionColumn,
   opts?: GroupedEventsFilterOptions,
-) =>
-  queryEventsFilterOptionColumn({
+) => {
+  if (isDorisAnalyticsBackend()) {
+    if (opts?.scope) {
+      throw new InvalidRequestError(
+        "Score-scoped Doris event facets are unavailable until the score query plan is active",
+      );
+    }
+    const query = buildDorisObservationReadQuery(filter);
+    return getDorisTelemetryRepositories().observations.filterOptionValues({
+      projectId,
+      range: query.range,
+      filters: query.filters,
+      column,
+      limit: opts?.limit ?? EVENTS_FILTER_OPTION_TOP_N,
+    }) as Promise<EventFilterOptionRow[]>;
+  }
+
+  return queryEventsFilterOptionColumn({
     projectId,
     filter,
     column,
     limit: opts?.limit ?? EVENTS_FILTER_OPTION_TOP_N,
     scope: opts?.scope,
   });
+};
 
 export const getEventsGroupedByTraceName = async (
   projectId: string,
@@ -2178,6 +2688,16 @@ export const getEventsNumericStatsByFilterColumn = async (
     "inputTokens" | "outputTokens" | "inputCost" | "outputCost"
   >,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery(filter);
+    return getDorisTelemetryRepositories().observations.numericStats({
+      projectId,
+      range: query.range,
+      filters: query.filters,
+      column: columnId,
+    });
+  }
+
   const column = eventsTableCols.find((col) => col.id === columnId);
 
   if (!column || column.type !== "number") {
@@ -2372,6 +2892,54 @@ export async function getAgentGraphDataFromEventsTable(params: {
 }) {
   const { projectId, traceId, chMinStartTime, chMaxStartTime } = params;
 
+  if (isDorisAnalyticsBackend()) {
+    const observations: DorisObservation[] = [];
+    let offset = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const page =
+        await getDorisTelemetryRepositories().observations.listForTrace({
+          projectId,
+          traceId,
+          filters: [
+            {
+              type: "datetime",
+              column: "startTime",
+              operator: ">=",
+              value: parseDorisDateTimeInput(chMinStartTime),
+            },
+            {
+              type: "datetime",
+              column: "startTime",
+              operator: "<=",
+              value: parseDorisDateTimeInput(chMaxStartTime),
+            },
+          ],
+          includeFullContent: true,
+          orderBy: { column: "startTime", order: "ASC" },
+          offset,
+          limit: 999,
+        });
+      observations.push(...page.items);
+      hasMore = page.items.length === 999;
+      offset += page.items.length;
+    }
+
+    return observations.map((observation) => ({
+      id: observation.id,
+      parent_observation_id: observation.parentObservationId,
+      type: observation.type,
+      name: observation.name ?? "",
+      start_time: observation.startTime.toISOString(),
+      end_time: observation.endTime?.toISOString() ?? null,
+      node:
+        typeof observation.metadata?.langgraph_node === "string"
+          ? observation.metadata.langgraph_node
+          : null,
+      step: observation.metadata?.langgraph_step ?? null,
+    }));
+  }
+
   const query = `
     SELECT
       e.span_id as id,
@@ -2496,6 +3064,76 @@ export const getObservationsBatchIOFromEventsTable = async <
     return [];
   }
 
+  if (isDorisAnalyticsBackend()) {
+    if (opts.includeExperimentFields) {
+      throw new InvalidRequestError(
+        "Experiment observation fields are unavailable in Doris R1A",
+      );
+    }
+    const observationIds = opts.observations.map(({ id }) => id);
+    const traceIds = [
+      ...new Set(opts.observations.map(({ traceId }) => traceId)),
+    ];
+    const allowedPairs = new Set(
+      opts.observations.map(({ id, traceId }) => `${traceId}\u0000${id}`),
+    );
+    const observations: DorisObservation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().observations.list({
+        projectId: opts.projectId,
+        range: {
+          from: new Date(opts.minStartTime.getTime() - 1_000),
+          to: new Date(opts.maxStartTime.getTime() + 1_001),
+        },
+        filters: [
+          {
+            type: "stringOptions",
+            column: "id",
+            operator: "any of",
+            value: observationIds,
+          },
+          {
+            type: "stringOptions",
+            column: "traceId",
+            operator: "any of",
+            value: traceIds,
+          },
+        ],
+        includeFullContent: true,
+        cursor,
+        limit: Math.min(999, opts.observations.length),
+      });
+      observations.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    const truncated = opts.truncated ?? true;
+    return observations
+      .filter((observation) =>
+        allowedPairs.has(`${observation.traceId}\u0000${observation.id}`),
+      )
+      .map((observation) => {
+        const render = (value: unknown) => {
+          const raw = rawDorisIo(value);
+          return truncated && raw
+            ? unicodeHead(raw, env.LANGFUSE_SERVER_SIDE_IO_CHAR_LIMIT)
+            : raw;
+        };
+        return {
+          id: observation.id,
+          input: render(observation.input),
+          output: render(observation.output),
+          metadata: { ...(observation.metadata ?? {}) } as MetadataDomain,
+          ...(opts.includeToolCallFields
+            ? {
+                toolCalls: [...(observation.toolCalls ?? [])],
+                toolCallNames: [...(observation.toolCallNames ?? [])],
+              }
+            : {}),
+        };
+      }) as Array<EventBatchIOResult<TIncludeExperiment, TIncludeToolCalls>>;
+  }
+
   const truncated = opts.truncated ?? true;
 
   // Extract IDs and trace IDs for filtering
@@ -2609,6 +3247,27 @@ export const getObservationFullIOForSessionFromEventsTable = async (opts: {
   output: string | null;
   metadata: MetadataDomain;
 } | null> => {
+  if (isDorisAnalyticsBackend()) {
+    const observation = await getDorisTelemetryRepositories().observations.get({
+      projectId: opts.projectId,
+      observationId: opts.observationId,
+      traceId: opts.traceId,
+    });
+    if (
+      !observation ||
+      observation.sessionId !== opts.sessionId ||
+      Math.abs(observation.startTime.getTime() - opts.startTime.getTime()) >
+        1_000
+    ) {
+      return null;
+    }
+    return {
+      id: observation.id,
+      input: rawDorisIo(observation.input),
+      output: rawDorisIo(observation.output),
+      metadata: { ...(observation.metadata ?? {}) } as MetadataDomain,
+    };
+  }
   // ±1s around start_time prunes on the primary key
   // (project_id, toStartOfMinute(start_time), xxHash32(trace_id)).
   const minTimestamp = new Date(opts.startTime.getTime() - 1000);
@@ -2680,6 +3339,20 @@ export const getObservationsTraceIdsFromEventsTable = async (opts: {
   observationIds: string[];
 }) => {
   const { projectId, observationIds } = opts;
+
+  if (isDorisAnalyticsBackend()) {
+    const observations = await Promise.all(
+      observationIds.map((observationId) =>
+        getDorisTelemetryRepositories().observations.get({
+          projectId,
+          observationId,
+        }),
+      ),
+    );
+    return observations.flatMap((observation) =>
+      observation ? [{ id: observation.id, traceId: observation.traceId }] : [],
+    );
+  }
 
   const queryBuilder = new EventsQueryBuilder({ projectId })
     .selectRaw("e.trace_id AS trace_id", "e.span_id AS span_id")
@@ -2872,13 +3545,20 @@ export const getUserMetricsFromEventsTable = async (
       ],
       "user",
     );
-    const page = await getDorisTelemetryRepositories().users.list({
-      projectId,
-      range: query.range,
-      filters: query.filters,
-      limit: Math.min(999, userIds.length),
-    });
-    return page.items.map(toDorisUserMetricsRow);
+    const users: DorisUser[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().users.list({
+        projectId,
+        range: query.range,
+        filters: query.filters,
+        cursor,
+        limit: Math.min(999, userIds.length),
+      });
+      users.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return users.map(toDorisUserMetricsRow);
   }
 
   const eventsFilter = new FilterList(
@@ -3371,14 +4051,21 @@ export const getSessionMetricsFromEvents = async (props: {
       ],
       "session",
     );
-    const page = await getDorisTelemetryRepositories().sessions.list({
-      projectId: props.projectId,
-      range: query.range,
-      filters: [],
-      sessionFilters: query.sessionFilters,
-      limit: Math.min(999, props.sessionIds.length),
-    });
-    return page.items.map(toDorisSessionMetricsRow);
+    const sessions: DorisSession[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await getDorisTelemetryRepositories().sessions.list({
+        projectId: props.projectId,
+        range: query.range,
+        filters: [],
+        sessionFilters: query.sessionFilters,
+        cursor,
+        limit: Math.min(999, props.sessionIds.length),
+      });
+      sessions.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return sessions.map(toDorisSessionMetricsRow);
   }
 
   const builder = eventsSessionsAggregation({
@@ -3445,6 +4132,13 @@ export async function getLatestSdkVersionInfoFromEvents(params: {
 
   // Time filter: last 7 days
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().observations.latestSdkMetadata({
+      projectId,
+      range: { from: sevenDaysAgo, to: new Date() },
+    });
+  }
+
   const filter = new FilterList([
     new DateTimeFilter({
       clickhouseTable: "events_proto",

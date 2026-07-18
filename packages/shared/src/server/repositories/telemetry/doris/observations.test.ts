@@ -212,6 +212,53 @@ describe("Doris observations repository", () => {
     );
   });
 
+  it("treats a trace-scoped full-content read as point detail", async () => {
+    const locateTrace = vi.fn().mockResolvedValue([
+      {
+        partitionDate: "2026-01-01",
+        traceId: "trace-long",
+        observationId: "span-1",
+      },
+      {
+        partitionDate: "2026-02-02",
+        traceId: "trace-long",
+        observationId: "span-2",
+      },
+    ]);
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisObservationsRepository({ query, locateTrace });
+
+    await expect(
+      repository.listForTrace({
+        projectId: "project-1",
+        traceId: "trace-long",
+        filters: [],
+        includeFullContent: true,
+        limit: 10,
+      }),
+    ).resolves.toEqual({ items: [], nextCursor: null });
+    expect(query.mock.calls[0]?.[0]).toContain("e.input AS input");
+  });
+
+  it("applies a requested order and offset", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await repository.list({
+      projectId: "project-1",
+      range,
+      filters: [],
+      orderBy: { column: "totalCost", order: "ASC" },
+      offset: 40,
+      limit: 20,
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "ORDER BY e.total_cost ASC, e.start_time ASC, e.trace_id ASC, e.span_id ASC",
+    );
+    expect(query.mock.calls[0]?.[1].slice(-2)).toEqual([21, 40]);
+  });
+
   it("counts through the same bounded visibility scope", async () => {
     const query = vi.fn().mockResolvedValue([{ count: "7" }]);
     const repository = new DorisObservationsRepository({ query });
@@ -223,5 +270,145 @@ describe("Doris observations repository", () => {
     expect(query.mock.calls[0]?.[0]).toContain(
       "trace_deletion.trace_id IS NULL",
     );
+  });
+
+  it("counts observations and distinct traces through one scope", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "7", trace_count: "3" }]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.counts({ projectId: "project-1", range, filters: [] }),
+    ).resolves.toEqual({ totalCount: 7, uniqueTraceCount: 3 });
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "COUNT(DISTINCT e.trace_id) AS trace_count",
+    );
+  });
+
+  it("returns bounded scalar and array filter options from allowlisted columns", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce([{ value: "generation", count: "4" }])
+      .mockResolvedValueOnce([{ value: "prod", count: "2" }]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "name",
+        limit: 10,
+        offset: 3,
+      }),
+    ).resolves.toEqual([{ column: "name", value: "generation", count: 4 }]);
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "traceTags",
+        limit: 10,
+      }),
+    ).resolves.toEqual([{ column: "traceTags", value: "prod", count: 2 }]);
+
+    expect(query.mock.calls[0]?.[0]).toContain("e.name AS value");
+    expect(query.mock.calls[0]?.[0]).toContain("e.partition_date >= ?");
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "ORDER BY count DESC, value ASC",
+    );
+    expect(query.mock.calls[0]?.[1].slice(-2)).toEqual([10, 3]);
+    expect(query.mock.calls[1]?.[0]).toContain(
+      "LATERAL VIEW explode(scoped.facet_values) exploded AS value",
+    );
+  });
+
+  it("computes bounded numeric filter statistics from an allowlisted expression", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValue([{ min: "0.5", max: "4", avg: "2.25", count: "8" }]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.numericStats({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "latency",
+      }),
+    ).resolves.toEqual({ min: 0.5, max: 4, avg: 2.25, count: 8 });
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time)",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain("e.project_id = ?");
+  });
+
+  it("enforces the full-content range cap for tool facets and statistics", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisObservationsRepository({ query });
+    const overlongRange = {
+      from: new Date("2026-01-01T00:00:00.000Z"),
+      to: new Date("2026-02-01T00:00:00.001Z"),
+    };
+
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range: overlongRange,
+        filters: [],
+        column: "toolNames",
+        limit: 10,
+      }),
+    ).rejects.toMatchObject({ code: "InvalidTimeRange", maxDays: 30 });
+    await expect(
+      repository.numericStats({
+        projectId: "project-1",
+        range: overlongRange,
+        filters: [],
+        column: "toolCalls",
+      }),
+    ).rejects.toMatchObject({ code: "InvalidTimeRange", maxDays: 30 });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects inactive experiment facets before issuing Doris SQL", async () => {
+    const query = vi.fn();
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.filterOptionValues({
+        projectId: "project-1",
+        range,
+        filters: [],
+        column: "experimentId" as "name",
+        limit: 10,
+      }),
+    ).rejects.toMatchObject({ httpCode: 400 });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("reads recent SDK attribution through the bounded visible event scope", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        ingestion_sdk_name: "js",
+        ingestion_sdk_version: "4.1.0",
+        telemetry_sdk_language: "javascript",
+      },
+    ]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.latestSdkMetadata({
+        projectId: "project-1",
+        range,
+      }),
+    ).resolves.toEqual({
+      isOtel: true,
+      name: "js",
+      version: "4.1.0",
+      language: "javascript",
+    });
+    expect(query.mock.calls[0]?.[0]).toContain("e.`source` LIKE 'otel%'");
+    expect(query.mock.calls[0]?.[0]).toContain("ORDER BY e.start_time DESC");
+    expect(query.mock.calls[0]?.[0]).toContain("e.project_id = ?");
   });
 });

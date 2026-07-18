@@ -7,6 +7,7 @@ import {
   compileDorisVisibleEventScope,
   compileDorisVisibleEventsQuery,
   type DorisEventCursor,
+  type DorisEventOrderBy,
 } from "../../../queries/doris-sql/eventQueryCompiler";
 import {
   buildSearchPlan,
@@ -96,6 +97,201 @@ export type DorisObservationsPage = {
   readonly items: readonly DorisObservation[];
   readonly nextCursor: string | null;
 };
+
+export type DorisEventFilterOptionColumn =
+  | "providedModelName"
+  | "modelId"
+  | "name"
+  | "promptName"
+  | "traceTags"
+  | "traceName"
+  | "type"
+  | "userId"
+  | "version"
+  | "sessionId"
+  | "level"
+  | "environment"
+  | "isRootObservation"
+  | "hasParentObservation"
+  | "toolNames"
+  | "calledToolNames";
+
+export type DorisEventNumericColumn =
+  | "promptVersion"
+  | "totalCost"
+  | "totalTokens"
+  | "latency"
+  | "timeToFirstToken"
+  | "tokensPerSecond"
+  | "toolDefinitions"
+  | "toolCalls";
+
+type DorisEventFacetDefinition = {
+  readonly kind: "scalar" | "array" | "boolean";
+  readonly expression: string;
+  readonly includeWhen?: string;
+  readonly order: "count" | "alpha" | "boolean";
+  readonly requiresFullContent?: boolean;
+};
+
+const EVENT_FACETS: Readonly<
+  Record<DorisEventFilterOptionColumn, DorisEventFacetDefinition>
+> = {
+  providedModelName: {
+    kind: "scalar",
+    expression: "e.provided_model_name",
+    includeWhen:
+      "e.provided_model_name IS NOT NULL AND e.provided_model_name != ''",
+    order: "count",
+  },
+  modelId: {
+    kind: "scalar",
+    expression: "e.internal_model_id",
+    includeWhen:
+      "e.internal_model_id IS NOT NULL AND e.internal_model_id != ''",
+    order: "count",
+  },
+  name: {
+    kind: "scalar",
+    expression: "e.name",
+    includeWhen: "e.name IS NOT NULL AND e.name != ''",
+    order: "count",
+  },
+  promptName: {
+    kind: "scalar",
+    expression: "e.prompt_name",
+    includeWhen:
+      "e.`type` = 'GENERATION' AND e.prompt_name IS NOT NULL AND e.prompt_name != ''",
+    order: "count",
+  },
+  traceTags: {
+    kind: "array",
+    expression: "e.tags",
+    order: "alpha",
+  },
+  traceName: {
+    kind: "scalar",
+    expression: "e.trace_name",
+    includeWhen: "e.trace_name IS NOT NULL AND e.trace_name != ''",
+    order: "count",
+  },
+  type: {
+    kind: "scalar",
+    expression: "e.`type`",
+    includeWhen: "e.`type` IS NOT NULL AND e.`type` != ''",
+    order: "count",
+  },
+  userId: {
+    kind: "scalar",
+    expression: "e.user_id",
+    includeWhen: "e.user_id IS NOT NULL AND e.user_id != ''",
+    order: "count",
+  },
+  version: {
+    kind: "scalar",
+    expression: "e.`version`",
+    includeWhen: "e.`version` IS NOT NULL AND e.`version` != ''",
+    order: "count",
+  },
+  sessionId: {
+    kind: "scalar",
+    expression: "e.session_id",
+    includeWhen: "e.session_id IS NOT NULL AND e.session_id != ''",
+    order: "count",
+  },
+  level: {
+    kind: "scalar",
+    expression: "e.`level`",
+    includeWhen: "e.`level` IS NOT NULL AND e.`level` != ''",
+    order: "count",
+  },
+  environment: {
+    kind: "scalar",
+    expression: "e.environment",
+    includeWhen: "e.environment IS NOT NULL AND e.environment != ''",
+    order: "count",
+  },
+  isRootObservation: {
+    kind: "boolean",
+    expression:
+      "(e.parent_span_id IS NULL OR e.parent_span_id = '' OR e.is_app_root = TRUE)",
+    order: "boolean",
+  },
+  hasParentObservation: {
+    kind: "boolean",
+    expression: "(e.parent_span_id IS NOT NULL AND e.parent_span_id != '')",
+    order: "boolean",
+  },
+  toolNames: {
+    kind: "array",
+    expression: "JSON_KEYS(e.tool_definitions)",
+    order: "count",
+    requiresFullContent: true,
+  },
+  calledToolNames: {
+    kind: "array",
+    expression: "e.tool_call_names",
+    order: "count",
+    requiresFullContent: true,
+  },
+};
+
+const EVENT_NUMERIC_EXPRESSIONS: Readonly<
+  Record<DorisEventNumericColumn, string>
+> = {
+  promptVersion: "e.prompt_version",
+  totalCost: "e.total_cost",
+  totalTokens:
+    "COALESCE(e.total_input_tokens, 0) + COALESCE(e.total_output_tokens, 0)",
+  latency: "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0",
+  timeToFirstToken:
+    "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.completion_start_time) / 1000000.0",
+  tokensPerSecond:
+    "e.total_output_tokens / NULLIF(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0, 0)",
+  toolDefinitions: "CARDINALITY(JSON_KEYS(e.tool_definitions))",
+  toolCalls: "CARDINALITY(e.tool_calls)",
+};
+
+const FULL_CONTENT_ORDER_COLUMNS = new Set<DorisEventOrderBy["column"]>([
+  "hasInput",
+  "hasOutput",
+  "toolDefinitions",
+  "toolCalls",
+]);
+
+const FULL_CONTENT_NUMERIC_COLUMNS = new Set<DorisEventNumericColumn>([
+  "toolDefinitions",
+  "toolCalls",
+]);
+
+function eventFacetDefinition(column: string): {
+  readonly column: DorisEventFilterOptionColumn;
+  readonly definition: DorisEventFacetDefinition;
+} {
+  if (!Object.hasOwn(EVENT_FACETS, column)) {
+    throw new InvalidRequestError(
+      `Unsupported Doris event filter option column: ${column}`,
+    );
+  }
+  const typedColumn = column as DorisEventFilterOptionColumn;
+  return { column: typedColumn, definition: EVENT_FACETS[typedColumn] };
+}
+
+function eventNumericExpression(column: string): {
+  readonly column: DorisEventNumericColumn;
+  readonly expression: string;
+} {
+  if (!Object.hasOwn(EVENT_NUMERIC_EXPRESSIONS, column)) {
+    throw new InvalidRequestError(
+      `Unsupported Doris event numeric column: ${column}`,
+    );
+  }
+  const typedColumn = column as DorisEventNumericColumn;
+  return {
+    column: typedColumn,
+    expression: EVENT_NUMERIC_EXPRESSIONS[typedColumn],
+  };
+}
 
 function dateOnly(value: unknown): string {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -314,19 +510,24 @@ export class DorisObservationsRepository {
     this.locateTrace = dependencies.locateTrace ?? findTraceEventHeadLocators;
   }
 
-  async list(input: {
-    readonly projectId: string;
-    readonly range: AnalyticsTimeRange | null;
-    readonly filters: EventsTableFilterState;
-    readonly search?: {
-      readonly query: string;
-      readonly searchType?: readonly TracingSearchType[];
-    };
-    readonly cursor?: string;
-    readonly limit: number;
-    readonly includeFullContent?: boolean;
-    readonly partitionDates?: readonly string[];
-  }): Promise<DorisObservationsPage> {
+  private async listInternal(
+    input: {
+      readonly projectId: string;
+      readonly range: AnalyticsTimeRange | null;
+      readonly filters: EventsTableFilterState;
+      readonly search?: {
+        readonly query: string;
+        readonly searchType?: readonly TracingSearchType[];
+      };
+      readonly cursor?: string;
+      readonly limit: number;
+      readonly offset?: number;
+      readonly orderBy?: DorisEventOrderBy;
+      readonly includeFullContent?: boolean;
+      readonly partitionDates?: readonly string[];
+    },
+    enforceFullContentRange: boolean,
+  ): Promise<DorisObservationsPage> {
     if (
       !Number.isSafeInteger(input.limit) ||
       input.limit < 1 ||
@@ -334,7 +535,11 @@ export class DorisObservationsRepository {
     ) {
       throw new RangeError("Doris observation page size is invalid");
     }
-    if (input.includeFullContent) {
+    if (
+      enforceFullContentRange &&
+      (input.includeFullContent ||
+        (input.orderBy && FULL_CONTENT_ORDER_COLUMNS.has(input.orderBy.column)))
+    ) {
       buildSearchPlan({
         range: input.range,
         filtersRequireFullContent: true,
@@ -348,6 +553,8 @@ export class DorisObservationsRepository {
       search: input.search,
       cursor: decodeCursor(input.cursor),
       partitionDates: input.partitionDates,
+      orderBy: input.orderBy,
+      offset: input.offset,
       limit: input.limit + 1,
     });
     const rows = await this.dependencies.query<DorisEventRow>(
@@ -358,10 +565,28 @@ export class DorisObservationsRepository {
     return {
       items,
       nextCursor:
-        rows.length > input.limit && items.length > 0
+        !input.orderBy && rows.length > input.limit && items.length > 0
           ? encodeCursor(items[items.length - 1]!)
           : null,
     };
+  }
+
+  async list(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly cursor?: string;
+    readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisEventOrderBy;
+    readonly includeFullContent?: boolean;
+    readonly partitionDates?: readonly string[];
+  }): Promise<DorisObservationsPage> {
+    return this.listInternal(input, true);
   }
 
   async count(input: {
@@ -380,6 +605,182 @@ export class DorisObservationsRepository {
       scope.params,
     );
     return numberValue(rows[0]?.count);
+  }
+
+  async counts(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+  }): Promise<{
+    readonly totalCount: number;
+    readonly uniqueTraceCount: number;
+  }> {
+    const scope = compileDorisVisibleEventScope(input);
+    const rows = await this.dependencies.query<{
+      readonly count: unknown;
+      readonly trace_count: unknown;
+    }>(
+      `SELECT COUNT(*) AS count, COUNT(DISTINCT e.trace_id) AS trace_count\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
+      scope.params,
+    );
+    return {
+      totalCount: numberValue(rows[0]?.count),
+      uniqueTraceCount: numberValue(rows[0]?.trace_count),
+    };
+  }
+
+  async filterOptionValues(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly column: string;
+    readonly limit: number;
+    readonly offset?: number;
+  }): Promise<
+    readonly {
+      readonly column: DorisEventFilterOptionColumn;
+      readonly value: string;
+      readonly count: number;
+    }[]
+  > {
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 1_000 ||
+      !Number.isSafeInteger(input.offset ?? 0) ||
+      (input.offset ?? 0) < 0
+    ) {
+      throw new InvalidRequestError("Invalid Doris event facet page size");
+    }
+    const { column, definition } = eventFacetDefinition(input.column);
+    if (definition.requiresFullContent) {
+      buildSearchPlan({
+        range: input.range,
+        filtersRequireFullContent: true,
+      });
+    }
+    const scope = compileDorisVisibleEventScope(input);
+    const valueExpression =
+      definition.kind === "boolean"
+        ? `IF(${definition.expression}, 'true', 'false')`
+        : definition.kind === "array"
+          ? "value"
+          : definition.expression;
+    const fromSql =
+      definition.kind === "array"
+        ? `FROM (\n  SELECT ${definition.expression} AS facet_values\n  ${scope.fromSql}\n  WHERE ${scope.whereSql}\n) scoped\nLATERAL VIEW explode(scoped.facet_values) exploded AS value`
+        : `${scope.fromSql}\nWHERE ${scope.whereSql}`;
+    const includeWhen =
+      definition.kind === "array"
+        ? "value IS NOT NULL AND value != ''"
+        : definition.includeWhen;
+    const orderBy =
+      definition.order === "alpha"
+        ? "value ASC"
+        : definition.order === "boolean"
+          ? "value ASC"
+          : "count DESC, value ASC";
+    const offsetSql = input.offset ? " OFFSET ?" : "";
+    const rows = await this.dependencies.query<{
+      readonly value: unknown;
+      readonly count: unknown;
+    }>(
+      `SELECT ${valueExpression} AS value, COUNT(*) AS count\n${fromSql}${definition.kind === "array" ? "\nWHERE" : " AND"} ${includeWhen ?? "TRUE"}\nGROUP BY value\nORDER BY ${orderBy}\nLIMIT ?${offsetSql}`,
+      [...scope.params, input.limit, ...(input.offset ? [input.offset] : [])],
+    );
+    return rows.map((row) => ({
+      column,
+      value: String(row.value),
+      count: numberValue(row.count),
+    }));
+  }
+
+  async numericStats(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly column: string;
+  }): Promise<{
+    readonly min: number;
+    readonly max: number;
+    readonly avg: number;
+    readonly count: number;
+  } | null> {
+    const { column, expression } = eventNumericExpression(input.column);
+    if (FULL_CONTENT_NUMERIC_COLUMNS.has(column)) {
+      buildSearchPlan({
+        range: input.range,
+        filtersRequireFullContent: true,
+      });
+    }
+    const scope = compileDorisVisibleEventScope(input);
+    const rows = await this.dependencies.query<{
+      readonly min: unknown;
+      readonly max: unknown;
+      readonly avg: unknown;
+      readonly count: unknown;
+    }>(
+      `SELECT MIN(${expression}) AS min, MAX(${expression}) AS max, AVG(${expression}) AS avg, COUNT(${expression}) AS count\n${scope.fromSql}\nWHERE ${scope.whereSql} AND ${expression} IS NOT NULL`,
+      scope.params,
+    );
+    const row = rows[0];
+    if (
+      !row ||
+      row.min === null ||
+      row.min === undefined ||
+      row.max === null ||
+      row.max === undefined ||
+      row.avg === null ||
+      row.avg === undefined
+    ) {
+      return null;
+    }
+    return {
+      min: numberValue(row.min),
+      max: numberValue(row.max),
+      avg: numberValue(row.avg),
+      count: numberValue(row.count),
+    };
+  }
+
+  async latestSdkMetadata(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange;
+  }): Promise<{
+    readonly isOtel: boolean;
+    readonly name?: string;
+    readonly version?: string;
+    readonly language?: string;
+  }> {
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: [],
+    });
+    const rows = await this.dependencies.query<{
+      readonly ingestion_sdk_name: unknown;
+      readonly ingestion_sdk_version: unknown;
+      readonly telemetry_sdk_language: unknown;
+    }>(
+      `SELECT e.ingestion_sdk_name, e.ingestion_sdk_version, e.telemetry_sdk_language\n${scope.fromSql}\nWHERE ${scope.whereSql} AND e.\`source\` LIKE 'otel%'\nORDER BY e.start_time DESC, e.trace_id DESC, e.span_id DESC\nLIMIT 1`,
+      scope.params,
+    );
+    const row = rows[0];
+    if (!row) return { isOtel: false };
+    const name = nullableString(row.ingestion_sdk_name);
+    const version = nullableString(row.ingestion_sdk_version);
+    const language = nullableString(row.telemetry_sdk_language);
+    const attributedName = name && name !== "unknown" ? name : undefined;
+    return {
+      isOtel: true,
+      ...(attributedName && { name: attributedName }),
+      ...(attributedName && version && version !== "unknown" && { version }),
+      ...(language && { language }),
+    };
   }
 
   private async resolveTraceRange(input: {
@@ -416,6 +817,8 @@ export class DorisObservationsRepository {
     };
     readonly cursor?: string;
     readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisEventOrderBy;
     readonly includeFullContent?: boolean;
   }): Promise<DorisObservationsPage> {
     const resolved = await this.resolveTraceRange({
@@ -423,20 +826,23 @@ export class DorisObservationsRepository {
       traceId: input.traceId,
     });
     if (!resolved) return { items: [], nextCursor: null };
-    return this.list({
-      ...input,
-      range: resolved.range,
-      filters: [
-        ...input.filters,
-        {
-          type: "string",
-          column: "traceId",
-          operator: "=",
-          value: input.traceId,
-        },
-      ],
-      partitionDates: resolved.partitionDates,
-    });
+    return this.listInternal(
+      {
+        ...input,
+        range: resolved.range,
+        filters: [
+          ...input.filters,
+          {
+            type: "string",
+            column: "traceId",
+            operator: "=",
+            value: input.traceId,
+          },
+        ],
+        partitionDates: resolved.partitionDates,
+      },
+      false,
+    );
   }
 
   async countForTrace(input: {

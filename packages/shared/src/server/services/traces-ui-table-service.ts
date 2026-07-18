@@ -3,7 +3,9 @@ import { scoreBooleansAggregation } from "../queries/clickhouse-sql/query-fragme
 import { tracesTableUiColumnDefinitions } from "../tableMappings";
 import { tracesTableCols } from "../../tableDefinitions/tracesTable";
 import { findUiColumnMapping } from "../../tableDefinitions";
-import { FilterState } from "../../types";
+import type { EventsTableFilterState, FilterState } from "../../types";
+import { InvalidRequestError } from "../../errors";
+import { prisma } from "../../db";
 import {
   StringFilter,
   StringOptionsFilter,
@@ -32,6 +34,11 @@ import { ClickHouseClientConfigOptions } from "@clickhouse/client";
 import { shouldSkipObservationsFinal } from "../queries/clickhouse-sql/query-options";
 import { convertDateToClickhouseDateTime } from "../clickhouse/client";
 import type { TraceDeleteBatchActionCursor } from "../../features/batchAction/types";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "../repositories/telemetry/doris/runtime";
+import type { DorisTraceOrderBy } from "../repositories/telemetry/doris/traces";
 
 export type TracesTableReturnType = Pick<
   TraceRecordReadType,
@@ -186,6 +193,182 @@ type SelectReturnTypeMap = {
   identifiers: { id: string; projectId: string; timestamp: string };
 };
 
+async function buildDorisTraceReadQuery(
+  projectId: string,
+  filter: FilterState,
+): Promise<{
+  readonly range: { readonly from: Date; readonly to: Date } | null;
+  readonly filters: EventsTableFilterState;
+  readonly impossible: boolean;
+}> {
+  const mapped: FilterState = [];
+  const lowerBounds: Date[] = [];
+  const upperBounds: Date[] = [];
+  let impossible = false;
+
+  for (const item of filter) {
+    if (item.column === "bookmarked") {
+      if (item.type !== "boolean" || item.operator !== "=") {
+        throw new InvalidRequestError(
+          "Unsupported Doris bookmarked trace filter",
+        );
+      }
+      const bookmarked = await prisma.traceControlState.findMany({
+        where: { projectId, bookmarked: true },
+        select: { traceId: true },
+      });
+      if (item.value && bookmarked.length === 0) {
+        impossible = true;
+      } else if (bookmarked.length > 0) {
+        mapped.push({
+          type: "stringOptions",
+          column: "traceId",
+          operator: item.value ? "any of" : "none of",
+          value: bookmarked.map(({ traceId }) => traceId),
+        });
+      }
+      continue;
+    }
+
+    const column =
+      item.column === "timestamp"
+        ? "startTime"
+        : item.column === "id"
+          ? "traceId"
+          : item.column === "traceName"
+            ? "name"
+            : item.column;
+    const mappedItem = { ...item, column };
+    mapped.push(mappedItem);
+    if (item.type === "datetime" && item.column === "timestamp") {
+      if (item.operator === ">" || item.operator === ">=") {
+        lowerBounds.push(item.value);
+      } else {
+        upperBounds.push(
+          item.operator === "<="
+            ? new Date(item.value.getTime() + 1)
+            : item.value,
+        );
+      }
+    }
+  }
+
+  return {
+    range: {
+      from:
+        lowerBounds.length > 0
+          ? new Date(Math.max(...lowerBounds.map((value) => value.getTime())))
+          : new Date(0),
+      to:
+        upperBounds.length > 0
+          ? new Date(Math.min(...upperBounds.map((value) => value.getTime())))
+          : new Date(),
+    },
+    filters: mapped as EventsTableFilterState,
+    impossible,
+  };
+}
+
+function toDorisTraceOrderBy(
+  orderBy: OrderByState | undefined,
+): DorisTraceOrderBy | undefined {
+  if (!orderBy) return undefined;
+  const column = orderBy.column === "traceName" ? "name" : orderBy.column;
+  const supported = new Set<DorisTraceOrderBy["column"]>([
+    "timestamp",
+    "name",
+    "userId",
+    "sessionId",
+    "environment",
+    "version",
+    "release",
+  ]);
+  if (!supported.has(column as DorisTraceOrderBy["column"])) {
+    throw new InvalidRequestError(
+      `Unsupported Doris trace order column: ${orderBy.column}`,
+    );
+  }
+  return {
+    column: column as DorisTraceOrderBy["column"],
+    order: orderBy.order,
+  };
+}
+
+async function getDorisTracesTableGeneric(
+  props: FetchTracesTableProps,
+): Promise<Array<SelectReturnTypeMap[keyof SelectReturnTypeMap]>> {
+  if (props.select === "metrics") {
+    throw new InvalidRequestError(
+      "Doris trace metrics are unavailable until the score/metrics query plan is active",
+    );
+  }
+  if (props.traceDeleteCursor) {
+    throw new InvalidRequestError(
+      "Doris trace deletion cursor is unavailable until the lifecycle query plan is active",
+    );
+  }
+  const query = await buildDorisTraceReadQuery(props.projectId, props.filter);
+  if (query.impossible) {
+    return props.select === "count" ? [{ count: "0" }] : [];
+  }
+  const search = props.searchQuery
+    ? { query: props.searchQuery, searchType: props.searchType }
+    : undefined;
+  const repository = getDorisTelemetryRepositories().traces;
+  if (props.select === "count") {
+    const count = await repository.count({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+      search,
+    });
+    return [{ count: String(count) }];
+  }
+  const page = await repository.list({
+    projectId: props.projectId,
+    range: query.range,
+    filters: query.filters,
+    search,
+    orderBy: toDorisTraceOrderBy(props.orderBy),
+    offset: (props.page ?? 0) * (props.limit ?? 999),
+    limit: props.limit ?? 999,
+  });
+  if (props.select === "identifiers") {
+    return page.items.map((trace) => ({
+      id: trace.id,
+      projectId: trace.projectId,
+      timestamp: trace.timestamp.toISOString(),
+    }));
+  }
+  const controls = await prisma.traceControlState.findMany({
+    where: {
+      projectId: props.projectId,
+      traceId: { in: page.items.map(({ id }) => id) },
+    },
+    select: { traceId: true, bookmarked: true, public: true },
+  });
+  const controlsByTraceId = new Map(
+    controls.map((control) => [control.traceId, control]),
+  );
+  return page.items.map((trace) => {
+    const control = controlsByTraceId.get(trace.id);
+    return {
+      project_id: trace.projectId,
+      id: trace.id,
+      name: trace.name,
+      timestamp: trace.timestamp.toISOString(),
+      bookmarked: control?.bookmarked ?? false,
+      release: trace.release,
+      version: trace.version,
+      user_id: trace.userId,
+      session_id: trace.sessionId,
+      environment: trace.environment,
+      tags: [...trace.tags],
+      public: control?.public ?? false,
+    };
+  });
+}
+
 // Function overloads for type-safe select-specific returns
 async function getTracesTableGeneric(
   props: FetchTracesTableProps & { select: "count" },
@@ -222,6 +405,10 @@ async function getTracesTableGeneric(props: FetchTracesTableProps) {
     traceDeleteCursor,
     traceDeleteCursorOrder,
   } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTracesTableGeneric(props);
+  }
 
   // OTel projects use immutable spans - no need for deduplication
   const skipObservationsDedup = await shouldSkipObservationsFinal(projectId);

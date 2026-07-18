@@ -20,6 +20,7 @@ import {
 import { prisma } from "@langfuse/shared/src/db";
 import {
   getObservationsForTrace,
+  getObservationsForTraceFromEventsTable,
   getScoresForTraces,
   getTraceById,
   traceException,
@@ -76,13 +77,21 @@ export default withMiddlewares(
 
         const [observations, scores] = await Promise.all([
           includeObservations || includeMetrics
-            ? getObservationsForTrace({
-                traceId,
-                projectId: auth.scope.projectId,
-                timestamp: trace?.timestamp,
-                includeIO: includeObservations,
-                preferredClickhouseService: "ReadOnly",
-              })
+            ? env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+              ? getObservationsForTraceFromEventsTable({
+                  traceId,
+                  projectId: auth.scope.projectId,
+                  timestamp: trace.timestamp,
+                  selectIOAndMetadata: includeObservations,
+                  selectToolData: includeObservations,
+                }).then(({ observations }) => observations)
+              : getObservationsForTrace({
+                  traceId,
+                  projectId: auth.scope.projectId,
+                  timestamp: trace.timestamp,
+                  includeIO: includeObservations,
+                  preferredClickhouseService: "ReadOnly",
+                })
             : Promise.resolve([]),
           includeScores
             ? getScoresForTraces({
