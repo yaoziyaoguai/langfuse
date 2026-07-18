@@ -329,6 +329,21 @@ describe("S3StorageService DeleteObjects checksum", () => {
     return key === undefined ? undefined : request.headers[key];
   };
 
+  it("sends an If-None-Match precondition for immutable object creation", async () => {
+    const { service, captured } = makeServiceWithCapture("");
+
+    await expect(
+      service.uploadFileIfAbsent({
+        fileName: "canonical/project/operation/fence-1.json",
+        fileType: "application/json",
+        data: '{"formatVersion":1}',
+      }),
+    ).resolves.toBe("created");
+
+    expect(captured).toHaveLength(1);
+    expect(findHeader(captured[0]!, "if-none-match")).toBe("*");
+  });
+
   it("keeps the SDK's CRC32 checksum on DeleteObjects by default", async () => {
     const { service, captured } = makeServiceWithCapture(
       EMPTY_DELETE_RESULT_XML,

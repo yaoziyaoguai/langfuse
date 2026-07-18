@@ -68,6 +68,12 @@ type UploadFile = {
   queueSize?: number; // Optional: Number of concurrent part uploads (S3 only)
 };
 
+type ConditionalUploadFile = {
+  fileName: string;
+  fileType: string;
+  data: string;
+};
+
 type UploadFileBuffered = {
   fileName: string;
   fileType: string;
@@ -118,6 +124,49 @@ function handleStorageError(err: unknown, operation: string): never {
     ).Details;
   }
   throw wrapped;
+}
+
+function storageErrorField(error: unknown, field: string): unknown {
+  return typeof error === "object" && error !== null && field in error
+    ? (error as Record<string, unknown>)[field]
+    : undefined;
+}
+
+function storageHttpStatus(error: unknown): number | undefined {
+  const direct =
+    storageErrorField(error, "statusCode") ?? storageErrorField(error, "code");
+  if (typeof direct === "number") return direct;
+  const metadata = storageErrorField(error, "$metadata");
+  const metadataStatus = storageErrorField(metadata, "httpStatusCode");
+  return typeof metadataStatus === "number" ? metadataStatus : undefined;
+}
+
+function storageErrorCode(error: unknown): string | undefined {
+  return ["code", "name", "errorCode"]
+    .map((field) => storageErrorField(error, field))
+    .find((value): value is string => typeof value === "string");
+}
+
+function isConditionalCreateCollision(error: unknown): boolean {
+  const code = storageErrorCode(error);
+  return (
+    storageHttpStatus(error) === 412 ||
+    code === "PreconditionFailed" ||
+    code === "ConditionNotMet" ||
+    code === "BlobAlreadyExists" ||
+    code === "ConditionalRequestConflict"
+  );
+}
+
+function isStorageObjectNotFound(error: unknown): boolean {
+  const code = storageErrorCode(error);
+  return (
+    storageHttpStatus(error) === 404 ||
+    code === "NoSuchKey" ||
+    code === "NotFound" ||
+    code === "BlobNotFound" ||
+    code === "ObjectNotFound"
+  );
 }
 
 function createS3RequestHandler(
@@ -235,6 +284,10 @@ function createSecureAzureBlobRequestPolicyFactory(
 export interface StorageService {
   uploadFile(params: UploadFile): Promise<void>;
 
+  uploadFileIfAbsent(
+    params: ConditionalUploadFile,
+  ): Promise<"created" | "already_exists">;
+
   // Returns upload counters when the implementation produces them (S3 buffered
   // path); undefined otherwise. Backward-compatible — existing callers ignore it.
   uploadFileBuffered(
@@ -251,6 +304,8 @@ export interface StorageService {
   ): Promise<void>;
 
   download(path: string): Promise<string>;
+
+  downloadIfExists(path: string): Promise<string | null>;
 
   listFiles(prefix: string): Promise<{ file: string; createdAt: Date }[]>;
 
@@ -441,6 +496,33 @@ class AzureBlobStorageService implements StorageService {
     }
   }
 
+  public async uploadFileIfAbsent({
+    fileName,
+    fileType,
+    data,
+  }: ConditionalUploadFile): Promise<"created" | "already_exists"> {
+    try {
+      await this.createContainerIfNotExists();
+      await this.client
+        .getBlockBlobClient(fileName)
+        .upload(data, Buffer.byteLength(data), {
+          blobHTTPHeaders: { blobContentType: fileType },
+          conditions: { ifNoneMatch: "*" },
+        });
+      return "created";
+    } catch (err) {
+      if (isConditionalCreateCollision(err)) return "already_exists";
+      logger.error(
+        `Failed to conditionally upload file to Azure Blob Storage ${fileName}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally upload file to Azure Blob Storage",
+      );
+    }
+  }
+
   public async uploadFileBuffered(
     params: UploadFileBuffered,
   ): Promise<UploadPartStats | undefined> {
@@ -539,6 +621,27 @@ class AzureBlobStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "download file from Azure Blob Storage");
+    }
+  }
+
+  public async downloadIfExists(path: string): Promise<string | null> {
+    try {
+      await this.createContainerIfNotExists();
+      const response = await this.client.getBlobClient(path).download();
+      if (!response.readableStreamBody) {
+        throw new Error("No stream body available");
+      }
+      return this.streamToString(response.readableStreamBody);
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally download file from Azure Blob Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally download file from Azure Blob Storage",
+      );
     }
   }
 
@@ -776,6 +879,30 @@ class S3StorageService implements StorageService {
     }
   }
 
+  public async uploadFileIfAbsent({
+    fileName,
+    fileType,
+    data,
+  }: ConditionalUploadFile): Promise<"created" | "already_exists"> {
+    const command = new PutObjectCommand(
+      this.addSSEToParams<PutObjectCommandInput>({
+        Bucket: this.bucketName,
+        Key: fileName,
+        Body: data,
+        ContentType: fileType,
+        IfNoneMatch: "*",
+      }),
+    );
+    try {
+      await this.client.send(command);
+      return "created";
+    } catch (err) {
+      if (isConditionalCreateCollision(err)) return "already_exists";
+      logger.error(`Failed to conditionally upload file to ${fileName}`, err);
+      handleStorageError(err, "conditionally upload file to S3");
+    }
+  }
+
   public async uploadFileBuffered({
     fileName,
     fileType,
@@ -873,6 +1000,24 @@ class S3StorageService implements StorageService {
     } catch (err) {
       logger.error(`Failed to download file from S3 ${path}`, err);
       handleStorageError(err, "download file from S3");
+    }
+  }
+
+  public async downloadIfExists(path: string): Promise<string | null> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: path,
+    });
+    try {
+      const response = await this.client.send(command);
+      return (await response.Body?.transformToString()) ?? "";
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally download file from S3 ${path}`,
+        err,
+      );
+      handleStorageError(err, "conditionally download file from S3");
     }
   }
 
@@ -1076,6 +1221,31 @@ class GoogleCloudStorageService implements StorageService {
     }
   }
 
+  public async uploadFileIfAbsent({
+    fileName,
+    fileType,
+    data,
+  }: ConditionalUploadFile): Promise<"created" | "already_exists"> {
+    try {
+      await this.bucket.file(fileName).save(data, {
+        contentType: fileType,
+        resumable: false,
+        preconditionOpts: { ifGenerationMatch: 0 },
+      });
+      return "created";
+    } catch (err) {
+      if (isConditionalCreateCollision(err)) return "already_exists";
+      logger.error(
+        `Failed to conditionally upload file to Google Cloud Storage ${fileName}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally upload file to Google Cloud Storage",
+      );
+    }
+  }
+
   public async uploadFileBuffered(
     params: UploadFileBuffered,
   ): Promise<UploadPartStats | undefined> {
@@ -1139,6 +1309,23 @@ class GoogleCloudStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "download file from Google Cloud Storage");
+    }
+  }
+
+  public async downloadIfExists(path: string): Promise<string | null> {
+    try {
+      const [content] = await this.bucket.file(path).download();
+      return content.toString();
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally download file from Google Cloud Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally download file from Google Cloud Storage",
+      );
     }
   }
 
@@ -1526,6 +1713,37 @@ class OCIObjectStorageService implements StorageService {
     }
   }
 
+  public async uploadFileIfAbsent({
+    fileName,
+    fileType,
+    data,
+  }: ConditionalUploadFile): Promise<"created" | "already_exists"> {
+    try {
+      const { client, namespaceName } = await this.getClientAndNamespace();
+      const request: objectstorage.requests.PutObjectRequest = {
+        namespaceName,
+        bucketName: this.bucketName,
+        objectName: fileName,
+        contentLength: Buffer.byteLength(data),
+        putObjectBody: Readable.from([data]),
+        contentType: fileType,
+        ifNoneMatch: "*",
+      };
+      await client.putObject(request);
+      return "created";
+    } catch (err) {
+      if (isConditionalCreateCollision(err)) return "already_exists";
+      logger.error(
+        `Failed to conditionally upload file to OCI Object Storage ${fileName}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally upload file to OCI Object Storage",
+      );
+    }
+  }
+
   public async uploadFileBuffered({
     fileName,
     fileType,
@@ -1609,6 +1827,30 @@ class OCIObjectStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "download file from OCI Object Storage ");
+    }
+  }
+
+  public async downloadIfExists(path: string): Promise<string | null> {
+    try {
+      const { client, namespaceName } = await this.getClientAndNamespace();
+      const response = await client.getObject({
+        namespaceName,
+        bucketName: this.bucketName,
+        objectName: path,
+      });
+      return await this.streamToString(
+        (response as { value?: NodeJS.ReadableStream }).value,
+      );
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally download file from OCI Object Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally download file from OCI Object Storage",
+      );
     }
   }
 

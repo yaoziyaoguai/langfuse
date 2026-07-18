@@ -109,6 +109,32 @@ describe("StorageService", () => {
     expect(JSON.parse(file)).toEqual(data);
   });
 
+  test("conditional create preserves the first immutable object", async () => {
+    const fileName = `${s3Prefix}${randomUUID()}.json`;
+
+    await expect(
+      storageService.uploadFileIfAbsent({
+        fileName,
+        fileType: "application/json",
+        data: '{"writer":"first"}',
+      }),
+    ).resolves.toBe("created");
+    await expect(
+      storageService.uploadFileIfAbsent({
+        fileName,
+        fileType: "application/json",
+        data: '{"writer":"second"}',
+      }),
+    ).resolves.toBe("already_exists");
+
+    await expect(storageService.downloadIfExists(fileName)).resolves.toBe(
+      '{"writer":"first"}',
+    );
+    await expect(
+      storageService.downloadIfExists(`${s3Prefix}missing.json`),
+    ).resolves.toBeNull();
+  });
+
   test("listFiles should list files in the bucket", async () => {
     // Setup
     const fileName1 = `${s3Prefix}${randomUUID()}.txt`;
