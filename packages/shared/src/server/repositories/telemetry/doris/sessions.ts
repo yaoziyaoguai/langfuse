@@ -1,9 +1,11 @@
 import type { TracingSearchType } from "../../../../interfaces/search";
-import type { EventsTableFilterState } from "../../../../types";
+import type { EventsTableFilterState, FilterState } from "../../../../types";
 import { InvalidRequestError } from "../../../../errors";
 import { parseJsonIfString } from "../../../../utils/json";
 import type { DorisQueryExecutor } from "../../../doris/client";
 import { compileDorisVisibleEventScope } from "../../../queries/doris-sql/eventQueryCompiler";
+import { compileDorisEventFilters } from "../../../queries/doris-sql/filterCompiler";
+import type { LogicalEventFilter } from "../../../queries/logical/filterPlan";
 import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
 
 const MAX_PAGE_SIZE = 999;
@@ -102,8 +104,12 @@ function decodeSession(row: DorisSessionRow): DorisSession {
     maxTimestamp,
     traceIds: stringArray(row.trace_ids),
     userIds: stringArray(row.user_ids),
-    environments: stringArray(row.environments),
-    tags: nestedStringArray(row.trace_tag_sets),
+    environments: Object.hasOwn(row, "environment")
+      ? [String(row.environment)]
+      : stringArray(row.environments),
+    tags: Object.hasOwn(row, "trace_tags")
+      ? stringArray(row.trace_tags)
+      : nestedStringArray(row.trace_tag_sets),
     traceCount: numberValue(row.trace_count),
     observationCount: numberValue(row.observation_count),
     totalInputTokens,
@@ -114,11 +120,12 @@ function decodeSession(row: DorisSessionRow): DorisSession {
   };
 }
 
-function encodeCursor(session: DorisSession): string {
+function encodeCursor(session: DorisSession, order: "ASC" | "DESC"): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
-      maxTimestamp: session.maxTimestamp.toISOString(),
+      order,
+      minTimestamp: session.minTimestamp.toISOString(),
       sessionId: session.id,
     }),
     "utf8",
@@ -127,7 +134,8 @@ function encodeCursor(session: DorisSession): string {
 
 function decodeCursor(
   cursor: string | undefined,
-): { readonly maxTimestamp: Date; readonly sessionId: string } | undefined {
+  expectedOrder: "ASC" | "DESC",
+): { readonly minTimestamp: Date; readonly sessionId: string } | undefined {
   if (!cursor) return undefined;
   try {
     const decoded = Buffer.from(cursor, "base64url");
@@ -138,14 +146,15 @@ function decodeCursor(
     >;
     if (
       value.version !== 1 ||
-      typeof value.maxTimestamp !== "string" ||
+      value.order !== expectedOrder ||
+      typeof value.minTimestamp !== "string" ||
       typeof value.sessionId !== "string" ||
       !value.sessionId
     ) {
       throw new Error();
     }
     return {
-      maxTimestamp: dateTime(value.maxTimestamp),
+      minTimestamp: dateTime(value.minTimestamp),
       sessionId: value.sessionId,
     };
   } catch {
@@ -161,25 +170,87 @@ function identifierPattern(value: string): string {
     .replaceAll("_", "\\_")}%`;
 }
 
-function compileSessionList(input: {
+type SessionQueryInput = {
   readonly projectId: string;
   readonly range: AnalyticsTimeRange | null;
   readonly filters: EventsTableFilterState;
+  readonly sessionFilters?: FilterState;
   readonly search?: {
     readonly query: string;
     readonly searchType?: readonly TracingSearchType[];
   };
   readonly identifierQuery?: string;
-  readonly cursor?: string;
-  readonly limit: number;
-}): { readonly sql: string; readonly params: readonly unknown[] } {
-  if (
-    !Number.isSafeInteger(input.limit) ||
-    input.limit < 1 ||
-    input.limit > MAX_PAGE_SIZE
-  ) {
-    throw new InvalidRequestError("Invalid Doris session page size");
+  readonly order?: "ASC" | "DESC";
+};
+
+function compileSessionFilterPredicates(
+  filters: FilterState,
+  params: unknown[],
+): readonly string[] {
+  const plans: LogicalEventFilter[] = [];
+  const predicates: string[] = [];
+  for (const filter of filters) {
+    if (filter.type === "stringOptions" && filter.value.length === 0) {
+      predicates.push(filter.operator === "any of" ? "FALSE" : "TRUE");
+      continue;
+    }
+    switch (filter.column) {
+      case "createdAt":
+        if (filter.type !== "datetime") break;
+        plans.push({ filter, expression: "min_timestamp" });
+        continue;
+      case "id":
+        if (filter.type !== "string" && filter.type !== "stringOptions") break;
+        plans.push({ filter, expression: "session_id" });
+        continue;
+      case "userIds":
+        if (filter.type !== "arrayOptions") break;
+        plans.push({ filter, expression: "user_ids" });
+        continue;
+      case "environment":
+        if (
+          filter.type !== "string" &&
+          filter.type !== "stringOptions" &&
+          filter.type !== "null"
+        ) {
+          break;
+        }
+        plans.push({ filter, expression: "environment" });
+        continue;
+      case "traceTags":
+        if (filter.type !== "arrayOptions") break;
+        plans.push({ filter, expression: "trace_tags" });
+        continue;
+      case "metadata":
+        if (filter.type !== "stringObject") break;
+        plans.push({
+          filter,
+          expression:
+            "JSON_UNQUOTE(CAST(ELEMENT_AT(CAST(metadata_json AS VARIANT), ?) AS STRING))",
+          objectKey: filter.key,
+        });
+        continue;
+    }
+    throw new InvalidRequestError(
+      `Unsupported Doris session aggregate filter: ${filter.column}`,
+    );
   }
+  return [
+    ...predicates,
+    ...compileDorisEventFilters(plans, {
+      params,
+      bind(value: unknown) {
+        params.push(value);
+        return "?";
+      },
+    }),
+  ];
+}
+
+function compileSessionAggregation(input: SessionQueryInput): {
+  readonly sql: string;
+  readonly params: unknown[];
+} {
   const matchedEvents = compileDorisVisibleEventScope({
     projectId: input.projectId,
     range: input.range,
@@ -191,16 +262,13 @@ function compileSessionList(input: {
     range: input.range,
     filters: [],
   });
-  const cursor = decodeCursor(input.cursor);
   const identifierSql = input.identifierQuery
     ? "AND LOWER(e.session_id) LIKE ? ESCAPE '\\\\'"
     : "";
-  const cursorSql = cursor
-    ? `WHERE (
-      max_timestamp < ?
-      OR (max_timestamp = ? AND session_id < ?)
-    )`
-    : "";
+  const latestOrder = `CONCAT(
+      DATE_FORMAT(e.start_time, '%Y%m%d%H%i%s.%f'), ':',
+      LPAD(CAST(e.version_token AS STRING), 20, '0'), ':', e.span_id
+    )`;
   return {
     sql: `WITH matched_session_ids AS (
   SELECT DISTINCT e.session_id
@@ -217,8 +285,9 @@ function compileSessionList(input: {
     MAX(COALESCE(e.end_time, e.start_time)) AS max_timestamp,
     COLLECT_SET(e.trace_id) AS trace_ids,
     COLLECT_SET(e.user_id) AS user_ids,
-    COLLECT_SET(e.environment) AS environments,
-    COLLECT_SET(CAST(e.tags AS STRING)) AS trace_tag_sets,
+    MAX_BY(e.environment, ${latestOrder}) AS environment,
+    ARRAY_DISTINCT(ARRAY_FLATTEN(COLLECT_LIST(e.tags))) AS trace_tags,
+    MAX_BY(CAST(e.metadata AS STRING), ${latestOrder}) AS metadata_json,
     COUNT(DISTINCT e.trace_id) AS trace_count,
     COUNT(*) AS observation_count,
     SUM(COALESCE(e.total_input_tokens, 0)) AS total_input_tokens,
@@ -228,23 +297,57 @@ function compileSessionList(input: {
   INNER JOIN matched_session_ids matched ON matched.session_id = e.session_id
   WHERE ${allEvents.whereSql}
   GROUP BY e.project_id, e.session_id
-)
-SELECT *
-FROM aggregated_sessions
-${cursorSql}
-ORDER BY max_timestamp DESC, session_id DESC
-LIMIT ?`,
+)`,
     params: [
       ...matchedEvents.params,
       ...(input.identifierQuery
         ? [identifierPattern(input.identifierQuery)]
         : []),
       ...allEvents.params,
-      ...(cursor
-        ? [cursor.maxTimestamp, cursor.maxTimestamp, cursor.sessionId]
-        : []),
-      input.limit + 1,
     ],
+  };
+}
+
+function compileSessionList(
+  input: SessionQueryInput & {
+    readonly cursor?: string;
+    readonly limit: number;
+  },
+): { readonly sql: string; readonly params: readonly unknown[] } {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > MAX_PAGE_SIZE
+  ) {
+    throw new InvalidRequestError("Invalid Doris session page size");
+  }
+  const aggregation = compileSessionAggregation(input);
+  const params = [...aggregation.params];
+  const sessionPredicates = [
+    ...compileSessionFilterPredicates(input.sessionFilters ?? [], params),
+  ];
+  const order = input.order ?? "DESC";
+  const cursor = decodeCursor(input.cursor, order);
+  if (cursor) {
+    const comparison = order === "DESC" ? "<" : ">";
+    sessionPredicates.push(`(
+      min_timestamp ${comparison} ?
+      OR (min_timestamp = ? AND session_id ${comparison} ?)
+    )`);
+    params.push(cursor.minTimestamp, cursor.minTimestamp, cursor.sessionId);
+  }
+  const whereSql =
+    sessionPredicates.length > 0
+      ? `WHERE ${sessionPredicates.join("\n  AND ")}`
+      : "";
+  return {
+    sql: `${aggregation.sql}
+SELECT *
+FROM aggregated_sessions
+${whereSql}
+ORDER BY min_timestamp ${order}, session_id ${order}
+LIMIT ?`,
+    params: [...params, input.limit + 1],
   };
 }
 
@@ -259,11 +362,13 @@ export class DorisSessionsRepository {
     readonly projectId: string;
     readonly range: AnalyticsTimeRange | null;
     readonly filters: EventsTableFilterState;
+    readonly sessionFilters?: FilterState;
     readonly search?: {
       readonly query: string;
       readonly searchType?: readonly TracingSearchType[];
     };
     readonly identifierQuery?: string;
+    readonly order?: "ASC" | "DESC";
     readonly cursor?: string;
     readonly limit: number;
   }): Promise<DorisSessionsPage> {
@@ -277,7 +382,7 @@ export class DorisSessionsRepository {
       items,
       nextCursor:
         rows.length > input.limit && items.length > 0
-          ? encodeCursor(items[items.length - 1]!)
+          ? encodeCursor(items[items.length - 1]!, input.order ?? "DESC")
           : null,
     };
   }
@@ -286,29 +391,26 @@ export class DorisSessionsRepository {
     readonly projectId: string;
     readonly range: AnalyticsTimeRange | null;
     readonly filters: EventsTableFilterState;
+    readonly sessionFilters?: FilterState;
     readonly search?: {
       readonly query: string;
       readonly searchType?: readonly TracingSearchType[];
     };
     readonly identifierQuery?: string;
   }): Promise<number> {
-    const scope = compileDorisVisibleEventScope(input);
-    const identifierSql = input.identifierQuery
-      ? "AND LOWER(e.session_id) LIKE ? ESCAPE '\\\\'"
-      : "";
+    const aggregation = compileSessionAggregation(input);
+    const params = [...aggregation.params];
+    const predicates = compileSessionFilterPredicates(
+      input.sessionFilters ?? [],
+      params,
+    );
+    const whereSql =
+      predicates.length > 0 ? `\nWHERE ${predicates.join("\n  AND ")}` : "";
     const rows = await this.dependencies.query<{ readonly count: unknown }>(
-      `SELECT COUNT(DISTINCT e.session_id) AS count
-${scope.fromSql}
-WHERE ${scope.whereSql}
-  AND e.session_id IS NOT NULL
-  AND e.session_id != ''
-  ${identifierSql}`,
-      [
-        ...scope.params,
-        ...(input.identifierQuery
-          ? [identifierPattern(input.identifierQuery)]
-          : []),
-      ],
+      `${aggregation.sql}
+SELECT COUNT(*) AS count
+FROM aggregated_sessions${whereSql}`,
+      params,
     );
     return numberValue(rows[0]?.count);
   }
@@ -321,10 +423,11 @@ WHERE ${scope.whereSql}
     const page = await this.list({
       projectId: input.projectId,
       range: input.range,
-      filters: [
+      filters: [],
+      sessionFilters: [
         {
           type: "string",
-          column: "sessionId",
+          column: "id",
           operator: "=",
           value: input.sessionId,
         },

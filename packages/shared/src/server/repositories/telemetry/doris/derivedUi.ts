@@ -34,6 +34,7 @@ export function buildDorisDerivedQuery(
 ): {
   readonly range: AnalyticsTimeRange;
   readonly filters: EventsTableFilterState;
+  readonly sessionFilters: FilterState;
 } {
   const columns = kind === "session" ? SESSION_COLUMNS : USER_COLUMNS;
   const mapped: EventsTableFilterState = [];
@@ -64,7 +65,11 @@ export function buildDorisDerivedQuery(
   const to = upperBounds.length
     ? new Date(Math.min(...upperBounds.map((value) => value.getTime())))
     : new Date(now);
-  return { range: { from, to }, filters: mapped };
+  return {
+    range: { from, to },
+    filters: mapped,
+    sessionFilters: kind === "session" ? [...filters] : [],
+  };
 }
 
 export function toDorisSessionEventsRow(session: DorisSession) {

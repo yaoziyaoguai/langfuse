@@ -90,12 +90,20 @@ type DorisVisibleEventScopeInput = {
   readonly partitionDates?: readonly string[];
 };
 
-const EVENT_FROM_SQL = `FROM events_current e
-LEFT JOIN trace_tombstones trace_deletion
-  ON trace_deletion.project_id = e.project_id
- AND trace_deletion.trace_id = e.trace_id
-LEFT JOIN project_tombstones project_deletion
-  ON project_deletion.project_id = e.project_id`;
+function eventFromSql(
+  eventAlias: string,
+  traceDeletionAlias: string,
+  projectDeletionAlias: string,
+): string {
+  return `FROM events_current ${eventAlias}
+LEFT JOIN trace_tombstones ${traceDeletionAlias}
+  ON ${traceDeletionAlias}.project_id = ${eventAlias}.project_id
+ AND ${traceDeletionAlias}.trace_id = ${eventAlias}.trace_id
+LEFT JOIN project_tombstones ${projectDeletionAlias}
+  ON ${projectDeletionAlias}.project_id = ${eventAlias}.project_id`;
+}
+
+const EVENT_FROM_SQL = eventFromSql("e", "trace_deletion", "project_deletion");
 
 export function compileDorisVisibleEventScope(
   input: DorisVisibleEventScopeInput,
@@ -109,6 +117,7 @@ export function compileDorisVisibleEventScope(
     throw new InvalidRequestError("Invalid Doris event query input");
   }
   assertAnalyticsTimeRange(input.range);
+  const range = input.range;
   const filterPlan = buildEventFilterPlan(input.filters);
   const searchPlan = buildSearchPlan({
     range: input.range,
@@ -116,42 +125,107 @@ export function compileDorisVisibleEventScope(
     filtersRequireFullContent: filterPlan.requiresFullContent,
   });
   const params: unknown[] = [];
-  const bound = {
-    params,
-    bind(value: unknown) {
-      params.push(value);
-      return "?";
-    },
-  };
   const partitionDates = [...new Set(input.partitionDates ?? [])].sort();
-  const predicates = [
-    `e.project_id = ${bound.bind(input.projectId)}`,
-    `e.partition_date >= ${bound.bind(utcDate(input.range.from))}`,
-    `e.partition_date < ${bound.bind(exclusivePartitionTo(input.range.to))}`,
-    `e.start_time >= ${bound.bind(input.range.from)}`,
-    `e.start_time < ${bound.bind(input.range.to)}`,
-    ...(partitionDates.length > 0
-      ? [
-          `e.partition_date IN (${partitionDates
-            .map((partitionDate) => bound.bind(partitionDate))
-            .join(", ")})`,
-        ]
-      : []),
-    "trace_deletion.trace_id IS NULL",
-    "project_deletion.project_id IS NULL",
-    ...compileDorisEventFilters(filterPlan.filters, bound),
-  ];
-  const search = compileDorisSearch(searchPlan, bound);
-  if (search) predicates.push(search);
-  if (input.cursor) {
-    predicates.push(`(
-      e.start_time < ${bound.bind(input.cursor.startTime)}
-      OR (e.start_time = ${bound.bind(input.cursor.startTime)} AND e.trace_id < ${bound.bind(input.cursor.traceId)})
-      OR (e.start_time = ${bound.bind(input.cursor.startTime)} AND e.trace_id = ${bound.bind(input.cursor.traceId)} AND e.span_id < ${bound.bind(input.cursor.spanId)})
+  const compilePredicates = (aliases: {
+    readonly event: string;
+    readonly traceDeletion: string;
+    readonly projectDeletion: string;
+    readonly includeCursor?: boolean;
+  }): string[] => {
+    const bound = {
+      params,
+      bind(value: unknown) {
+        params.push(value);
+        return "?";
+      },
+    };
+    const aliasedFilters = filterPlan.filters.map((planned) => ({
+      ...planned,
+      expression: planned.expression.replaceAll("e.", `${aliases.event}.`),
+    }));
+    const predicates = [
+      `${aliases.event}.project_id = ${bound.bind(input.projectId)}`,
+      `${aliases.event}.partition_date >= ${bound.bind(utcDate(range.from))}`,
+      `${aliases.event}.partition_date < ${bound.bind(exclusivePartitionTo(range.to))}`,
+      `${aliases.event}.start_time >= ${bound.bind(range.from)}`,
+      `${aliases.event}.start_time < ${bound.bind(range.to)}`,
+      ...(partitionDates.length > 0
+        ? [
+            `${aliases.event}.partition_date IN (${partitionDates
+              .map((partitionDate) => bound.bind(partitionDate))
+              .join(", ")})`,
+          ]
+        : []),
+      `${aliases.traceDeletion}.trace_id IS NULL`,
+      `${aliases.projectDeletion}.project_id IS NULL`,
+      ...compileDorisEventFilters(aliasedFilters, bound),
+    ];
+    const search = compileDorisSearch(searchPlan, bound, aliases.event);
+    if (search) predicates.push(search);
+    if (aliases.includeCursor && input.cursor) {
+      predicates.push(`(
+      ${aliases.event}.start_time < ${bound.bind(input.cursor.startTime)}
+      OR (${aliases.event}.start_time = ${bound.bind(input.cursor.startTime)} AND ${aliases.event}.trace_id < ${bound.bind(input.cursor.traceId)})
+      OR (${aliases.event}.start_time = ${bound.bind(input.cursor.startTime)} AND ${aliases.event}.trace_id = ${bound.bind(input.cursor.traceId)} AND ${aliases.event}.span_id < ${bound.bind(input.cursor.spanId)})
     )`);
+    }
+    return predicates;
+  };
+
+  let fromSql = EVENT_FROM_SQL;
+  if (filterPlan.positionFilter) {
+    const positionAliases = {
+      event: "position_event",
+      traceDeletion: "position_trace_deletion",
+      projectDeletion: "position_project_deletion",
+    } as const;
+    const positionPredicates = compilePredicates(positionAliases);
+    const isFromEnd =
+      filterPlan.positionFilter.key === "last" ||
+      filterPlan.positionFilter.key === "nthFromEnd";
+    const direction = isFromEnd ? "DESC" : "ASC";
+    const position =
+      filterPlan.positionFilter.key === "nthFromStart" ||
+      filterPlan.positionFilter.key === "nthFromEnd"
+        ? (filterPlan.positionFilter.value ?? 1)
+        : 1;
+    params.push(Math.max(1, position));
+    fromSql = `${EVENT_FROM_SQL}
+INNER JOIN (
+  SELECT project_id, partition_date, trace_id, span_id
+  FROM (
+    SELECT
+      position_event.project_id,
+      position_event.partition_date,
+      position_event.trace_id,
+      position_event.span_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY position_event.project_id, position_event.trace_id
+        ORDER BY position_event.start_time ${direction}, position_event.version_token ${direction}, position_event.span_id ${direction}
+      ) AS _position_rank
+    ${eventFromSql(
+      positionAliases.event,
+      positionAliases.traceDeletion,
+      positionAliases.projectDeletion,
+    )}
+    WHERE ${positionPredicates.join("\n      AND ")}
+  ) ranked_position_events
+  WHERE _position_rank = ?
+) position_match
+  ON position_match.project_id = e.project_id
+ AND position_match.partition_date = e.partition_date
+ AND position_match.trace_id = e.trace_id
+ AND position_match.span_id = e.span_id`;
   }
+
+  const predicates = compilePredicates({
+    event: "e",
+    traceDeletion: "trace_deletion",
+    projectDeletion: "project_deletion",
+    includeCursor: true,
+  });
   return {
-    fromSql: EVENT_FROM_SQL,
+    fromSql,
     whereSql: predicates.join("\n  AND "),
     params,
     selectsFullContent:

@@ -53,7 +53,7 @@ describe("Doris sessions repository", () => {
     expect(sql).not.toContain("e.input AS input");
   });
 
-  it("uses a stable max-timestamp/session cursor and bound identifier search", async () => {
+  it("uses a stable created-at/session cursor and bound identifier search", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce([
@@ -109,10 +109,10 @@ describe("Doris sessions repository", () => {
     expect(first.nextCursor).not.toBeNull();
     expect(query.mock.calls[0]?.[0]).toContain("LIKE ? ESCAPE '\\\\'");
     expect(query.mock.calls[0]?.[1]).toContain("%50\\%\\_off\\\\%");
-    expect(query.mock.calls[1]?.[0]).toContain("max_timestamp < ?");
+    expect(query.mock.calls[1]?.[0]).toContain("min_timestamp < ?");
     expect(query.mock.calls[1]?.[1]).toEqual(
       expect.arrayContaining([
-        new Date("2026-07-17T10:00:03.000Z"),
+        new Date("2026-07-17T10:00:00.000Z"),
         "session-1",
       ]),
     );
@@ -132,6 +132,23 @@ describe("Doris sessions repository", () => {
     );
   });
 
+  it("supports ascending created-at pagination with the same tie breaker", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisSessionsRepository({ query });
+
+    await repository.list({
+      projectId: "project-1",
+      range,
+      filters: [],
+      order: "ASC",
+      limit: 10,
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "ORDER BY min_timestamp ASC, session_id ASC",
+    );
+  });
+
   it("counts matching sessions through the bounded visibility scope", async () => {
     const query = vi.fn().mockResolvedValue([{ count: "3" }]);
     const repository = new DorisSessionsRepository({ query });
@@ -140,7 +157,72 @@ describe("Doris sessions repository", () => {
       repository.count({ projectId: "project-1", range, filters: [] }),
     ).resolves.toBe(3);
     expect(query.mock.calls[0]?.[0]).toContain(
-      "COUNT(DISTINCT e.session_id) AS count",
+      "SELECT COUNT(*) AS count\nFROM aggregated_sessions",
     );
+  });
+
+  it("binds aggregate arrays, metadata, and negative session filters", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisSessionsRepository({ query });
+
+    await repository.list({
+      projectId: "project-1",
+      range,
+      filters: [],
+      sessionFilters: [
+        {
+          type: "arrayOptions",
+          column: "userIds",
+          operator: "all of",
+          value: ["user-a", "user-b"],
+        },
+        {
+          type: "arrayOptions",
+          column: "traceTags",
+          operator: "none of",
+          value: ["internal"],
+        },
+        {
+          type: "stringObject",
+          column: "metadata",
+          key: "region",
+          operator: "=",
+          value: "eu",
+        },
+      ],
+      limit: 10,
+    });
+
+    const sql = query.mock.calls[0]?.[0] as string;
+    expect(sql).toContain("ARRAY_CONTAINS(user_ids, ?)");
+    expect(sql).toContain("NOT (ARRAY_CONTAINS(trace_tags, ?))");
+    expect(sql).toContain("ELEMENT_AT(CAST(metadata_json AS VARIANT), ?)");
+    expect(query.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(["user-a", "user-b", "internal", "region", "eu"]),
+    );
+  });
+
+  it("counts after applying aggregate filters", async () => {
+    const query = vi.fn().mockResolvedValue([{ count: "1" }]);
+    const repository = new DorisSessionsRepository({ query });
+
+    await repository.count({
+      projectId: "project-1",
+      range,
+      filters: [],
+      sessionFilters: [
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "none of",
+          value: ["excluded"],
+        },
+      ],
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "SELECT COUNT(*) AS count\nFROM aggregated_sessions",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain("session_id NOT IN (?)");
   });
 });

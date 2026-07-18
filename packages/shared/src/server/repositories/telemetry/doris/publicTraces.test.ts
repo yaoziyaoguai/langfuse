@@ -109,4 +109,40 @@ describe("Doris public trace reads", () => {
       }),
     );
   });
+
+  it("loads full trace content only when the public projection requests io", async () => {
+    const deps = dependencies();
+    deps.repository.list.mockResolvedValueOnce({
+      items: [
+        {
+          ...trace,
+          input: { question: "full input" },
+          output: { answer: "full output" },
+        },
+      ],
+      nextCursor: null,
+    });
+
+    const result = await getDorisTracesForPublicApi(
+      {
+        projectId: "project-1",
+        page: 1,
+        limit: 10,
+        fromTimestamp: "2026-07-17T00:00:00.000Z",
+        toTimestamp: "2026-07-18T00:00:00.000Z",
+        fields: ["core", "io"],
+      },
+      deps,
+    );
+
+    expect(deps.repository.list).toHaveBeenCalledWith(
+      expect.objectContaining({ includeFullContent: true }),
+    );
+    expect(result[0]).toEqual(
+      expect.objectContaining({
+        input: { question: "full input" },
+        output: { answer: "full output" },
+      }),
+    );
+  });
 });

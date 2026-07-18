@@ -47,6 +47,13 @@ describe("Doris derived UI query adapter", () => {
         expect.objectContaining({ column: "traceTags" }),
       ]),
     );
+    expect(result.sessionFilters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column: "createdAt" }),
+        expect.objectContaining({ column: "id" }),
+        expect.objectContaining({ column: "traceTags" }),
+      ]),
+    );
   });
 
   it("maps user filters and supplies the bounded retention window", () => {
@@ -70,6 +77,7 @@ describe("Doris derived UI query adapter", () => {
     expect(result.filters).toEqual([
       expect.objectContaining({ column: "userId" }),
     ]);
+    expect(result.sessionFilters).toEqual([]);
   });
 
   it("rejects aggregate filters until their Doris aggregate plan is active", () => {

@@ -72,7 +72,9 @@ describe("Doris event query compiler", () => {
     expect(compiled.sql).toContain("e.start_time >= ?");
     expect(compiled.sql).toContain("LEFT JOIN trace_tombstones");
     expect(compiled.sql).toContain("LEFT JOIN project_tombstones");
-    expect(compiled.sql).toContain("CAST(ELEMENT_AT(e.metadata, ?) AS STRING)");
+    expect(compiled.sql).toContain(
+      "JSON_UNQUOTE(CAST(ELEMENT_AT(e.metadata, ?) AS STRING))",
+    );
     expect(compiled.sql).toContain(
       "ORDER BY e.start_time DESC, e.trace_id DESC, e.span_id DESC",
     );
@@ -165,6 +167,52 @@ describe("Doris event query compiler", () => {
       expect.arrayContaining([1, 2, "GENERATION", "SPAN", "dangerous", true]),
     );
   });
+
+  it.each([
+    ["root", "ASC", 1],
+    ["first", "ASC", 1],
+    ["last", "DESC", 1],
+    ["nthFromStart", "ASC", 3],
+    ["nthFromEnd", "DESC", 3],
+  ] as const)(
+    "ranks the %s position after the other bounded filters",
+    (key, direction, position) => {
+      const compiled = compileDorisVisibleEventsQuery({
+        projectId: "project-1",
+        range,
+        projection: "list",
+        filters: [
+          {
+            type: "stringOptions",
+            column: "environment",
+            operator: "any of",
+            value: ["production"],
+          },
+          {
+            type: "positionInTrace",
+            column: "startTime",
+            operator: "=",
+            key,
+            ...(key === "nthFromStart" || key === "nthFromEnd"
+              ? { value: position }
+              : {}),
+          },
+        ],
+        limit: 10,
+      });
+
+      expect(compiled.sql).toContain(
+        "PARTITION BY position_event.project_id, position_event.trace_id",
+      );
+      expect(compiled.sql).toContain(
+        `ORDER BY position_event.start_time ${direction}`,
+      );
+      expect(compiled.sql).toContain("WHERE _position_rank = ?");
+      expect(compiled.sql.match(/environment IN \(\?\)/g)).toHaveLength(2);
+      expect(compiled.params).toContain(position);
+      expect(compiled.sql).not.toContain("position_event.input AS input");
+    },
+  );
 
   it("rejects unbounded and over-30-day full-content predicates consistently", () => {
     expect(() =>

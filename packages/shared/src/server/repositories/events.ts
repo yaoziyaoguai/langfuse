@@ -3374,7 +3374,8 @@ export const getSessionMetricsFromEvents = async (props: {
     const page = await getDorisTelemetryRepositories().sessions.list({
       projectId: props.projectId,
       range: query.range,
-      filters: query.filters,
+      filters: [],
+      sessionFilters: query.sessionFilters,
       limit: Math.min(999, props.sessionIds.length),
     });
     return page.items.map(toDorisSessionMetricsRow);

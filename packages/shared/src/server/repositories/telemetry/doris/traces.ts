@@ -4,7 +4,10 @@ import { InvalidRequestError } from "../../../../errors";
 import { parseJsonIfString } from "../../../../utils/json";
 import type { DorisQueryExecutor } from "../../../doris/client";
 import { compileDorisVisibleEventScope } from "../../../queries/doris-sql/eventQueryCompiler";
-import type { AnalyticsTimeRange } from "../../../queries/logical/searchPlan";
+import {
+  buildSearchPlan,
+  type AnalyticsTimeRange,
+} from "../../../queries/logical/searchPlan";
 import {
   findTraceEventHeadLocators,
   type EventHeadLocator,
@@ -330,7 +333,14 @@ export class DorisTracesRepository {
     };
     readonly cursor?: string;
     readonly limit: number;
+    readonly includeFullContent?: boolean;
   }): Promise<DorisTracesPage> {
+    if (input.includeFullContent) {
+      buildSearchPlan({
+        range: input.range,
+        filtersRequireFullContent: true,
+      });
+    }
     const compiled = compileTraceList(input);
     const rows = await this.dependencies.query<DorisTraceRow>(
       compiled.sql,

@@ -73,10 +73,7 @@ async function getDorisSessionsPage(props: {
   limit?: number;
   page?: number;
 }): Promise<readonly DorisSession[]> {
-  if (
-    props.orderBy &&
-    (props.orderBy.column !== "createdAt" || props.orderBy.order !== "DESC")
-  ) {
+  if (props.orderBy && props.orderBy.column !== "createdAt") {
     throw new InvalidRequestError(
       `Unsupported Doris session order: ${props.orderBy.column} ${props.orderBy.order}`,
     );
@@ -91,7 +88,9 @@ async function getDorisSessionsPage(props: {
     const result = await getDorisTelemetryRepositories().sessions.list({
       projectId: props.projectId,
       range: query.range,
-      filters: query.filters,
+      filters: [],
+      sessionFilters: query.sessionFilters,
+      order: props.orderBy?.order ?? "DESC",
       cursor,
       limit,
     });
@@ -209,7 +208,8 @@ export const getSessionsTableCountFromEvents = async (props: {
     return getDorisTelemetryRepositories().sessions.count({
       projectId: props.projectId,
       range: query.range,
-      filters: query.filters,
+      filters: [],
+      sessionFilters: query.sessionFilters,
     });
   }
 

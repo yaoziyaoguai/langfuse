@@ -234,4 +234,23 @@ describe("Doris traces repository", () => {
       "project_deletion.project_id IS NULL",
     );
   });
+
+  it("rejects full-content list projections over the 30-day cap", async () => {
+    const repository = new DorisTracesRepository({ query: vi.fn() });
+
+    await expect(
+      repository.list({
+        projectId: "project-1",
+        range: {
+          from: new Date("2026-01-01T00:00:00.000Z"),
+          to: new Date("2026-02-01T00:00:00.001Z"),
+        },
+        filters: [],
+        limit: 10,
+        includeFullContent: true,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: "InvalidTimeRange", maxDays: 30 }),
+    );
+  });
 });

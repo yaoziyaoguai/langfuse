@@ -49,28 +49,34 @@ function containsIo(
 export function compileDorisSearch(
   plan: LogicalSearchPlan | null,
   bound: BoundParameters,
+  eventAlias = "e",
 ): string | null {
   if (!plan) return null;
   const clauses: string[] = [];
   if (plan.searchType.includes("id")) {
     clauses.push(
-      ["e.span_id", "e.trace_id", "e.user_id", "e.`name`"]
+      [
+        `${eventAlias}.span_id`,
+        `${eventAlias}.trace_id`,
+        `${eventAlias}.user_id`,
+        `${eventAlias}.\`name\``,
+      ]
         .map((column) => contains(column, plan.query, bound))
         .join(" OR "),
     );
   }
   if (plan.searchType.includes("content")) {
     clauses.push(
-      ["e.input", "e.output"]
+      [`${eventAlias}.input`, `${eventAlias}.output`]
         .map((column) => containsIo(column, plan.query, bound))
         .join(" OR "),
     );
   }
   if (plan.searchType.includes("input")) {
-    clauses.push(containsIo("e.input", plan.query, bound));
+    clauses.push(containsIo(`${eventAlias}.input`, plan.query, bound));
   }
   if (plan.searchType.includes("output")) {
-    clauses.push(containsIo("e.output", plan.query, bound));
+    clauses.push(containsIo(`${eventAlias}.output`, plan.query, bound));
   }
   return clauses.length > 0 ? `(${clauses.join(" OR ")})` : null;
 }

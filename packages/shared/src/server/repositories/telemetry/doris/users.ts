@@ -82,7 +82,9 @@ function decodeUser(row: DorisUserRow): DorisUser {
     minTimestamp: dateTime(row.min_timestamp),
     maxTimestamp: dateTime(row.max_timestamp),
     sessionIds: stringArray(row.session_ids),
-    environments: stringArray(row.environments),
+    environments: Object.hasOwn(row, "environment")
+      ? [String(row.environment)]
+      : stringArray(row.environments),
     traceCount: numberValue(row.trace_count),
     sessionCount: numberValue(row.session_count),
     observationCount: numberValue(row.observation_count),
@@ -97,7 +99,7 @@ function encodeCursor(user: DorisUser): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
-      maxTimestamp: user.maxTimestamp.toISOString(),
+      traceCount: user.traceCount,
       userId: user.id,
     }),
     "utf8",
@@ -106,7 +108,7 @@ function encodeCursor(user: DorisUser): string {
 
 function decodeCursor(
   cursor: string | undefined,
-): { readonly maxTimestamp: Date; readonly userId: string } | undefined {
+): { readonly traceCount: number; readonly userId: string } | undefined {
   if (!cursor) return undefined;
   try {
     const decoded = Buffer.from(cursor, "base64url");
@@ -117,14 +119,16 @@ function decodeCursor(
     >;
     if (
       value.version !== 1 ||
-      typeof value.maxTimestamp !== "string" ||
+      typeof value.traceCount !== "number" ||
+      !Number.isSafeInteger(value.traceCount) ||
+      value.traceCount < 0 ||
       typeof value.userId !== "string" ||
       !value.userId
     ) {
       throw new Error();
     }
     return {
-      maxTimestamp: dateTime(value.maxTimestamp),
+      traceCount: value.traceCount,
       userId: value.userId,
     };
   } catch {
@@ -165,62 +169,53 @@ function compileUserList(input: {
     filters: input.filters,
     search: input.search,
   });
-  const allEvents = compileDorisVisibleEventScope({
-    projectId: input.projectId,
-    range: input.range,
-    filters: [],
-  });
   const cursor = decodeCursor(input.cursor);
   const identifierSql = input.identifierQuery
     ? "AND LOWER(e.user_id) LIKE ? ESCAPE '\\\\'"
     : "";
   const cursorSql = cursor
     ? `WHERE (
-      max_timestamp < ?
-      OR (max_timestamp = ? AND user_id < ?)
+      trace_count < ?
+      OR (trace_count = ? AND user_id < ?)
     )`
     : "";
+  const latestOrder = `CONCAT(
+      DATE_FORMAT(e.start_time, '%Y%m%d%H%i%s.%f'), ':',
+      LPAD(CAST(e.version_token AS STRING), 20, '0'), ':', e.span_id
+    )`;
   return {
-    sql: `WITH matched_user_ids AS (
-  SELECT DISTINCT e.user_id
-  ${matchedEvents.fromSql}
-  WHERE ${matchedEvents.whereSql}
-    AND e.user_id IS NOT NULL
-    AND e.user_id != ''
-    ${identifierSql}
-), aggregated_users AS (
+    sql: `WITH aggregated_users AS (
   SELECT
     e.project_id,
     e.user_id,
     MIN(e.start_time) AS min_timestamp,
     MAX(COALESCE(e.end_time, e.start_time)) AS max_timestamp,
     COLLECT_SET(e.session_id) AS session_ids,
-    COLLECT_SET(e.environment) AS environments,
+    MAX_BY(e.environment, ${latestOrder}) AS environment,
     COUNT(DISTINCT e.trace_id) AS trace_count,
     COUNT(DISTINCT e.session_id) AS session_count,
     COUNT(*) AS observation_count,
     SUM(COALESCE(e.total_input_tokens, 0)) AS total_input_tokens,
     SUM(COALESCE(e.total_output_tokens, 0)) AS total_output_tokens,
     SUM(e.total_cost) AS total_cost
-  ${allEvents.fromSql}
-  INNER JOIN matched_user_ids matched ON matched.user_id = e.user_id
-  WHERE ${allEvents.whereSql}
+  ${matchedEvents.fromSql}
+  WHERE ${matchedEvents.whereSql}
+    AND e.user_id IS NOT NULL
+    AND e.user_id != ''
+    ${identifierSql}
   GROUP BY e.project_id, e.user_id
 )
 SELECT *
 FROM aggregated_users
 ${cursorSql}
-ORDER BY max_timestamp DESC, user_id DESC
+ORDER BY trace_count DESC, user_id DESC
 LIMIT ?`,
     params: [
       ...matchedEvents.params,
       ...(input.identifierQuery
         ? [identifierPattern(input.identifierQuery)]
         : []),
-      ...allEvents.params,
-      ...(cursor
-        ? [cursor.maxTimestamp, cursor.maxTimestamp, cursor.userId]
-        : []),
+      ...(cursor ? [cursor.traceCount, cursor.traceCount, cursor.userId] : []),
       input.limit + 1,
     ],
   };

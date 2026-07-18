@@ -47,7 +47,8 @@ describe("Doris users repository", () => {
     ]);
     const sql = query.mock.calls[0]?.[0] as string;
     expect(sql).toContain("GROUP BY e.project_id, e.user_id");
-    expect(sql.match(/LEFT JOIN project_tombstones/g)).toHaveLength(2);
+    expect(sql.match(/LEFT JOIN project_tombstones/g)).toHaveLength(1);
+    expect(sql).toContain("ORDER BY trace_count DESC, user_id DESC");
   });
 
   it("keeps search values bound and paginates by last-seen/user id", async () => {
@@ -103,8 +104,34 @@ describe("Doris users repository", () => {
 
     expect(query.mock.calls[0]?.[0]).not.toContain("x' OR 1=1 --");
     expect(query.mock.calls[0]?.[1]).toContain("%x' or 1=1 --%");
-    expect(query.mock.calls[1]?.[0]).toContain("max_timestamp < ?");
+    expect(query.mock.calls[1]?.[0]).toContain("trace_count < ?");
+    expect(query.mock.calls[1]?.[1]).toEqual(
+      expect.arrayContaining([1, "user-1"]),
+    );
     expect(first.nextCursor).not.toBeNull();
+  });
+
+  it("aggregates only the events selected by user filters", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisUsersRepository({ query });
+
+    await repository.list({
+      projectId: "project-1",
+      range,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "environment",
+          operator: "any of",
+          value: ["production"],
+        },
+      ],
+      limit: 10,
+    });
+
+    const sql = query.mock.calls[0]?.[0] as string;
+    expect(sql.match(/FROM events_current/g)).toHaveLength(1);
+    expect(sql).toContain("e.environment IN (?)");
   });
 
   it("requires a bounded range for user detail", async () => {

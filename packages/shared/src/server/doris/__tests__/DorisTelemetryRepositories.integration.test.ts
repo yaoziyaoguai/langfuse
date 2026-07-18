@@ -81,6 +81,7 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       startTime: string;
       parentSpanId?: string | null;
       isAppRoot?: boolean;
+      environment?: string;
       userId?: string;
       sessionId?: string;
     }) =>
@@ -95,7 +96,7 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
            tool_definitions, tool_calls, tool_call_names, input, output,
            input_preview, output_preview, total_input_tokens, total_output_tokens,
          total_cost)
-         VALUES (?, '2026-07-17', ?, ?, ?, ?, 1000, 'GENERATION', 'production', ?, ?, ?, ?,
+         VALUES (?, '2026-07-17', ?, ?, ?, ?, 1000, 'GENERATION', ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
            'api', 'js', '5.0.0', ARRAY('prod'), CAST(? AS VARIANT),
            CAST(? AS VARIANT), CAST(? AS VARIANT), CAST(? AS VARIANT),
@@ -106,6 +107,7 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
           input.spanId,
           input.parentSpanId ?? null,
           input.isAppRoot ?? false,
+          input.environment ?? "production",
           input.name,
           input.userId ?? null,
           input.sessionId ?? null,
@@ -203,6 +205,24 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       sessionId: "session-shared",
     });
     await insert({
+      projectId: "user-filter-project",
+      traceId: "production-trace",
+      spanId: "production-span",
+      name: "production",
+      startTime: "2026-07-17 14:00:00.000000",
+      environment: "production",
+      userId: "multi-environment-user",
+    });
+    await insert({
+      projectId: "user-filter-project",
+      traceId: "staging-trace",
+      spanId: "staging-span",
+      name: "staging",
+      startTime: "2026-07-17 14:00:01.000000",
+      environment: "staging",
+      userId: "multi-environment-user",
+    });
+    await insert({
       projectId: "derived-repository-project",
       traceId: "derived-trace-b",
       spanId: "derived-span-b",
@@ -241,6 +261,43 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
       "span-b",
       "span-a",
     ]);
+  });
+
+  it("applies position filters after the bounded event filters", async () => {
+    const input = {
+      projectId: "repository-project",
+      range: {
+        from: new Date("2026-07-17T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      limit: 10,
+    };
+
+    const first = await observations.list({
+      ...input,
+      filters: [
+        {
+          type: "positionInTrace" as const,
+          column: "startTime",
+          operator: "=" as const,
+          key: "first" as const,
+        },
+      ],
+    });
+    const last = await observations.list({
+      ...input,
+      filters: [
+        {
+          type: "positionInTrace" as const,
+          column: "startTime",
+          operator: "=" as const,
+          key: "last" as const,
+        },
+      ],
+    });
+
+    expect(first.items.map(({ id }) => id)).toEqual(["span-a"]);
+    expect(last.items.map(({ id }) => id)).toEqual(["span-b"]);
   });
 
   it("uses the locator for full detail and decodes canonical fields", async () => {
@@ -359,6 +416,47 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
     ).resolves.toEqual(
       expect.objectContaining({ id: "session-shared", traceCount: 2 }),
     );
+    await expect(
+      sessions.list({
+        ...input,
+        sessionFilters: [
+          {
+            type: "arrayOptions",
+            column: "userIds",
+            operator: "all of",
+            value: ["user-a", "user-b"],
+          },
+          {
+            type: "arrayOptions",
+            column: "traceTags",
+            operator: "all of",
+            value: ["prod"],
+          },
+          {
+            type: "stringObject",
+            column: "metadata",
+            key: "region",
+            operator: "=",
+            value: "eu",
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      items: [{ id: "session-shared" }],
+    });
+    await expect(
+      sessions.count({
+        ...input,
+        sessionFilters: [
+          {
+            type: "arrayOptions",
+            column: "userIds",
+            operator: "none of",
+            value: ["user-a"],
+          },
+        ],
+      }),
+    ).resolves.toBe(0);
 
     const userPage = await users.list(input);
     expect(userPage.items.map(({ id }) => id).sort()).toEqual([
@@ -379,5 +477,36 @@ describe.skipIf(!ENABLED)("Doris telemetry repositories", () => {
         totalUsage: 15,
       }),
     );
+  });
+
+  it("aggregates user metrics only from events matching the filter", async () => {
+    await expect(
+      users.list({
+        projectId: "user-filter-project",
+        range: {
+          from: new Date("2026-07-17T00:00:00.000Z"),
+          to: new Date("2026-07-18T00:00:00.000Z"),
+        },
+        filters: [
+          {
+            type: "stringOptions",
+            column: "environment",
+            operator: "any of",
+            value: ["production"],
+          },
+        ],
+        limit: 10,
+      }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          id: "multi-environment-user",
+          environments: ["production"],
+          traceCount: 1,
+          observationCount: 1,
+          totalUsage: 15,
+        },
+      ],
+    });
   });
 });

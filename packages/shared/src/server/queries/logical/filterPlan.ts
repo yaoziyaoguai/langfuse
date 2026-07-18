@@ -89,8 +89,14 @@ export type LogicalEventFilter = {
   readonly objectKey?: string;
 };
 
+export type LogicalPositionFilter = Extract<
+  EventsTableFilterState[number],
+  { readonly type: "positionInTrace" }
+>;
+
 export function buildEventFilterPlan(filters: EventsTableFilterState): {
   readonly filters: readonly LogicalEventFilter[];
+  readonly positionFilter?: LogicalPositionFilter;
   readonly requiresFullContent: boolean;
 } {
   const parsed = eventsTableFilterState.safeParse(filters);
@@ -98,42 +104,43 @@ export function buildEventFilterPlan(filters: EventsTableFilterState): {
     throw new InvalidRequestError("Invalid analytics filter state");
   }
   let requiresFullContent = false;
-  const planned = parsed.data.map((filter): LogicalEventFilter => {
-    if (filter.type === "positionInTrace") {
-      throw new InvalidRequestError(
-        "Position-in-trace filters require the trace query plan",
-      );
-    }
-    if (U6_COLUMNS.has(filter.column)) {
-      throw new InvalidRequestError(
-        "Score filters are unavailable until the Doris score query plan is active",
-      );
-    }
-    const column = EVENT_COLUMNS[filter.column];
-    if (!column) {
-      throw new InvalidRequestError(
-        `Unsupported Doris analytics filter column: ${filter.column}`,
-      );
-    }
-    requiresFullContent ||= column.requiresFullContent === true;
-    if (
-      filter.type === "stringObject" ||
-      filter.type === "numberObject" ||
-      filter.type === "booleanObject" ||
-      filter.type === "categoryOptions"
-    ) {
-      if (filter.column !== "metadata" || filter.type !== "stringObject") {
+  const positionFilter = parsed.data.find(
+    (filter): filter is LogicalPositionFilter =>
+      filter.type === "positionInTrace",
+  );
+  const planned = parsed.data
+    .filter((filter) => filter.type !== "positionInTrace")
+    .map((filter): LogicalEventFilter => {
+      if (U6_COLUMNS.has(filter.column)) {
         throw new InvalidRequestError(
-          `Unsupported Doris analytics object filter: ${filter.column}`,
+          "Score filters are unavailable until the Doris score query plan is active",
         );
       }
-      return {
-        filter,
-        expression: "CAST(ELEMENT_AT(e.metadata, ?) AS STRING)",
-        objectKey: filter.key,
-      };
-    }
-    return { filter, expression: column.expression };
-  });
-  return { filters: planned, requiresFullContent };
+      const column = EVENT_COLUMNS[filter.column];
+      if (!column) {
+        throw new InvalidRequestError(
+          `Unsupported Doris analytics filter column: ${filter.column}`,
+        );
+      }
+      requiresFullContent ||= column.requiresFullContent === true;
+      if (
+        filter.type === "stringObject" ||
+        filter.type === "numberObject" ||
+        filter.type === "booleanObject" ||
+        filter.type === "categoryOptions"
+      ) {
+        if (filter.column !== "metadata" || filter.type !== "stringObject") {
+          throw new InvalidRequestError(
+            `Unsupported Doris analytics object filter: ${filter.column}`,
+          );
+        }
+        return {
+          filter,
+          expression: "JSON_UNQUOTE(CAST(ELEMENT_AT(e.metadata, ?) AS STRING))",
+          objectKey: filter.key,
+        };
+      }
+      return { filter, expression: column.expression };
+    });
+  return { filters: planned, positionFilter, requiresFullContent };
 }

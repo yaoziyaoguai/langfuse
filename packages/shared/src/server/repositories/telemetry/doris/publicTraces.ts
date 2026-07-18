@@ -139,11 +139,15 @@ export async function getDorisTracesForPublicApi(
   dependencies: DorisTraceReadDependencies = defaultDependencies(),
 ): Promise<Array<TraceDomain & TraceRecordExtraFieldsType>> {
   const offset = Math.max(0, input.page - 1) * input.limit;
+  const requestedFields = new Set(
+    input.fields ?? ["core", "io", "scores", "observations", "metrics"],
+  );
   const page = await dependencies.repository.list({
     projectId: input.projectId,
     range: buildRange(input),
     filters: buildFilters(input),
     limit: offset + input.limit,
+    includeFullContent: requestedFields.has("io"),
   });
   const traces = page.items.slice(offset);
   const traceIds = traces.map(({ id }) => id);
@@ -158,9 +162,6 @@ export async function getDorisTracesForPublicApi(
   ]);
   const controlsByTraceId = new Map(
     controls.map((control) => [control.traceId, control]),
-  );
-  const requestedFields = new Set(
-    input.fields ?? ["core", "io", "scores", "observations", "metrics"],
   );
   return traces.map((trace) => {
     const domain = toDorisTraceDomain(
