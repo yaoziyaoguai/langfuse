@@ -61,6 +61,7 @@ export * from "./utils/billingCycleHelpers";
 export * from "./utils/compareVersions";
 export * from "./otel/utils";
 export * from "./clickhouse/client";
+export * from "./doris";
 export {
   getClickHouseCompatibilitySettings,
   initializeClickhouseCompatibility,
@@ -136,6 +137,7 @@ export * from "./repositories/traces";
 export * from "./repositories/dataset-items";
 export * from "./utils/metadata_conversion";
 export * from "./repositories/experiments";
+export * from "./repositories/analytics-control-state";
 export * from "./utils/rendering";
 export * from "./utils/sqlLike";
 export * from "./redis/evalExecutionQueue";

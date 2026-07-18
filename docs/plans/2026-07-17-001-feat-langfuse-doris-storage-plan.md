@@ -444,6 +444,18 @@ There is no production dual-write phase. A local/CI ClickHouse reference may pro
 - Raw deletion: materialized deletion is prompt; raw multi-trace objects expire by required seven-day lifecycle.
 - Rollback: Doris-compatible versions only after first production ingest.
 
+### Implementation Amendment — U2 Partition Lifecycle (2026-07-18)
+
+The U1 candidate's `dynamic_partition.start=-365` contradicted R30: Doris drops
+partitions older than that window, so it silently enabled global retention in
+R1A and could not create arbitrary historical source-time partitions. The
+single amended R1A decision is AUTO RANGE partitioning by immutable source date
+with no retention property. The already-recorded `0001_baseline.sql` remains
+immutable; forward-only `0002_refreeze_r1a_partition_and_tombstone_order.sql`
+atomically replaces the pre-traffic tables and also adds monotonic tombstone
+sequence columns. This changes no Product Contract scope: optional global
+retention remains disabled and belongs only to adoption-gated U9.
+
 ### Gate Inputs That Do Not Change Product Scope
 
 - Before U1 benchmarks, the operator must freeze one production topology, resource budget, RPO, and RTO (including explicit non-HA risk acceptance if selected). U1 must then replace illustrative retained volume, write duty cycle, payload distribution, project skew, and query concurrency with measured or explicitly accepted internal assumptions for that topology before PASS.

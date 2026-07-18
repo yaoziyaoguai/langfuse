@@ -148,6 +148,22 @@ const EnvSchema = z.object({
   CLICKHOUSE_USE_QUERY_CONDITION_CACHE: z
     .enum(["true", "false"])
     .default("false"),
+  // Doris remains inactive until U8 atomically switches the composition root.
+  LANGFUSE_ANALYTICS_BACKEND: z
+    .enum(["clickhouse", "doris"])
+    .default("clickhouse"),
+  DORIS_QUERY_URL: z.string().optional(),
+  DORIS_QUERY_USER: z.string().optional(),
+  DORIS_QUERY_PASSWORD: z.string().optional(),
+  DORIS_QUERY_TLS_ENABLED: z.enum(["true", "false"]).default("false"),
+  DORIS_QUERY_TLS_CA_PATH: z.string().optional(),
+  DORIS_QUERY_MAX_CONNECTIONS: z.coerce.number().int().positive().default(25),
+  DORIS_QUERY_CONNECT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10_000),
+  DORIS_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   LANGFUSE_ENABLE_SINGLE_LEVEL_QUERY_OPTIMIZATION: z
     .enum(["true", "false"])
     .default("false"),

@@ -23,7 +23,7 @@ frozen_physical_design:
     unique_key: ["project_id", "partition_date", "trace_id", "span_id"]
     sequence_col: "version_token" # BIGINT, UTC epoch ns; INT64_MAX = terminal delete
     delete_sign: "__DORIS_DELETE_SIGN__" # MoW built-in; INT64_MAX delete row always wins
-    partition: "RANGE(partition_date) DAILY, dynamic_partition -365..365"
+    partition: "AUTO RANGE(date_trunc(partition_date, day)); no global retention"
     distribution: "HASH(trace_id) BUCKETS 8 (PoC; production bucket count scales with BE)"
     hot_columns_typed:
       [

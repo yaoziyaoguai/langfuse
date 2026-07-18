@@ -1,7 +1,8 @@
 -- Langfuse Community Doris Analytics Storage — U1 candidate physical design.
 --
--- This is the SINGLE U1-frozen R1A physical design. It is a test-only PoC asset
--- promoted (or amended) by U2 into packages/shared/doris/migrations/*.sql. It
+-- This is the SINGLE U1-frozen R1A physical design with the U2 partition
+-- lifecycle amendment recorded in docs/operations/doris-poc.md. It is a
+-- test-only PoC asset promoted by U2 into versioned migrations. It
 -- must not fork into an unresolved menu: U1 chooses one key/bucket/index/
 -- projection/search/batching decision and records why in
 -- docs/operations/doris-poc.md.
@@ -138,23 +139,15 @@ CREATE TABLE IF NOT EXISTS events_current (
     INDEX idx_ng_output  (output) USING NGRAM_BF  PROPERTIES("gram_size" = "3", "bf_size" = "64000")
 )
 UNIQUE KEY (project_id, partition_date, trace_id, span_id)
-PARTITION BY RANGE(partition_date) ()
+AUTO PARTITION BY RANGE (date_trunc(`partition_date`, 'day')) ()
 DISTRIBUTED BY HASH(trace_id) BUCKETS 8
 PROPERTIES (
     "replication_num" = "1",
     "enable_unique_key_merge_on_write" = "true",
     -- version_token is the sequence column: on key conflict the larger token wins.
-    "function_column.sequence_col" = "version_token",
-    -- Daily partitions created/retained automatically around NOW; out-of-window
-    -- PoC dates get explicit ADD PARTITION in test setup (see DorisPoC test).
-    "dynamic_partition.enable" = "true",
-    "dynamic_partition.time_unit" = "DAY",
-    "dynamic_partition.start" = "-365",
-    "dynamic_partition.end" = "365",
-    "dynamic_partition.prefix" = "p",
-    "dynamic_partition.buckets" = "8",
-    "dynamic_partition.create_history_partition" = "true",
-    "dynamic_partition.history_partition_num" = "30"
+    -- AUTO PARTITION creates the exact source-time day on demand, including
+    -- historical replay. No retention property is present in R1A.
+    "function_column.sequence_col" = "version_token"
 );
 
 -- =============================================================================
@@ -191,20 +184,12 @@ CREATE TABLE IF NOT EXISTS scores_current (
     INDEX idx_inv_comment (`comment`) USING INVERTED PROPERTIES("parser" = "unicode")
 )
 UNIQUE KEY (project_id, score_date, score_id)
-PARTITION BY RANGE(score_date) ()
+AUTO PARTITION BY RANGE (date_trunc(`score_date`, 'day')) ()
 DISTRIBUTED BY HASH(score_id) BUCKETS 4
 PROPERTIES (
     "replication_num" = "1",
     "enable_unique_key_merge_on_write" = "true",
-    "function_column.sequence_col" = "version_token",
-    "dynamic_partition.enable" = "true",
-    "dynamic_partition.time_unit" = "DAY",
-    "dynamic_partition.start" = "-365",
-    "dynamic_partition.end" = "365",
-    "dynamic_partition.prefix" = "sp",
-    "dynamic_partition.buckets" = "4",
-    "dynamic_partition.create_history_partition" = "true",
-    "dynamic_partition.history_partition_num" = "30"
+    "function_column.sequence_col" = "version_token"
 );
 
 -- =============================================================================
@@ -226,20 +211,12 @@ CREATE TABLE IF NOT EXISTS blob_storage_file_log (
     updated_at            DATETIME(6)    NOT NULL
 )
 UNIQUE KEY (project_id, file_date, entity_type, entity_id, file_id)
-PARTITION BY RANGE(file_date) ()
+AUTO PARTITION BY RANGE (date_trunc(`file_date`, 'day')) ()
 DISTRIBUTED BY HASH(entity_id) BUCKETS 4
 PROPERTIES (
     "replication_num" = "1",
     "enable_unique_key_merge_on_write" = "true",
-    "function_column.sequence_col" = "version_token",
-    "dynamic_partition.enable" = "true",
-    "dynamic_partition.time_unit" = "DAY",
-    "dynamic_partition.start" = "-365",
-    "dynamic_partition.end" = "365",
-    "dynamic_partition.prefix" = "bp",
-    "dynamic_partition.buckets" = "4",
-    "dynamic_partition.create_history_partition" = "true",
-    "dynamic_partition.history_partition_num" = "30"
+    "function_column.sequence_col" = "version_token"
 );
 
 -- =============================================================================
@@ -257,7 +234,8 @@ UNIQUE KEY (project_id, trace_id)
 DISTRIBUTED BY HASH(trace_id) BUCKETS 4
 PROPERTIES (
     "replication_num" = "1",
-    "enable_unique_key_merge_on_write" = "true"
+    "enable_unique_key_merge_on_write" = "true",
+    "function_column.sequence_col" = "deletion_generation"
 );
 
 -- =============================================================================
@@ -274,7 +252,8 @@ UNIQUE KEY (project_id)
 DISTRIBUTED BY HASH(project_id) BUCKETS 2
 PROPERTIES (
     "replication_num" = "1",
-    "enable_unique_key_merge_on_write" = "true"
+    "enable_unique_key_merge_on_write" = "true",
+    "function_column.sequence_col" = "deletion_generation"
 );
 
 -- R1B tables (dataset_run_items_current, analytics_retention_runs) are excluded

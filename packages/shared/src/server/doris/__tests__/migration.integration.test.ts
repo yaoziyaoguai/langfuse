@@ -14,6 +14,9 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import { DorisClient, type DorisQueryExecutor } from "../client";
+import { checkDorisReadiness, EXPECTED_DORIS_MIGRATIONS } from "../readiness";
+
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
 const MIGRATION_FILE = path.resolve(
   __dirname,
@@ -44,7 +47,9 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
 
   it("applies the baseline migration to a fresh database", async () => {
     const result = await runMigrations(cfg);
-    expect(result.applied).toContain("0001_baseline.sql");
+    expect(result.applied).toEqual(
+      EXPECTED_DORIS_MIGRATIONS.map(({ name }) => name),
+    );
     expect(result.skipped).toEqual([]);
 
     const conn = await createConnection({
@@ -63,13 +68,75 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
       ["0001_baseline.sql"],
     )) as unknown as [{ c: number }[], unknown];
     expect(ver[0].c).toBe(1);
+
+    const executor: DorisQueryExecutor = {
+      query: (async (sql: string, params: readonly unknown[] = []) => {
+        const [rows] = await conn.query(sql, [...params]);
+        return rows as readonly object[];
+      }) as DorisQueryExecutor["query"],
+    };
+    await expect(checkDorisReadiness(executor)).resolves.toEqual({
+      ready: true,
+      code: "READY",
+      schemaVersion: EXPECTED_DORIS_MIGRATIONS.length,
+    });
     await conn.end();
   }, 120_000);
 
   it("is idempotent: re-running is a no-op", async () => {
     const result = await runMigrations(cfg);
     expect(result.applied).toEqual([]);
-    expect(result.skipped).toContain("0001_baseline.sql");
+    expect(result.skipped).toEqual(
+      EXPECTED_DORIS_MIGRATIONS.map(({ name }) => name),
+    );
+  });
+
+  it("creates an arbitrary historical source-date partition on demand", async () => {
+    const conn = await createConnection({
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      password: cfg.password,
+      database: cfg.database,
+    });
+    await conn.query(`
+      INSERT INTO events_current (
+        project_id, partition_date, trace_id, span_id, version_token,
+        \`type\`, environment, start_time, created_at, updated_at,
+        \`source\`, ingestion_sdk_name, ingestion_sdk_version
+      ) VALUES (
+        'historical-project', '2001-01-02', 'historical-trace', 'historical-span', 1,
+        'span', 'default', '2001-01-02 03:04:05.000000',
+        '2001-01-02 03:04:05.000000', '2001-01-02 03:04:05.000000',
+        'api', 'integration-test', '1.0.0'
+      )
+    `);
+    const [rows] = (await conn.query(
+      "SELECT partition_date FROM events_current WHERE project_id = ?",
+      ["historical-project"],
+    )) as unknown as [{ partition_date: Date }[], unknown];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.partition_date).toBeDefined();
+    await conn.end();
+  });
+
+  it("binds values through the production query client", async () => {
+    const client = new DorisClient({
+      ...cfg,
+      tls: false,
+      maxConnections: 2,
+      connectTimeoutMs: 10_000,
+      queryTimeoutMs: 30_000,
+    });
+
+    await expect(
+      client.query<{ boundValue: string }>("SELECT ? AS boundValue", [
+        "value'; DROP TABLE events_current; --",
+      ]),
+    ).resolves.toEqual([
+      { boundValue: "value'; DROP TABLE events_current; --" },
+    ]);
+    await client.close();
   });
 
   it("rejects checksum drift on an already-applied migration", async () => {

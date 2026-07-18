@@ -31,7 +31,7 @@ Inputs That Do Not Change Product Scope" and cannot be substituted by a local ru
 | Unique key             | `(project_id, partition_date, trace_id, span_id)` — collision-free pair identity.                                                                |
 | Sequence (latest-wins) | `version_token` BIGINT, UTC epoch nanoseconds (`function_column.sequence_col`).                                                                  |
 | Terminal delete        | `__DORIS_DELETE_SIGN__=1` with `version_token=INT64_MAX` (9223372036854775807).                                                                  |
-| Partition              | `RANGE(partition_date)` DAILY, `dynamic_partition` −365..+365. `partition_date` = immutable UTC date of canonical `start_time`.                  |
+| Partition              | `AUTO PARTITION BY RANGE(date_trunc(partition_date, 'day'))`; no global retention. `partition_date` = immutable UTC date of canonical `start_time`. |
 | Distribution           | `HASH(trace_id)` BUCKETS 8 (PoC; production bucket count scales with BE).                                                                        |
 | Hot columns            | Typed (identity/filter/group/order/billing/preview).                                                                                             |
 | Long-tail              | VARIANT (metadata/usage/cost/model/tool).                                                                                                        |
@@ -90,6 +90,18 @@ bytes/partitions/latency), `max_inflight_loads` 4, `global_buffered_byte_cap`
 the U4 durable writer backpressure contract.
 
 ## Findings (must be carried into U2/U5)
+
+0. **U2 partition lifecycle correction.** The first frozen DDL used
+   `dynamic_partition.start=-365`, which deletes partitions older than the
+   configured window and therefore implemented an undeclared global retention
+   policy. It also could not accept arbitrary historical source-time days
+   without manual partition DDL. U2 corrected the candidate to Doris AUTO
+   PARTITION and applied the same change through immutable forward migration
+   `0002_refreeze_r1a_partition_and_tombstone_order.sql` before application
+   traffic. R1A has no global-retention property; U9 owns any later adoption.
+   See the Doris [dynamic partition](https://doris.apache.org/docs/dev/table-design/data-partitioning/dynamic-partitioning/)
+   and [auto partition](https://doris.apache.org/docs/4.x/table-design/data-partitioning/auto-partitioning/)
+   contracts.
 
 1. **Korean particle tokenization gap.** The `unicode`/`icu` inverted-index
    tokenizers do **not** strip Korean particles (`비용에` is one token, not

@@ -1,5 +1,14 @@
 import { prisma } from "@langfuse/shared/src/db";
-import { logger, redis } from "@langfuse/shared/src/server";
+import {
+  checkAnalyticsReadiness,
+  DorisClientManager,
+  logger,
+  parseDorisQueryConfig,
+  PrismaAnalyticsCompatibilityControlState,
+  redis,
+  SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
+  SUPPORTED_DORIS_SCHEMA_VERSIONS,
+} from "@langfuse/shared/src/server";
 import { Response } from "express";
 
 import { env } from "../../env";
@@ -166,6 +175,25 @@ export const checkContainerHealth = async (
       ),
     ),
   ]);
+
+  if (failOnSigterm && env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+    const client = DorisClientManager.getInstance().getClient(
+      parseDorisQueryConfig(process.env, env.NODE_ENV),
+    );
+    const analytics = await checkAnalyticsReadiness({
+      executor: client,
+      controlState: new PrismaAnalyticsCompatibilityControlState(prisma),
+      supportedCanonicalizerVersions: SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
+      supportedSchemaVersions: SUPPORTED_DORIS_SCHEMA_VERSIONS,
+    });
+    if (!analytics.ready) {
+      return res.status(503).json({
+        status: "Analytics readiness check failed",
+        analytics: analytics.code,
+        schemaVersion: analytics.schemaVersion,
+      });
+    }
+  }
 
   if (failIfEventPropagationStuck) {
     const eventPropagation = await getEventPropagationHealth();

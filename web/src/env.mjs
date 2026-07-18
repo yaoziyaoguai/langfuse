@@ -320,6 +320,23 @@ export const env = createEnv({
     CLICKHOUSE_USER: z.string(),
     CLICKHOUSE_PASSWORD: z.string(),
     CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
+    LANGFUSE_ANALYTICS_BACKEND: z
+      .enum(["clickhouse", "doris"])
+      .default("clickhouse"),
+
+    // Doris query-only identity. Stream Load credentials are worker-only.
+    DORIS_QUERY_URL: z.string().optional(),
+    DORIS_QUERY_USER: z.string().optional(),
+    DORIS_QUERY_PASSWORD: z.string().optional(),
+    DORIS_QUERY_TLS_ENABLED: z.enum(["true", "false"]).default("false"),
+    DORIS_QUERY_TLS_CA_PATH: z.string().optional(),
+    DORIS_QUERY_MAX_CONNECTIONS: z.coerce.number().int().positive().default(25),
+    DORIS_QUERY_CONNECT_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(10_000),
+    DORIS_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 
     // EE ui customization
     LANGFUSE_UI_API_HOST: z.string().optional(),
@@ -825,6 +842,15 @@ export const env = createEnv({
     CLICKHOUSE_USER: process.env.CLICKHOUSE_USER,
     CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
     CLICKHOUSE_CLUSTER_ENABLED: process.env.CLICKHOUSE_CLUSTER_ENABLED,
+    LANGFUSE_ANALYTICS_BACKEND: process.env.LANGFUSE_ANALYTICS_BACKEND,
+    DORIS_QUERY_URL: process.env.DORIS_QUERY_URL,
+    DORIS_QUERY_USER: process.env.DORIS_QUERY_USER,
+    DORIS_QUERY_PASSWORD: process.env.DORIS_QUERY_PASSWORD,
+    DORIS_QUERY_TLS_ENABLED: process.env.DORIS_QUERY_TLS_ENABLED,
+    DORIS_QUERY_TLS_CA_PATH: process.env.DORIS_QUERY_TLS_CA_PATH,
+    DORIS_QUERY_MAX_CONNECTIONS: process.env.DORIS_QUERY_MAX_CONNECTIONS,
+    DORIS_QUERY_CONNECT_TIMEOUT_MS: process.env.DORIS_QUERY_CONNECT_TIMEOUT_MS,
+    DORIS_QUERY_TIMEOUT_MS: process.env.DORIS_QUERY_TIMEOUT_MS,
     // EE ui customization
     LANGFUSE_UI_API_HOST: process.env.LANGFUSE_UI_API_HOST,
     LANGFUSE_UI_DOCUMENTATION_HREF: process.env.LANGFUSE_UI_DOCUMENTATION_HREF,

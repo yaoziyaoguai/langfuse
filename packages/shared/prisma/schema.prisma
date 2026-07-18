@@ -186,6 +186,10 @@ model Project {
   InAppAgentEvent           InAppAgentEvent[]
   InAppAgentRun             InAppAgentRun[]
   InAppAgentPendingToolApproval InAppAgentPendingToolApproval[]
+  analyticsIngestionOperations AnalyticsIngestionOperation[]
+  analyticsEntityHeads         AnalyticsEntityHead[]
+  analyticsDeletionTombstones  AnalyticsDeletionTombstone[]
+  traceControlStates           TraceControlState[]
 
   @@index([orgId])
   @@map("projects")
@@ -1853,6 +1857,348 @@ model SlackIntegration {
 
   @@index([teamId])
   @@map("slack_integrations")
+}
+
+enum AnalyticsIngestionOperationStatus {
+  ACCEPTED
+  QUEUED
+  PERSISTED
+  VISIBLE
+  RETRYING
+  PARTIAL_FAILED
+  QUARANTINED
+  UNRECOVERABLE
+  CANCELLED_BY_DELETION
+  COMPLETED_WITH_CANCELLATIONS
+}
+
+enum AnalyticsManifestState {
+  PENDING
+  CANDIDATE_PUBLISHED
+  FROZEN
+}
+
+enum AnalyticsCandidateDisposition {
+  PENDING
+  LOAD_REQUIRED
+  NOOP
+  QUARANTINED
+  CANCELLED_BY_DELETION
+}
+
+enum AnalyticsOutboxStatus {
+  PENDING
+  PUBLISHED
+}
+
+enum AnalyticsLoadBatchStatus {
+  PENDING
+  LOADING
+  VISIBLE
+  UNKNOWN
+  FAILED
+  CANCELLED_BY_DELETION
+}
+
+enum AnalyticsEntityType {
+  EVENT
+  SCORE
+  FILE_REFERENCE
+}
+
+enum AnalyticsDeletionScope {
+  TRACE
+  PROJECT
+}
+
+enum AnalyticsDeletionStatus {
+  SCHEDULED
+  RETRYING
+  NEEDS_ATTENTION
+  COMPLETED
+}
+
+enum AnalyticsCheckpointStatus {
+  PREPARING
+  SEALED
+  ABORTED
+}
+
+enum AnalyticsBackgroundMigrationRetirementStatus {
+  OBSERVING
+  DRAINING
+  DRAINED
+  TERMINALIZED
+}
+
+model AnalyticsIngestionOperation {
+  id                         String                            @id @default(cuid())
+  projectId                  String                            @map("project_id")
+  project                    Project                           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceOperationId          String                            @map("source_operation_id")
+  sourceChecksum             String                            @map("source_checksum")
+  rawObjectKey               String                            @map("raw_object_key")
+  acceptedAt                 DateTime                          @default(now()) @map("accepted_at")
+  canonicalizerVersion       String                            @map("canonicalizer_version")
+  schemaVersion              Int                               @map("schema_version")
+  canonicalizationFence      BigInt                            @default(0) @map("canonicalization_fence")
+  canonicalizationLeaseOwner String?                           @map("canonicalization_lease_owner")
+  canonicalizationLeaseUntil DateTime?                         @map("canonicalization_lease_until")
+  canonicalizationAttempts   Int                               @default(0) @map("canonicalization_attempts")
+  reservedCanonicalObjectKey String?                           @map("reserved_canonical_object_key")
+  canonicalObjectKey         String?                           @map("canonical_object_key")
+  canonicalArtifactChecksum  String?                           @map("canonical_artifact_checksum")
+  manifestState              AnalyticsManifestState            @default(PENDING) @map("manifest_state")
+  candidateManifest          Json?                             @map("candidate_manifest")
+  frozenManifest             Json?                             @map("frozen_manifest")
+  status                     AnalyticsIngestionOperationStatus @default(ACCEPTED)
+  cancellationReasonCode     String?                           @map("cancellation_reason_code")
+  lastErrorCode              String?                           @map("last_error_code")
+  recoverableUntil           DateTime                          @map("recoverable_until")
+  statusExpiresAt            DateTime                          @map("status_expires_at")
+  visibleAt                  DateTime?                         @map("visible_at")
+  terminalAt                 DateTime?                         @map("terminal_at")
+  createdAt                  DateTime                          @default(now()) @map("created_at")
+  updatedAt                  DateTime                          @default(now()) @updatedAt @map("updated_at")
+
+  outbox      AnalyticsIngestionOutbox?
+  candidates  AnalyticsIngestionCandidate[]
+  loadBatches AnalyticsLoadBatch[]
+  entityHeads AnalyticsEntityHead[]
+
+  @@unique([id, projectId])
+  @@unique([projectId, sourceOperationId])
+  @@index([status, recoverableUntil])
+  @@index([manifestState, status, updatedAt])
+  @@index([manifestState, canonicalizationLeaseUntil])
+  @@index([projectId, status, acceptedAt])
+  @@index([canonicalizerVersion, schemaVersion, recoverableUntil])
+  @@map("analytics_ingestion_operations")
+}
+
+model AnalyticsIngestionCandidate {
+  id                       String                        @id @default(cuid())
+  operationId              String                        @map("operation_id")
+  operation                AnalyticsIngestionOperation   @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  projectId                String                        @map("project_id")
+  candidateKey             String                        @map("candidate_key")
+  entityType               AnalyticsEntityType           @map("entity_type")
+  entityKey                String                        @map("entity_key")
+  owningTraceId            String?                       @map("owning_trace_id")
+  partitionDate            DateTime?                     @map("partition_date") @db.Date
+  sourceVersion            BigInt                        @map("source_version")
+  canonicalPayloadHash     String                        @map("canonical_payload_hash")
+  disposition             AnalyticsCandidateDisposition @default(PENDING)
+  loadBatchId              String?                       @map("load_batch_id")
+  reasonCode               String?                       @map("reason_code")
+  quarantineExpiresAt      DateTime?                     @map("quarantine_expires_at")
+  traceDeletionGeneration  BigInt                        @default(0) @map("trace_deletion_generation")
+  projectDeletionGeneration BigInt                       @default(0) @map("project_deletion_generation")
+  createdAt                DateTime                      @default(now()) @map("created_at")
+  updatedAt                DateTime                      @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([operationId, candidateKey])
+  @@index([operationId, disposition])
+  @@index([projectId, owningTraceId, disposition])
+  @@index([loadBatchId])
+  @@index([disposition, quarantineExpiresAt])
+  @@map("analytics_ingestion_candidates")
+}
+
+model AnalyticsIngestionOutbox {
+  id            String                      @id @default(cuid())
+  operationId   String                      @unique @map("operation_id")
+  operation     AnalyticsIngestionOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  status        AnalyticsOutboxStatus       @default(PENDING)
+  attempts      Int                         @default(0)
+  nextAttemptAt DateTime                    @default(now()) @map("next_attempt_at")
+  lockedBy      String?                     @map("locked_by")
+  lockedUntil   DateTime?                   @map("locked_until")
+  publishedAt   DateTime?                   @map("published_at")
+  createdAt     DateTime                    @default(now()) @map("created_at")
+  updatedAt     DateTime                    @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt, lockedUntil])
+  @@map("analytics_ingestion_outbox")
+}
+
+model AnalyticsLoadBatch {
+  id                 String                      @id @default(cuid())
+  operationId        String                      @map("operation_id")
+  operation          AnalyticsIngestionOperation @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  projectId          String                      @map("project_id")
+  databaseName       String                      @map("database_name")
+  targetTable        String                      @map("target_table")
+  logicalBatchId     String                      @map("logical_batch_id")
+  attempt            Int                         @default(0)
+  fenceGeneration    BigInt                      @map("fence_generation")
+  leaseOwner         String?                     @map("lease_owner")
+  leaseExpiresAt     DateTime?                   @map("lease_expires_at")
+  label              String                      @unique
+  payloadHash        String                      @map("payload_hash")
+  canonicalObjectKey String                      @map("canonical_object_key")
+  partitionDate      DateTime?                   @map("partition_date") @db.Date
+  status             AnalyticsLoadBatchStatus    @default(PENDING)
+  transactionId      String?                     @map("transaction_id")
+  totalRows          Int?                        @map("total_rows")
+  filteredRows       Int?                        @map("filtered_rows")
+  lastErrorCode      String?                     @map("last_error_code")
+  visibleAt          DateTime?                   @map("visible_at")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  updatedAt          DateTime                    @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([projectId, operationId, databaseName, targetTable, logicalBatchId, attempt])
+  @@index([operationId, status])
+  @@index([projectId, status, updatedAt])
+  @@index([status, updatedAt])
+  @@map("analytics_load_batches")
+}
+
+model AnalyticsEntityHead {
+  id                        String                      @id @default(cuid())
+  projectId                 String                      @map("project_id")
+  entityType                AnalyticsEntityType         @map("entity_type")
+  entityKey                 String                      @map("entity_key")
+  owningTraceId             String?                     @map("owning_trace_id")
+  sourceVersion             BigInt                      @map("source_version")
+  canonicalPayloadHash      String                      @map("canonical_payload_hash")
+  partitionDate             DateTime                    @map("partition_date") @db.Date
+  canonicalizerVersion      String                      @map("canonicalizer_version")
+  fenceGeneration           BigInt                      @map("fence_generation")
+  traceDeletionGeneration   BigInt                      @default(0) @map("trace_deletion_generation")
+  projectDeletionGeneration BigInt                      @default(0) @map("project_deletion_generation")
+  operationId               String                      @map("operation_id")
+  operation                 AnalyticsIngestionOperation @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  project                   Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt                 DateTime                    @default(now()) @map("created_at")
+  updatedAt                 DateTime                    @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([projectId, entityType, entityKey])
+  @@index([projectId, owningTraceId, entityType])
+  @@index([projectId, entityType, partitionDate])
+  @@index([operationId])
+  @@map("analytics_entity_heads")
+}
+
+model AnalyticsDeletionTombstone {
+  id               String                  @id @default(cuid())
+  projectId        String                  @map("project_id")
+  project          Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  traceId          String                  @map("trace_id")
+  generation       BigInt
+  status           AnalyticsDeletionStatus @default(RETRYING)
+  barrierLabel     String?                 @map("barrier_label")
+  barrierVisibleAt DateTime?               @map("barrier_visible_at")
+  completedAt      DateTime?               @map("completed_at")
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([projectId, traceId])
+  @@index([projectId, status, updatedAt])
+  @@map("analytics_deletion_tombstones")
+}
+
+// Deliberately no Project relation: this monotonic fence survives Project deletion.
+model AnalyticsProjectDeletionGeneration {
+  projectId  String   @id @map("project_id")
+  generation BigInt
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("analytics_project_deletion_generations")
+}
+
+// Deliberately no Project relation: organization-authorized status survives Project deletion.
+model AnalyticsDeletionOperation {
+  id                     String                  @id @default(cuid())
+  scope                  AnalyticsDeletionScope
+  organizationId         String                  @map("organization_id")
+  projectId              String                  @map("project_id")
+  traceId                String?                 @map("trace_id")
+  generation             BigInt
+  workerFence            BigInt                  @default(0) @map("worker_fence")
+  leaseOwner             String?                 @map("lease_owner")
+  leaseExpiresAt         DateTime?               @map("lease_expires_at")
+  requesterPrincipalType String                  @map("requester_principal_type")
+  requesterPrincipalId   String                  @map("requester_principal_id")
+  status                 AnalyticsDeletionStatus @default(RETRYING)
+  phase                  String                  @default("visibility_barrier")
+  logicallyInvisible     Boolean                 @default(false) @map("logically_invisible")
+  cancellationReasonCode String?                 @map("cancellation_reason_code")
+  statusExpiresAt        DateTime                @map("status_expires_at")
+  completedAt            DateTime?               @map("completed_at")
+  createdAt              DateTime                @default(now()) @map("created_at")
+  updatedAt              DateTime                @default(now()) @updatedAt @map("updated_at")
+
+  @@index([projectId, scope, generation])
+  @@index([organizationId, id])
+  @@index([organizationId, projectId, status])
+  @@index([status, updatedAt])
+  @@map("analytics_deletion_operations")
+}
+
+model TraceControlState {
+  id                       String   @id @default(cuid())
+  projectId                String   @map("project_id")
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  traceId                  String   @map("trace_id")
+  bookmarked               Boolean  @default(false)
+  public                   Boolean  @default(false)
+  revision                 BigInt   @default(0)
+  initializedByOperationId String?  @map("initialized_by_operation_id")
+  lastMutationSource       String   @default("ingestion") @map("last_mutation_source")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([projectId, traceId])
+  @@index([projectId, initializedByOperationId])
+  @@index([projectId, public])
+  @@map("trace_control_states")
+}
+
+model AnalyticsCheckpointGeneration {
+  generation                       BigInt                    @id
+  status                           AnalyticsCheckpointStatus @default(PREPARING)
+  leaseOwner                       String                    @map("lease_owner")
+  leaseExpiresAt                   DateTime                  @map("lease_expires_at")
+  operationHighWatermarkAcceptedAt DateTime                  @map("operation_high_watermark_accepted_at")
+  loadHighWatermarkCreatedAt       DateTime                  @map("load_high_watermark_created_at")
+  postgresSnapshotId               String?                   @map("postgres_snapshot_id")
+  dorisSnapshotId                  String?                   @map("doris_snapshot_id")
+  artifactDigests                  Json?                     @map("artifact_digests")
+  keyId                            String?                   @map("key_id")
+  predecessorHash                  String?                   @map("predecessor_hash")
+  manifestHash                     String?                   @map("manifest_hash")
+  signature                        String?
+  sealedAt                         DateTime?                 @map("sealed_at")
+  abortedAt                        DateTime?                 @map("aborted_at")
+  abortReasonCode                  String?                   @map("abort_reason_code")
+  createdAt                        DateTime                  @default(now()) @map("created_at")
+  updatedAt                        DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status, leaseExpiresAt])
+  @@map("analytics_checkpoint_generations")
+}
+
+model AnalyticsBackgroundMigrationRetirement {
+  id                    String                                       @id @default(cuid())
+  fenceName             String                                       @map("fence_name")
+  managerInstanceId     String                                       @map("manager_instance_id")
+  generation            BigInt
+  status                AnalyticsBackgroundMigrationRetirementStatus @default(OBSERVING)
+  minimumManagerBuildId String                                       @map("minimum_manager_build_id")
+  managerBuildId        String                                       @map("manager_build_id")
+  managerHeartbeatAt    DateTime                                     @map("manager_heartbeat_at")
+  activeMigrationName   String?                                      @map("active_migration_name")
+  activeLeaseExpiresAt  DateTime?                                    @map("active_lease_expires_at")
+  drainedAt             DateTime?                                    @map("drained_at")
+  terminalizedAt        DateTime?                                    @map("terminalized_at")
+  createdAt             DateTime                                     @default(now()) @map("created_at")
+  updatedAt             DateTime                                     @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([fenceName, managerInstanceId])
+  @@index([fenceName, status, managerHeartbeatAt])
+  @@map("analytics_background_migration_retirement")
 }
 
 // Pending Deletions: Tracks objects (like traces) that are scheduled for batch deletion

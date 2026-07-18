@@ -116,6 +116,40 @@ const EnvSchema = z.object({
   CLICKHOUSE_DB: z.string().default("default"),
   CLICKHOUSE_PASSWORD: z.string(),
   CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
+  LANGFUSE_ANALYTICS_BACKEND: z
+    .enum(["clickhouse", "doris"])
+    .default("clickhouse"),
+  // Doris credentials are injected per workload. Web never receives load auth.
+  DORIS_QUERY_URL: z.string().optional(),
+  DORIS_QUERY_USER: z.string().optional(),
+  DORIS_QUERY_PASSWORD: z.string().optional(),
+  DORIS_QUERY_TLS_ENABLED: z.enum(["true", "false"]).default("false"),
+  DORIS_QUERY_TLS_CA_PATH: z.string().optional(),
+  DORIS_QUERY_MAX_CONNECTIONS: z.coerce.number().int().positive().default(25),
+  DORIS_QUERY_CONNECT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10_000),
+  DORIS_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  DORIS_STREAM_LOAD_FE_URL: z.string().optional(),
+  DORIS_STREAM_LOAD_USER: z.string().optional(),
+  DORIS_STREAM_LOAD_PASSWORD: z.string().optional(),
+  DORIS_STREAM_LOAD_DATABASE: z.string().default("langfuse"),
+  DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: z.string().optional(),
+  DORIS_STREAM_LOAD_BE_ALLOWLIST: z.string().optional(),
+  DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: z.string().optional(),
+  DORIS_STREAM_LOAD_TLS_CA_PATH: z.string().optional(),
+  DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30_000),
+  DORIS_STREAM_LOAD_MAX_BODY_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(100 * 1024 * 1024),
   LANGFUSE_EVAL_CREATOR_LIMITER_DURATION: z.coerce
     .number()
     .positive()

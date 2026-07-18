@@ -1,4 +1,70 @@
 services:
+  # Opt-in Doris 4.0.7 development target. This 1 FE + 1 BE topology is not HA
+  # and is not production evidence. Start it with `--profile doris`.
+  doris-fe:
+    profiles: ["doris"]
+    image: apache/doris:fe-4.0.7
+    container_name: ${DORIS_FE_CONTAINER_NAME:-langfuse-doris-fe}
+    hostname: doris-fe
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        sed -i 's/-Xmx8192m -Xms8192m/-Xmx2048m -Xms2048m/' /opt/apache-doris/fe/conf/fe.conf
+        && exec bash /usr/local/bin/init_fe.sh
+    environment:
+      - FE_SERVERS=fe1:172.29.0.2:9010
+      - FE_ID=1
+    ports:
+      - ${HOST_IP:-127.0.0.1}:${DORIS_FE_HTTP_PORT:-8031}:8030
+      - ${HOST_IP:-127.0.0.1}:${DORIS_FE_MYSQL_PORT:-9031}:9030
+    volumes:
+      - langfuse_doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - langfuse_doris_fe_logs:/opt/apache-doris/fe/log
+    mem_limit: 3g
+    networks:
+      doris-dev:
+        ipv4_address: 172.29.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8030/api/bootstrap || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+  doris-be:
+    profiles: ["doris"]
+    image: apache/doris:be-4.0.7
+    container_name: ${DORIS_BE_CONTAINER_NAME:-langfuse-doris-be}
+    hostname: doris-be
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        echo 'mem_limit_percentage = 70' >> /opt/apache-doris/be/conf/be.conf
+        && exec bash /usr/local/bin/init_be.sh
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    environment:
+      - MASTER_FE_IP=172.29.0.2
+      - CURRENT_BE_IP=172.29.0.3
+      - CURRENT_BE_PORT=9050
+      - PRIORITY_NETWORKS=172.29.0.0/24
+    ports:
+      - ${HOST_IP:-127.0.0.1}:${DORIS_BE_HTTP_PORT:-8041}:8040
+    volumes:
+      - langfuse_doris_be_storage:/opt/apache-doris/be/storage
+      - langfuse_doris_be_logs:/opt/apache-doris/be/log
+    mem_limit: 4g
+    networks:
+      doris-dev:
+        ipv4_address: 172.29.0.3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8040/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
   clickhouse:
     # Upgrade from 24.3 to check behaviour on new events table.
     # Unit tests still verify 24.3 behaviour using -azure and -redis-cluster configs.
@@ -106,6 +172,14 @@ services:
       - default
 
 volumes:
+  langfuse_doris_fe_meta:
+    name: ${DORIS_FE_META_VOLUME_NAME:-langfuse_doris_fe_meta}
+  langfuse_doris_fe_logs:
+    name: ${DORIS_FE_LOGS_VOLUME_NAME:-langfuse_doris_fe_logs}
+  langfuse_doris_be_storage:
+    name: ${DORIS_BE_STORAGE_VOLUME_NAME:-langfuse_doris_be_storage}
+  langfuse_doris_be_logs:
+    name: ${DORIS_BE_LOGS_VOLUME_NAME:-langfuse_doris_be_logs}
   langfuse_postgres_data:
     name: ${POSTGRES_VOLUME_NAME:-langfuse_postgres_data}
     driver: local
@@ -123,3 +197,9 @@ networks:
   default:
     name: ${DOCKER_NETWORK_NAME:-langfuse-network}
     driver: bridge
+  doris-dev:
+    name: ${DORIS_DEV_NETWORK_NAME:-langfuse-doris-dev}
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

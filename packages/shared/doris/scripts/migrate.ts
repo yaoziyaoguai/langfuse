@@ -19,6 +19,11 @@ import {
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 
+import {
+  parseDorisQueryConfig,
+  type DorisNodeEnv,
+} from "../../src/server/doris/config";
+
 // The package compiles to CommonJS; __dirname/__filename are available directly
 // and tsx polyfills them when run as a script.
 const MIGRATIONS_DIR = path.resolve(__dirname, "../migrations");
@@ -27,34 +32,42 @@ const VERSION_TABLE = "_langfuse_schema_migrations";
 export interface MigrationConfig {
   readonly host: string;
   readonly port: number;
-  readonly user: string;
-  readonly password?: string;
   readonly database: string;
+  readonly user: string;
+  readonly password: string;
+  readonly tls?: boolean;
+  readonly tlsCaPath?: string;
+  readonly connectTimeoutMs?: number;
+  readonly queryTimeoutMs?: number;
 }
 
-export function migrationConfigFromEnv(): MigrationConfig {
-  // A full mysql:// URL takes precedence; otherwise individual Doris vars.
-  const url = process.env.DORIS_MYSQL_URL;
-  if (url) {
-    const m = /^mysql:\/\/([^:]+):([^@]*)@([^:]+):(\d+)\/(\S+)$/.exec(url);
-    if (m) {
-      return {
-        host: m[3],
-        port: Number(m[4]),
-        user: m[1],
-        password: decodeURIComponent(m[2]),
-        database: m[5],
-      };
-    }
+type MigrationEnv = Readonly<Record<string, string | undefined>>;
+
+export function migrationConfigFromEnv(
+  input: MigrationEnv = process.env,
+  nodeEnv: DorisNodeEnv = input.NODE_ENV === "production"
+    ? "production"
+    : "development",
+): MigrationConfig {
+  if (nodeEnv === "production" && !input.DORIS_MIGRATION_URL) {
+    throw new Error("Production Doris migrator configuration is required");
   }
-  return {
-    host: process.env.DORIS_FE_HOST ?? "127.0.0.1",
-    port: Number(process.env.DORIS_FE_MYSQL_PORT ?? "9030"),
-    user: process.env.DORIS_MIGRATOR_USER ?? process.env.DORIS_USER ?? "root",
-    password:
-      process.env.DORIS_MIGRATOR_PASSWORD ?? process.env.DORIS_PASSWORD ?? "",
-    database: process.env.DORIS_DATABASE ?? "langfuse",
-  };
+
+  return parseDorisQueryConfig(
+    {
+      DORIS_QUERY_URL:
+        input.DORIS_MIGRATION_URL ?? "mysql://127.0.0.1:9030/langfuse",
+      DORIS_QUERY_USER: input.DORIS_MIGRATION_USER ?? "root",
+      DORIS_QUERY_PASSWORD: input.DORIS_MIGRATION_PASSWORD ?? "",
+      DORIS_QUERY_TLS_ENABLED: input.DORIS_MIGRATION_TLS_ENABLED ?? "false",
+      DORIS_QUERY_TLS_CA_PATH: input.DORIS_MIGRATION_TLS_CA_PATH,
+      DORIS_QUERY_CONNECT_TIMEOUT_MS: input.DORIS_MIGRATION_CONNECT_TIMEOUT_MS,
+      DORIS_QUERY_TIMEOUT_MS:
+        input.DORIS_MIGRATION_QUERY_TIMEOUT_MS ?? "120000",
+      DORIS_QUERY_MAX_CONNECTIONS: "1",
+    },
+    nodeEnv,
+  );
 }
 
 interface MigrationFile {
@@ -112,8 +125,12 @@ export function splitSqlStatements(sql: string): readonly string[] {
   return statements;
 }
 
-async function ensureVersionTable(conn: Connection): Promise<void> {
-  await conn.query(`
+async function ensureVersionTable(
+  conn: Connection,
+  timeout: number,
+): Promise<void> {
+  await conn.query({
+    sql: `
     CREATE TABLE IF NOT EXISTS ${VERSION_TABLE} (
       name VARCHAR(255) NOT NULL,
       checksum CHAR(64) NOT NULL,
@@ -122,7 +139,9 @@ async function ensureVersionTable(conn: Connection): Promise<void> {
     UNIQUE KEY (name)
     DISTRIBUTED BY HASH(name) BUCKETS 1
     PROPERTIES ("replication_num" = "1", "enable_unique_key_merge_on_write" = "true")
-  `);
+  `,
+    timeout,
+  });
 }
 
 export interface MigrationResult {
@@ -140,20 +159,32 @@ export async function runMigrations(
     host: config.host,
     port: config.port,
     user: config.user,
-    password: config.password ?? "",
+    password: config.password,
     database: config.database,
+    connectTimeout: config.connectTimeoutMs,
     multipleStatements: false,
+    ssl: config.tls
+      ? {
+          rejectUnauthorized: true,
+          verifyIdentity: true,
+          ca: config.tlsCaPath
+            ? readFileSync(config.tlsCaPath, "utf8")
+            : undefined,
+        }
+      : undefined,
   } as ConnectionOptions);
   try {
-    await ensureVersionTable(conn);
+    const queryTimeoutMs = config.queryTimeoutMs ?? 120_000;
+    await ensureVersionTable(conn, queryTimeoutMs);
     const migrations = loadMigrations();
     const applied: string[] = [];
     const skipped: string[] = [];
     for (const mig of migrations) {
-      const [rows] = (await conn.query(
-        `SELECT checksum FROM ${VERSION_TABLE} WHERE name = ?`,
-        [mig.name],
-      )) as unknown as [{ checksum?: string }[], unknown];
+      const [rows] = (await conn.query({
+        sql: `SELECT checksum FROM ${VERSION_TABLE} WHERE name = ?`,
+        values: [mig.name],
+        timeout: queryTimeoutMs,
+      })) as unknown as [{ checksum?: string }[], unknown];
       const recorded = rows[0]?.checksum;
       if (recorded) {
         if (recorded !== mig.checksum) {
@@ -165,12 +196,13 @@ export async function runMigrations(
         continue;
       }
       for (const stmt of splitSqlStatements(mig.sql)) {
-        await conn.query(stmt);
+        await conn.query({ sql: stmt, timeout: queryTimeoutMs });
       }
-      await conn.query(
-        `INSERT INTO ${VERSION_TABLE} (name, checksum) VALUES (?, ?)`,
-        [mig.name, mig.checksum],
-      );
+      await conn.query({
+        sql: `INSERT INTO ${VERSION_TABLE} (name, checksum) VALUES (?, ?)`,
+        values: [mig.name, mig.checksum],
+        timeout: queryTimeoutMs,
+      });
       applied.push(mig.name);
     }
     return { applied, skipped };
@@ -192,8 +224,8 @@ const isMain =
   process.argv[1] !== undefined &&
   path.resolve(process.argv[1]) === __filename;
 if (isMain) {
-  main().catch((err) => {
-    console.error("doris:migrate failed:", err);
+  main().catch(() => {
+    console.error("doris:migrate failed");
     process.exit(1);
   });
 }

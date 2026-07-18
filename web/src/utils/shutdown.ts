@@ -6,6 +6,7 @@
 
 import {
   ClickHouseClientManager,
+  DorisClientManager,
   logger,
   redis,
 } from "@langfuse/shared/src/server";
@@ -41,6 +42,9 @@ export const shutdown = async (signal: PrexitSignal) => {
 
         // Shutdown clickhouse connections
         await ClickHouseClientManager.getInstance().closeAllConnections();
+
+        // Shutdown Doris query pools created by readiness or Doris-backed services.
+        await DorisClientManager.getInstance().closeAllConnections();
 
         logger.info(`Redis status ${redis?.status}`);
         if (!redis) {

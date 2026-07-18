@@ -1,4 +1,8 @@
-import { ClickHouseClientManager, logger } from "@langfuse/shared/src/server";
+import {
+  ClickHouseClientManager,
+  DorisClientManager,
+  logger,
+} from "@langfuse/shared/src/server";
 import { redis } from "@langfuse/shared/src/server";
 
 import { ClickhouseWriter } from "../services/ClickhouseWriter";
@@ -88,6 +92,9 @@ export const onShutdown: NodeJS.SignalsListener = async (signal) => {
 
   // Shutdown clickhouse connections
   await ClickHouseClientManager.getInstance().closeAllConnections();
+
+  // Shutdown Doris query pools created by readiness or Doris-backed services.
+  await DorisClientManager.getInstance().closeAllConnections();
 
   // Shutdown tokenization worker threads
   try {
