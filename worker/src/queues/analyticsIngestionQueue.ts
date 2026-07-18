@@ -13,6 +13,7 @@ import {
   findAnalyticsIngestionOperationForProject,
   markAnalyticsIngestionOutboxPublished,
   markAnalyticsIngestionRetrying,
+  markAnalyticsIngestionTerminalFailure,
   QueueJobs,
   QueueName,
   recordIncrement,
@@ -115,6 +116,7 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
   readonly client?: PrismaClient;
   readonly findOperation?: typeof findAnalyticsIngestionOperationForProject;
   readonly markRetrying?: typeof markAnalyticsIngestionRetrying;
+  readonly markTerminalFailure?: typeof markAnalyticsIngestionTerminalFailure;
 }): Processor<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]> {
   return async (
     job: Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>,
@@ -156,6 +158,19 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
     } catch (error) {
       if (!(error instanceof AnalyticsPersistenceError)) throw error;
       if (!error.retryable) {
+        await (
+          input.markTerminalFailure ?? markAnalyticsIngestionTerminalFailure
+        )({
+          client: input.client ?? prisma,
+          operationId: operation.id,
+          projectId: operation.projectId,
+          status:
+            error.code === "ANALYTICS_QUARANTINED" ||
+            error.code === "ANALYTICS_CONFLICT"
+              ? "QUARANTINED"
+              : "UNRECOVERABLE",
+          reasonCode: error.code,
+        });
         throw new UnrecoverableError(error.message);
       }
       const attempts = job.opts.attempts ?? 1;

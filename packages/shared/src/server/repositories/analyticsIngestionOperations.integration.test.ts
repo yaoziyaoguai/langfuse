@@ -124,6 +124,34 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
       lastErrorCode: "MAX_RETRIES_EXHAUSTED",
       terminalAt: null,
     });
+    await expect(
+      repository.markAnalyticsIngestionTerminalFailure({
+        client: prisma,
+        operationId: input.operationId,
+        projectId,
+        status: "UNRECOVERABLE",
+        reasonCode: "ANALYTICS_VALIDATION_ERROR",
+        now: new Date("2026-07-18T12:00:04.000Z"),
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.markAnalyticsIngestionTerminalFailure({
+        client: prisma,
+        operationId: input.operationId,
+        projectId,
+        status: "QUARANTINED",
+        reasonCode: "ANALYTICS_CONFLICT",
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      prisma.analyticsIngestionOperation.findUniqueOrThrow({
+        where: { id: input.operationId },
+      }),
+    ).resolves.toMatchObject({
+      status: "UNRECOVERABLE",
+      lastErrorCode: "ANALYTICS_VALIDATION_ERROR",
+      terminalAt: new Date("2026-07-18T12:00:04.000Z"),
+    });
 
     await expect(
       repository.createAnalyticsIngestionReceipt({

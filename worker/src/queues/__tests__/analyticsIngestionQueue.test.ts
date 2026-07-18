@@ -142,6 +142,7 @@ describe("analytics ingestion durable queue", () => {
   });
 
   it("fails non-retryable persistence errors without consuming all attempts", async () => {
+    const markTerminalFailure = vi.fn(async () => true);
     const processor = analyticsIngestionQueueProcessorBuilder({
       sink: { persist: vi.fn() },
       canonicalize: vi.fn(async () => {
@@ -157,11 +158,20 @@ describe("analytics ingestion durable queue", () => {
         terminalAt: null,
         status: "QUEUED",
       })) as never,
+      markTerminalFailure: markTerminalFailure as never,
     });
 
     await expect(
       processor(queueJob("operation-1", "project-1"), "token"),
     ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    expect(markTerminalFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "operation-1",
+        projectId: "project-1",
+        status: "UNRECOVERABLE",
+        reasonCode: "ANALYTICS_VALIDATION_ERROR",
+      }),
+    );
   });
 
   it("records retry exhaustion before leaving the body-free job in BullMQ failed state", async () => {

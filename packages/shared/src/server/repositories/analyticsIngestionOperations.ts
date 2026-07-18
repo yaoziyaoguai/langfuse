@@ -527,6 +527,39 @@ export async function markAnalyticsIngestionRetrying(input: {
   return updated.count === 1;
 }
 
+export async function markAnalyticsIngestionTerminalFailure(input: {
+  client?: PrismaClient;
+  operationId: string;
+  projectId: string;
+  status: "QUARANTINED" | "UNRECOVERABLE";
+  reasonCode: string;
+  now?: Date;
+}): Promise<boolean> {
+  const now = input.now ?? new Date();
+  if (
+    !input.operationId ||
+    !input.projectId ||
+    !/^[A-Z0-9_]{1,64}$/.test(input.reasonCode) ||
+    !Number.isFinite(now.getTime())
+  ) {
+    throw new TypeError("Invalid analytics ingestion terminal failure");
+  }
+  const client = input.client ?? prisma;
+  const updated = await client.analyticsIngestionOperation.updateMany({
+    where: {
+      id: input.operationId,
+      projectId: input.projectId,
+      terminalAt: null,
+    },
+    data: {
+      status: input.status,
+      lastErrorCode: input.reasonCode,
+      terminalAt: now,
+    },
+  });
+  return updated.count === 1;
+}
+
 type AnalyticsCandidateDispositionInput = {
   readonly candidateKey: string;
   readonly disposition: AnalyticsCandidateDisposition;
