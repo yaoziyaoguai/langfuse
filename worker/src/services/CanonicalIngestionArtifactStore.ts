@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  AnalyticsPersistenceError,
   assertAnalyticsBatchBoundary,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
@@ -15,6 +16,7 @@ import {
 } from "@langfuse/shared/src/server";
 
 const ARTIFACT_FORMAT_VERSION = 1;
+const MAX_CANONICAL_ARTIFACT_BYTES = 100 * 1024 * 1024;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const DECIMAL_INTEGER = /^-?\d+$/;
 
@@ -273,7 +275,14 @@ export function canonicalArtifactObjectKey(input: {
 }
 
 export class CanonicalIngestionArtifactStore {
-  constructor(private readonly objectStore: ConditionalCanonicalObjectStore) {}
+  constructor(
+    private readonly objectStore: ConditionalCanonicalObjectStore,
+    private readonly maxArtifactBytes = MAX_CANONICAL_ARTIFACT_BYTES,
+  ) {
+    if (!Number.isSafeInteger(maxArtifactBytes) || maxArtifactBytes <= 0) {
+      throw new TypeError("Invalid canonical artifact byte limit");
+    }
+  }
 
   async putIfAbsent(
     key: string,
@@ -283,6 +292,19 @@ export class CanonicalIngestionArtifactStore {
     readonly checksum: string;
   }> {
     const artifact = encodeCanonicalArtifact(batch);
+    if (Buffer.byteLength(artifact.body, "utf8") > this.maxArtifactBytes) {
+      throw new AnalyticsPersistenceError(
+        "ANALYTICS_RESOURCE_EXHAUSTED",
+        false,
+        {
+          tags: {
+            operationId: batch.operationId,
+            phase: "canonical_artifact",
+            reasonCode: "ARTIFACT_BYTES_EXCEEDED",
+          },
+        },
+      );
+    }
     const outcome = await this.objectStore.putIfAbsent({
       key,
       body: artifact.body,

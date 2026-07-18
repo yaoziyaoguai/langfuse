@@ -6,7 +6,11 @@ import {
 } from "@langfuse/shared/analytics-persistence";
 import { describe, expect, it, vi } from "vitest";
 
-import { DorisBatchSink, prepareDorisLoadBatches } from "./DorisBatchSink";
+import {
+  AnalyticsLoadAdmissionController,
+  DorisBatchSink,
+  prepareDorisLoadBatches,
+} from "./DorisBatchSink";
 
 const acceptedAt = normalizeVersionToken("2026-07-18T12:00:00.123456789Z");
 const startTime = normalizeVersionToken("2026-07-17T10:00:00.123456789Z");
@@ -221,6 +225,46 @@ describe("DorisBatchSink", () => {
       table: "events_current",
       label: "lf_test_label",
       ndjsonBody: prepared.ndjsonBody,
+    });
+  });
+
+  it("bounds in-flight loads and rejects buffered-byte overflow", async () => {
+    const controller = new AnalyticsLoadAdmissionController({
+      maxBatchBytes: 8,
+      maxInflightLoads: 1,
+      globalBufferedByteCap: 10,
+    });
+    let releaseFirst!: () => void;
+    const first = controller.run(
+      6,
+      () =>
+        new Promise<string>((resolve) => {
+          releaseFirst = () => resolve("first");
+        }),
+    );
+    const secondTask = vi.fn(async () => "second");
+    const second = controller.run(4, secondTask);
+
+    await expect(
+      controller.run(1, async () => "overflow"),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_RESOURCE_EXHAUSTED",
+      retryable: true,
+    });
+    expect(secondTask).not.toHaveBeenCalled();
+    releaseFirst();
+    await expect(first).resolves.toBe("first");
+    await expect(second).resolves.toBe("second");
+    expect(controller.snapshot()).toEqual({
+      bufferedBytes: 0,
+      inflightLoads: 0,
+      waitingLoads: 0,
+    });
+    await expect(
+      controller.run(9, async () => "oversized"),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_RESOURCE_EXHAUSTED",
+      retryable: false,
     });
   });
 });

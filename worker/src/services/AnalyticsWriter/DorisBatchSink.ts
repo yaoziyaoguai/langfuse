@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  AnalyticsPersistenceError,
   assertAnalyticsBatchBoundary,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
@@ -14,6 +15,14 @@ import type {
   DorisStreamLoadReconciliation,
   DorisStreamLoadResult,
 } from "@langfuse/shared/src/server";
+import {
+  recordDistribution,
+  recordIncrement,
+} from "@langfuse/shared/src/server";
+
+const MAX_BATCH_BYTES = 100 * 1024 * 1024;
+const MAX_INFLIGHT_LOADS = 4;
+const GLOBAL_BUFFERED_BYTE_CAP = 512 * 1024 * 1024;
 
 const TABLE_BY_KIND = {
   event: "events_current",
@@ -54,6 +63,119 @@ export interface DorisStreamLoadTransport {
     readonly label: string;
   }): Promise<DorisStreamLoadReconciliation>;
 }
+
+type AdmissionTask<T> = {
+  readonly bytes: number;
+  readonly task: () => Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (error: unknown) => void;
+};
+
+export class AnalyticsLoadAdmissionController {
+  private bufferedBytes = 0;
+  private inflightLoads = 0;
+  private readonly waiting: AdmissionTask<unknown>[] = [];
+
+  constructor(
+    private readonly limits: {
+      readonly maxBatchBytes: number;
+      readonly maxInflightLoads: number;
+      readonly globalBufferedByteCap: number;
+    } = {
+      maxBatchBytes: MAX_BATCH_BYTES,
+      maxInflightLoads: MAX_INFLIGHT_LOADS,
+      globalBufferedByteCap: GLOBAL_BUFFERED_BYTE_CAP,
+    },
+  ) {
+    if (
+      !Number.isSafeInteger(limits.maxBatchBytes) ||
+      limits.maxBatchBytes <= 0 ||
+      !Number.isSafeInteger(limits.maxInflightLoads) ||
+      limits.maxInflightLoads <= 0 ||
+      !Number.isSafeInteger(limits.globalBufferedByteCap) ||
+      limits.globalBufferedByteCap < limits.maxBatchBytes
+    ) {
+      throw new TypeError("Invalid analytics load admission limits");
+    }
+  }
+
+  run<T>(bytes: number, task: () => Promise<T>): Promise<T> {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+      return Promise.reject(
+        new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false, {
+          tags: { phase: "load_admission" },
+        }),
+      );
+    }
+    if (bytes > this.limits.maxBatchBytes) {
+      recordIncrement("langfuse.analytics.ingestion.admission", 1, {
+        status: "batch_too_large",
+      });
+      return Promise.reject(
+        new AnalyticsPersistenceError("ANALYTICS_RESOURCE_EXHAUSTED", false, {
+          tags: {
+            phase: "load_admission",
+            reasonCode: "BATCH_BYTES_EXCEEDED",
+          },
+        }),
+      );
+    }
+    if (this.bufferedBytes + bytes > this.limits.globalBufferedByteCap) {
+      recordIncrement("langfuse.analytics.ingestion.admission", 1, {
+        status: "buffer_full",
+      });
+      return Promise.reject(
+        new AnalyticsPersistenceError("ANALYTICS_RESOURCE_EXHAUSTED", true, {
+          tags: {
+            phase: "load_admission",
+            reasonCode: "GLOBAL_BUFFER_FULL",
+          },
+        }),
+      );
+    }
+
+    this.bufferedBytes += bytes;
+    recordDistribution("langfuse.analytics.ingestion.buffered_bytes", bytes);
+    return new Promise<T>((resolve, reject) => {
+      this.waiting.push({
+        bytes,
+        task,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
+      this.drain();
+    });
+  }
+
+  snapshot() {
+    return {
+      bufferedBytes: this.bufferedBytes,
+      inflightLoads: this.inflightLoads,
+      waitingLoads: this.waiting.length,
+    };
+  }
+
+  private drain(): void {
+    while (
+      this.inflightLoads < this.limits.maxInflightLoads &&
+      this.waiting.length > 0
+    ) {
+      const admitted = this.waiting.shift()!;
+      this.inflightLoads += 1;
+      Promise.resolve()
+        .then(admitted.task)
+        .then(admitted.resolve, admitted.reject)
+        .finally(() => {
+          this.inflightLoads -= 1;
+          this.bufferedBytes -= admitted.bytes;
+          this.drain();
+        })
+        .catch(admitted.reject);
+    }
+  }
+}
+
+const defaultAdmissionController = new AnalyticsLoadAdmissionController();
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -365,18 +487,22 @@ export class DorisBatchSink {
   constructor(
     private readonly transport: DorisStreamLoadTransport,
     private readonly database?: string,
+    private readonly admissionController = defaultAdmissionController,
   ) {}
 
-  load(
+  async load(
     batch: PreparedDorisLoadBatch,
     label: string,
   ): Promise<DorisStreamLoadResult> {
-    return this.transport.load({
-      database: this.database,
-      table: batch.targetTable,
-      label,
-      ndjsonBody: batch.ndjsonBody,
-    });
+    const bytes = Buffer.byteLength(batch.ndjsonBody, "utf8");
+    return this.admissionController.run(bytes, () =>
+      this.transport.load({
+        database: this.database,
+        table: batch.targetTable,
+        label,
+        ndjsonBody: batch.ndjsonBody,
+      }),
+    );
   }
 
   reconcile(label: string): Promise<DorisStreamLoadReconciliation> {

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   acceptAnalyticsIngestion,
+  assertRawAnalyticsBodySize,
   encodeRawAnalyticsIngestionEnvelope,
 } from "./acceptAnalyticsIngestion";
 
@@ -134,5 +135,14 @@ describe("acceptAnalyticsIngestion", () => {
       }),
     ).rejects.toMatchObject({ code: "ANALYTICS_VALIDATION_ERROR" });
     expect(uploadFileIfAbsent).not.toHaveBeenCalled();
+  });
+
+  it("rejects a raw body above the frozen per-operation byte limit", () => {
+    expect(() => assertRawAnalyticsBodySize("1234", 3)).toThrow(
+      expect.objectContaining({
+        code: "ANALYTICS_RESOURCE_EXHAUSTED",
+        retryable: false,
+      }),
+    );
   });
 });

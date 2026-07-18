@@ -8,6 +8,7 @@ import type { StorageService } from "../services/StorageService";
 import { AnalyticsPersistenceError } from "./errors";
 
 const RAW_FORMAT_VERSION = 1;
+export const MAX_RAW_ANALYTICS_BYTES = 100 * 1024 * 1024;
 const REPLAY_HORIZON_MS = 7 * 24 * 60 * 60 * 1_000;
 const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -110,6 +111,23 @@ function sha256(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
 }
 
+export function assertRawAnalyticsBodySize(
+  body: string,
+  maxBytes = MAX_RAW_ANALYTICS_BYTES,
+): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new TypeError("Invalid raw analytics byte limit");
+  }
+  if (Buffer.byteLength(body, "utf8") > maxBytes) {
+    throw new AnalyticsPersistenceError("ANALYTICS_RESOURCE_EXHAUSTED", false, {
+      tags: {
+        phase: "raw_acceptance",
+        reasonCode: "RAW_BYTES_EXCEEDED",
+      },
+    });
+  }
+}
+
 function normalizePrefix(prefix: string): string {
   const normalized = prefix.replace(/^\/+/, "");
   return normalized && !normalized.endsWith("/")
@@ -148,6 +166,7 @@ export async function acceptAnalyticsIngestion(input: {
   }
 
   const body = encodeRawAnalyticsIngestionEnvelope(input.envelope);
+  assertRawAnalyticsBodySize(body);
   const sourceChecksum = sha256(body);
   const rawObjectKey = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/${safeBlobKeySegment(input.projectId)}/${safeBlobKeySegment(operationId)}.json`;
   const uploadResult = await input.storageService.uploadFileIfAbsent({

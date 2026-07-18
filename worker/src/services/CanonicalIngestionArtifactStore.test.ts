@@ -165,4 +165,17 @@ describe("CanonicalIngestionArtifactStore", () => {
       "Canonical artifact checksum is invalid",
     );
   });
+
+  it("rejects a canonical artifact above the frozen batch byte limit", async () => {
+    const store = new CanonicalIngestionArtifactStore(
+      new MemoryConditionalObjectStore(),
+      1,
+    );
+    await expect(
+      store.putIfAbsent("canonical/oversized.json", batch([score("score-a")])),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_RESOURCE_EXHAUSTED",
+      retryable: false,
+    });
+  });
 });
