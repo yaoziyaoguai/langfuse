@@ -35,6 +35,7 @@ import { useCommandMenu } from "@/src/features/command-k-menu/CommandMenuProvide
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { CloudStatusMenu } from "@/src/features/cloud-status-notification/components/CloudStatusMenu";
 import { type ProductModule } from "@/src/ee/features/ui-customization/productModuleSchema";
+import { type CommunityCapability } from "@/src/features/capabilities/communityAvailability";
 
 export enum RouteSection {
   Main = "main",
@@ -61,6 +62,7 @@ export type Route = {
   newTab?: boolean; // open in new tab
   entitlements?: Entitlement[]; // entitlements required, array treated as OR
   productModule?: ProductModule; // Product module this route belongs to. Used to show/hide modules via ui customization.
+  communityCapability?: CommunityCapability;
   show?: (p: {
     organization:
       | NonNullable<Session["user"]>["organizations"][number]
@@ -134,6 +136,7 @@ export const ROUTES: Route[] = [
     title: "Monitors",
     pathname: "/project/[projectId]/monitors",
     icon: BellRing,
+    communityCapability: "monitors",
     projectRbacScopes: ["monitors:read"],
     show: ({ v4WriteMode }) => Boolean(v4WriteMode) && v4WriteMode !== "legacy",
     group: RouteGroup.Observability,
@@ -166,6 +169,7 @@ export const ROUTES: Route[] = [
   {
     title: "Evaluators",
     icon: Lightbulb,
+    communityCapability: "evaluations",
     productModule: "evaluation",
     projectRbacScopes: ["evalJob:read"],
     group: RouteGroup.Evaluation,
@@ -193,6 +197,7 @@ export const ROUTES: Route[] = [
     title: "Experiments",
     pathname: `/project/[projectId]/experiments`,
     icon: Beaker,
+    communityCapability: "experiments",
     featureFlag: "experimentsV4Enabled",
     group: RouteGroup.Evaluation,
     section: RouteSection.Main,

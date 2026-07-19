@@ -12,10 +12,5 @@ export const getDatasetTabs = (projectId: string, datasetId: string) => {
       label: "Items",
       href: `/project/${projectId}/datasets/${encodeURIComponent(datasetId)}/items`,
     },
-    {
-      value: DATASET_TABS.EXPERIMENTS,
-      label: "Experiments",
-      href: `/project/${projectId}/datasets/${encodeURIComponent(datasetId)}/experiments`,
-    },
   ];
 };

@@ -7,7 +7,11 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { ZodError } from "zod";
-import { isUserInputError, isApiServerError } from "./errors";
+import {
+  isUserInputError,
+  isApiServerError,
+  isUnsupportedFeatureError,
+} from "./errors";
 import {
   BaseError,
   UnauthorizedError,
@@ -25,6 +29,9 @@ import { logger } from "@langfuse/shared/src/server";
  * @returns Formatted McpError
  */
 export function formatErrorForUser(error: unknown): McpError {
+  if (isUnsupportedFeatureError(error)) {
+    return new McpError(ErrorCode.InvalidRequest, JSON.stringify(error.body));
+  }
   // Log server errors for monitoring (sanitized to avoid PII exposure)
   if (isApiServerError(error)) {
     logger.error("MCP API Server Error", {

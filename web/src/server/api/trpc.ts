@@ -97,6 +97,10 @@ import { env } from "@/src/env.mjs";
 import { isBaseError, parseIO } from "@langfuse/shared";
 import { type Flag } from "@/src/features/feature-flags/types";
 import { resolveTraceAccess } from "@/src/features/traces/server/traceAccessPolicy";
+import {
+  capabilityForTrpcPath,
+  CommunityCapabilityUnavailableError,
+} from "@/src/features/capabilities/communityAvailability";
 
 setUpSuperjson();
 
@@ -235,8 +239,21 @@ const withOtelInstrumentation = t.middleware(async (opts) => {
   return opentelemetry.context.with(baggageCtx, () => opts.next());
 });
 
+const withCommunityCapabilityGate = t.middleware(({ path, next }) => {
+  const capability = capabilityForTrpcPath(path);
+  if (capability) {
+    const unavailable = new CommunityCapabilityUnavailableError(capability);
+    throw new TRPCError({
+      code: "NOT_IMPLEMENTED",
+      message: JSON.stringify(unavailable.body),
+    });
+  }
+  return next();
+});
+
 // otel setup
 const withOtelTracingProcedure = t.procedure
+  .use(withCommunityCapabilityGate)
   .use(withOtelInstrumentation)
   .use(tracing({ collectInput: true, collectResult: true }));
 

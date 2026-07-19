@@ -13,6 +13,12 @@
 import type { ToolDefinition, ToolHandler } from "../core/define-tool";
 import type { ServerContext } from "../types";
 import { logger } from "@langfuse/shared/src/server";
+import {
+  COMMUNITY_CAPABILITIES,
+  capabilityForMcpFeature,
+} from "@/src/features/capabilities/communityAvailability";
+import { UnsupportedFeatureError } from "../core/errors";
+import { wrapErrorHandling } from "../core/error-formatting";
 
 /**
  * Registered MCP tool
@@ -69,7 +75,7 @@ export interface McpFeatureModule {
  * Manages registration and lookup of MCP tools across all features.
  * Singleton pattern ensures consistent state across application.
  */
-class ToolRegistry {
+export class ToolRegistry {
   private features = new Map<string, McpFeatureModule>();
   private tools = new Map<string, RegisteredTool>();
 
@@ -118,6 +124,10 @@ class ToolRegistry {
     const definitions: ToolDefinition[] = [];
 
     for (const feature of this.features.values()) {
+      if (capabilityForMcpFeature(feature.name)) {
+        for (const tool of feature.tools) definitions.push(tool.definition);
+        continue;
+      }
       // Check if feature is enabled for this context
       if (feature.isEnabled && !(await feature.isEnabled(context))) {
         continue;
@@ -155,6 +165,16 @@ class ToolRegistry {
 
     const feature = this.getFeatureForTool(name);
     if (!feature) return undefined;
+
+    const capability = capabilityForMcpFeature(feature.name);
+    if (capability) {
+      return {
+        ...tool,
+        handler: wrapErrorHandling(async () => {
+          throw new UnsupportedFeatureError(COMMUNITY_CAPABILITIES[capability]);
+        }),
+      };
+    }
 
     if (feature.isEnabled && !(await feature.isEnabled(context))) {
       return undefined;

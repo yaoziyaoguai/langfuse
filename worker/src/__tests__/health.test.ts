@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  analyticsBackend: "doris" as "clickhouse" | "doris",
   checkAnalyticsReadiness: vi.fn(),
   ping: vi.fn().mockResolvedValue("PONG"),
   queryRaw: vi.fn().mockResolvedValue([{ one: 1 }]),
@@ -9,13 +8,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../env", () => ({
   env: {
-    get LANGFUSE_ANALYTICS_BACKEND() {
-      return mocks.analyticsBackend;
-    },
     NODE_ENV: "test",
-    QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED: "false",
-    LANGFUSE_MIGRATION_V4_WRITE_MODE: "events",
-    LANGFUSE_EVENT_PROPAGATION_STUCK_THRESHOLD_MINUTES: 15,
   },
 }));
 vi.mock("@langfuse/shared/src/db", () => ({
@@ -33,11 +26,6 @@ vi.mock("@langfuse/shared/src/server", () => ({
   SUPPORTED_DORIS_CANONICALIZER_VERSIONS: ["1"],
   SUPPORTED_DORIS_SCHEMA_VERSIONS: [2],
 }));
-vi.mock("../features/eventPropagation/handleEventPropagationJob", () => ({
-  getLastProcessedPartition: vi.fn().mockResolvedValue(null),
-  getLastRunStartedAt: vi.fn().mockResolvedValue(null),
-}));
-
 import { checkContainerHealth } from "../features/health";
 
 function response() {
@@ -52,7 +40,6 @@ function response() {
 
 describe("worker Doris readiness", () => {
   beforeEach(() => {
-    mocks.analyticsBackend = "doris";
     mocks.checkAnalyticsReadiness.mockReset();
   });
 

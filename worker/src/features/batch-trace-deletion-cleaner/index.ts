@@ -1,14 +1,11 @@
 import { prisma } from "@langfuse/shared/src/db";
 import {
-  isDorisAnalyticsBackend,
   logger,
   recordIncrement,
   traceException,
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
 import { PeriodicExclusiveRunner } from "../../utils/PeriodicExclusiveRunner";
-import { processClickhouseTraceDelete } from "../traces/processClickhouseTraceDelete";
-import { processPostgresTraceDelete } from "../traces/processPostgresTraceDelete";
 import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
 
 const METRIC_PREFIX = "langfuse.batch_trace_deletion_cleaner";
@@ -21,7 +18,7 @@ interface ProjectWorkload {
   pendingCount: number;
 }
 
-type TraceDeletionBackend = "postgres" | "clickhouse" | "doris";
+type TraceDeletionBackend = "doris";
 type TraceDeletionFailure = {
   backend: TraceDeletionBackend;
   errorName: string;
@@ -167,26 +164,15 @@ export class BatchTraceDeletionCleaner extends PeriodicExclusiveRunner {
     const deletionTasks: Array<{
       backend: TraceDeletionBackend;
       promise: Promise<void>;
-    }> = isDorisAnalyticsBackend()
-      ? [
-          {
-            backend: "doris",
-            promise: processAnalyticsTraceDeletionBatch({
-              projectId,
-              traceIds: traceIdsToDelete,
-            }),
-          },
-        ]
-      : [
-          {
-            backend: "postgres",
-            promise: processPostgresTraceDelete(projectId, traceIdsToDelete),
-          },
-          {
-            backend: "clickhouse",
-            promise: processClickhouseTraceDelete(projectId, traceIdsToDelete),
-          },
-        ];
+    }> = [
+      {
+        backend: "doris",
+        promise: processAnalyticsTraceDeletionBatch({
+          projectId,
+          traceIds: traceIdsToDelete,
+        }),
+      },
+    ];
     const settled = await Promise.allSettled(
       deletionTasks.map(({ promise }) => promise),
     );

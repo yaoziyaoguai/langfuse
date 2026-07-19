@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { InvalidRequestError } from "@langfuse/shared";
 import { logger } from "@langfuse/shared/src/server";
 import { formatErrorForUser } from "./error-formatting";
+import { UnsupportedFeatureError } from "./errors";
 
 vi.mock("@langfuse/shared/src/server", () => ({
   logger: {
@@ -12,6 +13,26 @@ vi.mock("@langfuse/shared/src/server", () => ({
 }));
 
 describe("MCP error formatting", () => {
+  it("preserves the sanitized structured unsupported-feature contract", () => {
+    const error = formatErrorForUser(
+      new UnsupportedFeatureError({
+        error: "UnsupportedFeature",
+        code: "R1B_EVALUATIONS_UNAVAILABLE",
+        message: "Evaluator execution is unavailable.",
+        recovery: "Complete the R1B adoption gate.",
+      }),
+    );
+
+    expect(JSON.parse(error.message.slice(error.message.indexOf("{")))).toEqual(
+      {
+        error: "UnsupportedFeature",
+        code: "R1B_EVALUATIONS_UNAVAILABLE",
+        message: "Evaluator execution is unavailable.",
+        recovery: "Complete the R1B adoption gate.",
+      },
+    );
+  });
+
   it("preserves structured Doris time-range validation metadata", () => {
     const validationError = Object.assign(
       new InvalidRequestError(

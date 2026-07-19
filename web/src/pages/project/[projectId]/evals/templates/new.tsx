@@ -1,1 +1,1 @@
-export { default as default } from "@/src/features/evals/pages/new-template";
+export { EvaluationsUnavailablePage as default } from "@/src/components/UnavailableFeaturePage";

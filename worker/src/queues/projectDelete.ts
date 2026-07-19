@@ -1,26 +1,12 @@
 import { Job, Processor } from "bullmq";
 import {
-  deleteEventsByProjectId,
-  deleteMediaLinkRowsByProjectId,
-  deleteMediaFiles,
-  deleteObservationsByProjectId,
-  deleteScoresByProjectId,
-  deleteTracesByProjectId,
-  deleteDatasetRunItemsByProjectId,
-  findAllMediaByProjectId,
   getCurrentSpan,
-  getS3MediaStorageClient,
   findLatestProjectDeletionOperation,
   logger,
-  isDorisAnalyticsBackend,
   QueueName,
-  removeIngestionEventsFromS3AndDeleteClickhouseRefsForProject,
   TQueueJobTypes,
   scheduleProjectDeletionOperation,
 } from "@langfuse/shared/src/server";
-import { prisma } from "@langfuse/shared/src/db";
-import { Prisma } from "@prisma/client";
-import { env, v4WritesToEventsTable } from "../env";
 import { processAnalyticsProjectDelete } from "../features/projects/processAnalyticsProjectDelete";
 
 export const projectDeleteProcessor: Processor = async (
@@ -43,112 +29,30 @@ export const projectDeleteProcessor: Processor = async (
 
   logger.info(`Deleting ${projectId} in org ${orgId}`);
 
-  if (isDorisAnalyticsBackend()) {
-    const operation =
-      job.data.payload.deletionOperationId &&
-      job.data.payload.deletionGeneration
-        ? {
-            id: job.data.payload.deletionOperationId,
-            generation: BigInt(job.data.payload.deletionGeneration),
-          }
-        : ((await findLatestProjectDeletionOperation({
-            projectId,
-            organizationId: orgId,
-          })) ??
-          (await scheduleProjectDeletionOperation({
-            projectId,
-            organizationId: orgId,
-            requester: {
-              principalType: "system",
-              principalId: "analytics-project-deletion-worker",
-            },
-          })));
-    await processAnalyticsProjectDelete({
-      projectId,
-      organizationId: orgId,
-      reference: {
-        operationId: operation.id,
-        generation: operation.generation,
-      },
-    });
-    return;
-  }
-
-  await deleteMediaLinkRowsByProjectId({ projectId });
-
-  // Delete media data from S3 and PG for project
-  if (env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET) {
-    logger.info(`Deleting media for ${projectId} in org ${orgId}`);
-    const mediaFilesToDelete = await findAllMediaByProjectId({ projectId });
-    await deleteMediaFiles({
-      projectId,
-      mediaFiles: mediaFilesToDelete,
-      storageClient: getS3MediaStorageClient(
-        env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET,
-      ),
-    });
-  }
-
-  logger.info(
-    `Deleting ClickHouse and S3 data for ${projectId} in org ${orgId}`,
-  );
-
-  // Delete project data from ClickHouse first
-  await Promise.all([
-    env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true"
-      ? removeIngestionEventsFromS3AndDeleteClickhouseRefsForProject(
+  const operation =
+    job.data.payload.deletionOperationId && job.data.payload.deletionGeneration
+      ? {
+          id: job.data.payload.deletionOperationId,
+          generation: BigInt(job.data.payload.deletionGeneration),
+        }
+      : ((await findLatestProjectDeletionOperation({
           projectId,
-          undefined,
-        )
-      : Promise.resolve(),
-    deleteTracesByProjectId(projectId),
-    deleteObservationsByProjectId(projectId),
-    deleteScoresByProjectId(projectId),
-    v4WritesToEventsTable(env)
-      ? deleteEventsByProjectId(projectId)
-      : Promise.resolve(),
-  ]);
-
-  // Trigger async delete of dataset run items
-  await deleteDatasetRunItemsByProjectId(projectId);
-
-  logger.info(`Deleting PG data for project ${projectId} in org ${orgId}`);
-
-  // Finally, delete the project itself which should delete all related
-  // resources due to the referential actions defined via Prisma
-  try {
-    const existingProject = await prisma.project.findUnique({
-      where: {
-        id: projectId,
-        orgId,
-      },
-    });
-    if (!existingProject) {
-      logger.info(
-        `Tried to delete project ${projectId} from PG, but it does not exist anymore.`,
-      );
-      return;
-    }
-    await prisma.project.delete({
-      where: {
-        id: projectId,
-        orgId,
-      },
-    });
-  } catch (e) {
-    logger.error(`Error deleting project ${projectId} in org ${orgId}: ${e}`, {
-      stack: e instanceof Error ? e.stack : undefined,
-    });
-    if (e instanceof Prisma.PrismaClientKnownRequestError) {
-      if (e.code === "P2025" || e.code === "P2016") {
-        logger.warn(
-          `Tried to delete project ${projectId} in org ${orgId}, but it does not exist`,
-        );
-        return;
-      }
-    }
-    throw e;
-  }
-
-  logger.info(`Deleted ${projectId} in org ${orgId}`);
+          organizationId: orgId,
+        })) ??
+        (await scheduleProjectDeletionOperation({
+          projectId,
+          organizationId: orgId,
+          requester: {
+            principalType: "system",
+            principalId: "analytics-project-deletion-worker",
+          },
+        })));
+  await processAnalyticsProjectDelete({
+    projectId,
+    organizationId: orgId,
+    reference: {
+      operationId: operation.id,
+      generation: operation.generation,
+    },
+  });
 };

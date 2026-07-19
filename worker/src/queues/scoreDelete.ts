@@ -5,7 +5,7 @@ import {
   TQueueJobTypes,
 } from "@langfuse/shared/src/server";
 
-import { processClickhouseScoreDelete } from "../features/scores/processClickhouseScoreDelete";
+import { processAnalyticsScoreDelete } from "../features/scores/processAnalyticsScoreDelete";
 
 export const scoreDeleteProcessor: Processor = async (
   job: Job<TQueueJobTypes[QueueName.ScoreDelete]>,
@@ -16,5 +16,5 @@ export const scoreDeleteProcessor: Processor = async (
     return;
   }
 
-  await processClickhouseScoreDelete(projectId, scoreIds);
+  await processAnalyticsScoreDelete(projectId, scoreIds);
 };

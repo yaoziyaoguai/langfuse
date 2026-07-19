@@ -16,8 +16,7 @@ import {
   shouldSkipDeletionFor,
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
-import { processClickhouseTraceDelete } from "../traces/processClickhouseTraceDelete";
-import { processPostgresTraceDelete } from "../traces/processPostgresTraceDelete";
+import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
 
 type TraceDeleteCursorPageRow = TraceDeleteBatchActionCursor;
 type CanCommitProgress = () => Promise<boolean>;
@@ -416,16 +415,10 @@ export const processTraceDeleteBatchAction = async ({
         return { status: "failed", processedBatches };
       }
 
-      await Promise.all([
-        processPostgresTraceDelete(
-          batchAction.projectId,
-          inFlightBatch.traceIds,
-        ),
-        processClickhouseTraceDelete(
-          batchAction.projectId,
-          inFlightBatch.traceIds,
-        ),
-      ]);
+      await processAnalyticsTraceDeletionBatch({
+        projectId: batchAction.projectId,
+        traceIds: inFlightBatch.traceIds,
+      });
 
       await extendProcessingLease({ batchActionId, extendLease });
 

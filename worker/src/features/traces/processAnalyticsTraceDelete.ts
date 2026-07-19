@@ -18,7 +18,7 @@ import {
   getDorisAnalyticsLifecycleRuntime,
   type DorisAnalyticsLifecycleRuntime,
 } from "../../services/dorisAnalyticsLifecycle";
-import { deleteMediaItemsForTraces } from "./processClickhouseTraceDelete";
+import { deleteMediaItemsForTraces } from "./deleteTraceMedia";
 import { processPostgresTraceDelete } from "./processPostgresTraceDelete";
 
 export type TraceDeletionReference = {

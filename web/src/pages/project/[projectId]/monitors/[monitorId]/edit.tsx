@@ -1,1 +1,1 @@
-export { default } from "@/src/features/monitors/pages/EditMonitorPage";
+export { MonitorsUnavailablePage as default } from "@/src/components/UnavailableFeaturePage";

@@ -50,7 +50,8 @@ BEGIN
     'backfillEventsFullFromDatasetRunItems',
     'createRootSpansFromTraces',
     'rewriteObservationsToPidTidSorting',
-    'dropPidTidSortingTables'
+    'dropPidTidSortingTables',
+    'migrateEventLogToBlobStorageRefTable'
   )
     AND "locked_at" > CURRENT_TIMESTAMP - INTERVAL '60 seconds';
 
@@ -78,7 +79,8 @@ BEGIN
     'backfillEventsFullFromDatasetRunItems',
     'createRootSpansFromTraces',
     'rewriteObservationsToPidTidSorting',
-    'dropPidTidSortingTables'
+    'dropPidTidSortingTables',
+    'migrateEventLogToBlobStorageRefTable'
   );
 
   UPDATE "analytics_background_migration_retirement"

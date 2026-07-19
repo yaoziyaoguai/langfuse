@@ -60,65 +60,10 @@ const EnvSchema = z.object({
   LANGFUSE_S3_EVENT_KEY_MAX_SEGMENT_BYTES:
     langfuseS3EventKeyMaxSegmentBytesSchema,
 
-  BATCH_EXPORT_PAGE_SIZE: z.coerce.number().positive().default(500),
-  BATCH_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(1_500_000),
-  BATCH_EXPORT_DOWNLOAD_LINK_EXPIRATION_HOURS: z.coerce
-    .number()
-    .positive()
-    .default(24),
-  BATCH_EXPORT_S3_PART_SIZE_MIB: z.coerce.number().min(5).max(100).default(10),
-  BATCH_ACTION_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(50_000),
-  LANGFUSE_MAX_HISTORIC_EVAL_CREATION_LIMIT: z.coerce
-    .number()
-    .positive()
-    .default(50_000),
   EMAIL_FROM_ADDRESS: z.string().optional(),
   SMTP_CONNECTION_URL: z.string().optional(),
   CLOUD_CRM_EMAIL: z.string().optional(),
-  LANGFUSE_OTEL_INGESTION_QUEUE_PROCESSING_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-  LANGFUSE_OTEL_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(1),
-  LANGFUSE_SECONDARY_OTEL_INGESTION_QUEUE_ENABLED_PROJECT_IDS: z
-    .string()
-    .optional(),
-  LANGFUSE_INGESTION_QUEUE_PROCESSING_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(20),
-  LANGFUSE_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-  LANGFUSE_SECONDARY_INGESTION_QUEUE_ENABLED_PROJECT_IDS: z.string().optional(),
-  LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE: z.coerce
-    .number()
-    .positive()
-    .default(1000),
-  LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: z.coerce
-    .number()
-    .positive()
-    .default(1000),
-  LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: z.coerce
-    .number()
-    .positive()
-    .default(3),
-
   LANGFUSE_USE_AZURE_BLOB: z.enum(["true", "false"]).default("false"),
-
-  CLICKHOUSE_URL: z.url(),
-  CLICKHOUSE_USER: z.string(),
-  CLICKHOUSE_CLUSTER_NAME: z.string().default("default"),
-  CLICKHOUSE_DB: z.string().default("default"),
-  CLICKHOUSE_PASSWORD: z.string(),
-  CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
-  LANGFUSE_ANALYTICS_BACKEND: z
-    .enum(["clickhouse", "doris"])
-    .default("clickhouse"),
   // Doris credentials are injected per workload. Web never receives load auth.
   DORIS_QUERY_URL: z.string().optional(),
   DORIS_QUERY_USER: z.string().optional(),
@@ -185,14 +130,6 @@ const EnvSchema = z.object({
   LANGFUSE_MIXPANEL_FLUSH_DELAY_MS: z.coerce.number().min(0).default(100),
   LANGFUSE_DATASET_DELETE_CONCURRENCY: z.coerce.number().positive().default(1),
   LANGFUSE_PROJECT_DELETE_CONCURRENCY: z.coerce.number().positive().default(1),
-  LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-  LANGFUSE_LLM_AS_JUDGE_EXECUTION_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
   LANGFUSE_LLM_AS_JUDGE_QUEUE_RETRY_MAX_ATTEMPTS: z.coerce
     .number()
     .int()
@@ -203,31 +140,6 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(120 * 60),
-  LANGFUSE_CODE_EVAL_EXECUTION_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-  LANGFUSE_EVAL_EXECUTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-  LANGFUSE_SECONDARY_EVAL_EXECUTION_QUEUE_ENABLED_PROJECT_IDS: z
-    .string()
-    .optional(),
-  LANGFUSE_EXPERIMENT_CREATOR_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(5),
-
-  // Skip the read from ClickHouse within the Ingestion pipeline for the given
-  // project ids. Applicable for projects that were created after the S3 write
-  // was activated and which don't rely on historic updates.
-  LANGFUSE_SKIP_INGESTION_CLICKHOUSE_READ_PROJECT_IDS: z.string().default(""),
-  // Set a date after which S3 was active. Projects created after this date do
-  // perform a ClickHouse read as part of the ingestion pipeline.
-  LANGFUSE_SKIP_INGESTION_CLICKHOUSE_READ_MIN_PROJECT_CREATE_DATE: z.iso
-    .date()
-    .optional(),
 
   // Otel
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default("http://localhost:4318"),
@@ -245,24 +157,7 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("true"),
 
-  LANGFUSE_BLOB_STORAGE_FAILURE_NOTIFICATION_COOLDOWN_HOURS: z.coerce
-    .number()
-    .positive()
-    .default(24),
-
-  // Comma-separated list of project IDs that should only export traces table (skip observations and scores)
-  LANGFUSE_BLOB_STORAGE_EXPORT_TRACE_ONLY_PROJECT_IDS: z
-    .string()
-    .optional()
-    .transform((s) => (s ? s.split(",").map((id) => id.trim()) : [])),
-
-  LANGFUSE_MONITOR_SCHEDULER_ENABLED: z.enum(["true", "false"]).default("true"),
-  LANGFUSE_MONITOR_SCHEDULERS: z.coerce.number().int().min(1).default(1),
-
   // Flags to toggle queue consumers on or off.
-  QUEUE_CONSUMER_MONITOR_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
@@ -270,30 +165,6 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_FREE_TIER_USAGE_THRESHOLD_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_EVAL_EXECUTION_SECONDARY_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_CODE_EVAL_EXECUTION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED: z
@@ -308,31 +179,10 @@ const EnvSchema = z.object({
   QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
-  QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
   QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_OTEL_INGESTION_SECONDARY_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
-  QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED: z
@@ -344,21 +194,10 @@ const EnvSchema = z.object({
   QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
-  QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("true"),
   QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
 
-  LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
-    .number()
-    .positive()
-    .default(10),
-  LANGFUSE_DATASET_RUN_BACKFILL_CHUNK_SIZE: z.coerce
-    .number()
-    .positive()
-    .default(100),
   LANGFUSE_EXPERIMENT_BACKFILL_THROTTLE_MS: z.coerce
     .number()
     .positive()
@@ -406,10 +245,6 @@ const EnvSchema = z.object({
   LANGFUSE_S3_MEDIA_UPLOAD_SSE_KMS_KEY_ID: z.string().optional(),
 
   // Metering data Postgres export - Langfuse Cloud
-  LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED: z
-    .enum(["true", "false"])
-    .default("false"),
-
   // When disabled: Usage is still tracked in DB but no emails are sent and no orgs are blocked
   // When enabled: Full enforcement (emails + blocking)
   LANGFUSE_FREE_TIER_USAGE_THRESHOLD_ENFORCEMENT_ENABLED: z
@@ -417,15 +252,15 @@ const EnvSchema = z.object({
     .default("false"),
 
   LANGFUSE_S3_CONCURRENT_READS: z.coerce.number().positive().default(50),
-  LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS: z.coerce
+  LANGFUSE_ANALYTICS_PROJECT_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .positive()
     .default(600_000), // 10 minutes
-  LANGFUSE_CLICKHOUSE_TRACE_DELETION_CONCURRENCY_DURATION_MS: z.coerce
+  LANGFUSE_ANALYTICS_TRACE_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .positive()
     .default(120_000), // 2 minutes
-  LANGFUSE_CLICKHOUSE_DATASET_DELETION_CONCURRENCY_DURATION_MS: z.coerce
+  LANGFUSE_ANALYTICS_DATASET_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .positive()
     .default(120_000), // 2 minutes
@@ -457,47 +292,14 @@ const EnvSchema = z.object({
     .positive()
     .default(5000), // Media items per chunk
 
-  // Batch Data Retention Cleaner configuration (ClickHouse)
+  // Media retention cleaner scheduling.
   LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED: z
     .enum(["true", "false"])
     .default("false"),
-  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_INTERVAL_MS: z.coerce
-    .number()
-    .positive()
-    .default(3_600_000), // 1 hour between runs
   LANGFUSE_MEDIA_RETENTION_CLEANER_INTERVAL_MS: z.coerce
     .number()
     .positive()
     .default(600_000), // 10 minutes between runs
-  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_PROJECT_LIMIT: z.coerce
-    .number()
-    .positive()
-    .default(100), // Max projects per batch DELETE
-  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_CHUNK_SIZE: z.coerce
-    .number()
-    .positive()
-    .default(100), // Chunk size for counting projects in ClickHouse
-  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_DELETE_TIMEOUT_MS: z.coerce
-    .number()
-    .positive()
-    .default(3_600_000), // 1 hour for DELETE operations
-
-  // ClickHouse deleted-mask cleaner configuration
-  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_ENABLED: z
-    .enum(["true", "false"])
-    .default("false"),
-  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_INTERVAL_MS: z.coerce
-    .number()
-    .positive()
-    .default(3_600_000), // 1 hour between runs
-  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_SUBMIT_TIMEOUT_MS: z.coerce
-    .number()
-    .positive()
-    .default(60_000), // Wait up to 1 minute for ALTER submission; mutation can run for hours
-  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_CLUSTER_MODE_ENABLED: z
-    .enum(["true", "false"])
-    .default("false"), // Use ON CLUSTER and clusterAllReplicas for cleaner operations
-
   // Media Retention Cleaner configuration (S3/PostgreSQL)
   LANGFUSE_MEDIA_RETENTION_CLEANER_ITEM_LIMIT: z.coerce
     .number()

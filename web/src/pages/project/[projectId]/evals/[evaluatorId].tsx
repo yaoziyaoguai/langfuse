@@ -1,3 +1,1 @@
-import { EvaluatorDetail } from "@/src/features/evals/components/evaluator-detail";
-
-export default EvaluatorDetail;
+export { EvaluationsUnavailablePage as default } from "@/src/components/UnavailableFeaturePage";

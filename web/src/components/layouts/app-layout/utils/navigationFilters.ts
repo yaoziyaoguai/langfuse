@@ -8,6 +8,7 @@ import type { NavigationFilterContext } from "./navigationFilters.types";
 import { hasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { hasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 import type { Session } from "next-auth";
+import { isCommunityCapabilityAvailable } from "@/src/features/capabilities/communityAvailability";
 
 /** Organization type from user session (can be null when not in project/org context) */
 type Organization =
@@ -20,6 +21,15 @@ type Organization =
  * Exported for testing and composition
  */
 export const filters = {
+  communityCapability: (
+    route: Route,
+    _ctx: NavigationFilterContext,
+  ): Route | null =>
+    route.communityCapability &&
+    !isCommunityCapabilityAvailable(route.communityCapability)
+      ? null
+      : route,
+
   /**
    * Filter routes that require a project ID when none is available
    */
@@ -189,6 +199,7 @@ function applyFiltersToRoute(
 ): Route | null {
   // Apply filters in sequence - chain short-circuits on first null
   const filterChain = [
+    filters.communityCapability,
     filters.projectScope,
     filters.organizationScope,
     filters.uiCustomization,

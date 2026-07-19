@@ -1,7 +1,6 @@
 import type { NextApiResponse } from "next";
 import { v4 } from "uuid";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { addDatasetRunItemsToEvalQueue } from "@/src/features/evals/server/addDatasetRunItemsToEvalQueue";
 import { createOrFetchDatasetRun } from "@/src/features/public-api/server/dataset-runs";
 import {
   generateDatasetRunItemsForPublicApi,
@@ -855,14 +854,6 @@ export const createDatasetRunItemForApi = async ({
       after: datasetRunItem,
     });
   }
-
-  await addDatasetRunItemsToEvalQueue({
-    projectId,
-    datasetItemId: datasetItem.id,
-    datasetItemValidFrom: datasetItem.validFrom,
-    traceId: finalTraceId,
-    observationId: observationId ?? undefined,
-  });
 
   return PostDatasetRunItemsV1Response.parse(datasetRunItem);
 };

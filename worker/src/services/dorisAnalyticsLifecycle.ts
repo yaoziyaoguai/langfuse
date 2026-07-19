@@ -6,7 +6,6 @@ import {
   DorisStreamLoadClient,
   getDeletionProgressForProject,
   getDorisQueryExecutor,
-  isDorisAnalyticsBackend,
   parseDorisStreamLoadConfig,
   toEventIdentity,
   toFileReferenceIdentity,
@@ -254,9 +253,6 @@ export type DorisAnalyticsLifecycleRuntime = {
 let runtime: DorisAnalyticsLifecycleRuntime | undefined;
 
 export function getDorisAnalyticsLifecycleRuntime(): DorisAnalyticsLifecycleRuntime {
-  if (!isDorisAnalyticsBackend()) {
-    throw new Error("Doris analytics lifecycle is not active");
-  }
   if (runtime) return runtime;
   const streamLoad = lifecycleTransport();
   const executor = getDorisQueryExecutor();

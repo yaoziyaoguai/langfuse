@@ -1,7 +1,6 @@
 import { Job, Processor } from "bullmq";
 import {
   getCurrentSpan,
-  isDorisAnalyticsBackend,
   logger,
   QueueName,
   shouldSkipDeletionFor,
@@ -9,8 +8,6 @@ import {
 } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 
-import { processClickhouseTraceDelete } from "../features/traces/processClickhouseTraceDelete";
-import { processPostgresTraceDelete } from "../features/traces/processPostgresTraceDelete";
 import { processAnalyticsTraceDeletionBatch } from "../features/traces/processAnalyticsTraceDeletionBatch";
 import { env } from "../env";
 
@@ -97,18 +94,11 @@ export const traceDeleteProcessor: Processor = async (
       return;
     }
 
-    if (isDorisAnalyticsBackend()) {
-      await processAnalyticsTraceDeletionBatch({
-        projectId,
-        traceIds: traceIdsToDelete,
-        deletionOperations: job.data.payload.deletionOperations,
-      });
-    } else {
-      await Promise.all([
-        processPostgresTraceDelete(projectId, traceIdsToDelete),
-        processClickhouseTraceDelete(projectId, traceIdsToDelete),
-      ]);
-    }
+    await processAnalyticsTraceDeletionBatch({
+      projectId,
+      traceIds: traceIdsToDelete,
+      deletionOperations: job.data.payload.deletionOperations,
+    });
 
     // Mark only the pending traces as deleted (not the ones from the event, as they might be legacy)
     if (toBeDeletedTraces.length > 0) {

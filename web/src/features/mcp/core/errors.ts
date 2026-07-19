@@ -48,6 +48,13 @@ export class ApiServerError extends Error {
   }
 }
 
+export class UnsupportedFeatureError extends Error {
+  constructor(readonly body: Record<string, string>) {
+    super(body.message ?? "Feature unavailable");
+    this.name = "UnsupportedFeatureError";
+  }
+}
+
 /**
  * Type guard to check if an error is a UserInputError
  */
@@ -60,4 +67,10 @@ export function isUserInputError(error: unknown): error is UserInputError {
  */
 export function isApiServerError(error: unknown): error is ApiServerError {
   return error instanceof ApiServerError;
+}
+
+export function isUnsupportedFeatureError(
+  error: unknown,
+): error is UnsupportedFeatureError {
+  return error instanceof UnsupportedFeatureError;
 }

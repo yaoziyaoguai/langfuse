@@ -9,8 +9,6 @@ router.get<{}, { status: string }>("/health", async (req, res) => {
   try {
     await checkContainerHealth(res, {
       failOnSigterm: false,
-      failIfEventPropagationStuck:
-        req.query.failIfEventPropagationStuck === "true",
     });
   } catch (e) {
     traceException(e);
@@ -25,8 +23,6 @@ router.get<{}, { status: string }>("/ready", async (req, res) => {
   try {
     await checkContainerHealth(res, {
       failOnSigterm: true,
-      failIfEventPropagationStuck:
-        req.query.failIfEventPropagationStuck === "true",
     });
   } catch (e) {
     traceException(e);
