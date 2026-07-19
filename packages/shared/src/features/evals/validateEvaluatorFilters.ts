@@ -10,11 +10,25 @@ import {
   experimentEvalFilterColumns,
   observationEvalFilterColumns,
 } from "./observationForEval";
-import { COMPATIBLE_FILTER_TYPES } from "../../server/queries/clickhouse-sql/filterTypeCompatibility";
 import {
   EvalTargetObject,
   type EvalTargetObject as EvalTargetObjectType,
 } from "./types";
+
+const COMPATIBLE_FILTER_TYPES: Partial<
+  Record<ColumnDefinition["type"], readonly FilterCondition["type"][]>
+> = {
+  string: ["string", "stringOptions"],
+  stringOptions: ["string", "stringOptions"],
+  arrayOptions: ["arrayOptions", "stringOptions"],
+  datetime: ["datetime"],
+  number: ["number"],
+  boolean: ["boolean"],
+  stringObject: ["stringObject"],
+  numberObject: ["numberObject"],
+  booleanObject: ["booleanObject"],
+  categoryOptions: ["categoryOptions", "stringOptions"],
+};
 
 export type EvaluatorFilterValidationIssueCode =
   | "invalid_filter_shape"

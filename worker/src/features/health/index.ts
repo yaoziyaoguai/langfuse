@@ -1,17 +1,8 @@
 import { prisma } from "@langfuse/shared/src/db";
-import {
-  checkAnalyticsReadiness,
-  DorisClientManager,
-  logger,
-  parseDorisQueryConfig,
-  PrismaAnalyticsCompatibilityControlState,
-  redis,
-  SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
-  SUPPORTED_DORIS_SCHEMA_VERSIONS,
-} from "@langfuse/shared/src/server";
+import { logger, redis } from "@langfuse/shared/src/server";
 import { Response } from "express";
 
-import { env } from "../../env";
+import { probeDorisAnalyticsReadiness } from "../../services/dorisAnalyticsReadiness";
 
 type ContainerHealthOptions = {
   /** Fail (500) once a SIGTERM/SIGINT has been received (readiness only). */
@@ -54,15 +45,7 @@ export const checkContainerHealth = async (
   ]);
 
   if (failOnSigterm) {
-    const client = DorisClientManager.getInstance().getClient(
-      parseDorisQueryConfig(process.env, env.NODE_ENV),
-    );
-    const analytics = await checkAnalyticsReadiness({
-      executor: client,
-      controlState: new PrismaAnalyticsCompatibilityControlState(prisma),
-      supportedCanonicalizerVersions: SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
-      supportedSchemaVersions: SUPPORTED_DORIS_SCHEMA_VERSIONS,
-    });
+    const analytics = await probeDorisAnalyticsReadiness();
     if (!analytics.ready) {
       return res.status(503).json({
         status: "Analytics readiness check failed",

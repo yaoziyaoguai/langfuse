@@ -1,6 +1,6 @@
 import {
   createEvent,
-  createEventsCh,
+  createEventsDoris,
   getObservationsForTraceFromEventsTable,
   getObservationsWithModelDataFromEventsTable,
   getObservationsCountFromEventsTable,
@@ -8,14 +8,12 @@ import {
   getObservationByIdFromEventsTable,
   getObservationsFromEventsTableForPublicApi,
   getObservationsCountFromEventsTableForPublicApi,
-  updateEvents,
-  getTraceByIdFromEventsTable,
   getObservationsBatchIOFromEventsTable,
   getLatestSdkVersionInfoFromEvents,
   getTracesIdentifierForSessionFromEvents,
   getEventsFilterOptionsForColumns,
   getEventsFilterOptionValuesPage,
-  createScoresCh,
+  createScoresDoris,
   createTraceScore,
   type EventFilterOptionColumn,
 } from "@langfuse/shared/src/server";
@@ -26,7 +24,6 @@ import {
 } from "@/src/features/events/server/eventsService";
 import { prisma } from "@langfuse/shared/src/db";
 import { randomUUID } from "crypto";
-import { env } from "@/src/env.mjs";
 import {
   type EventsTableFilterState,
   type FilterCondition,
@@ -35,10 +32,7 @@ import waitForExpect from "wait-for-expect";
 
 const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
 
-const maybe =
-  env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
-    ? describe
-    : describe.skip;
+const maybe = describe;
 
 function idFilter(id: string): FilterCondition {
   return {
@@ -66,7 +60,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const observationId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: observationId,
           span_id: observationId,
@@ -153,7 +147,7 @@ describe("Clickhouse Events Repository Test", () => {
         completion_start_time: nowMicro + 2000000, // +2 seconds
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Query observations
       const result = await getObservationsWithModelDataFromEventsTable({
@@ -200,7 +194,7 @@ describe("Clickhouse Events Repository Test", () => {
         provided_model_name: "unknown-model",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const result = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -234,7 +228,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       );
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result1 = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -258,7 +252,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const observationId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: observationId,
           span_id: observationId,
@@ -298,7 +292,7 @@ describe("Clickhouse Events Repository Test", () => {
         end_time: null,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const result = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -326,7 +320,7 @@ describe("Clickhouse Events Repository Test", () => {
         completion_start_time: null,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const result = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -360,7 +354,7 @@ describe("Clickhouse Events Repository Test", () => {
         >),
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const resultWithIO = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -401,7 +395,7 @@ describe("Clickhouse Events Repository Test", () => {
         model_parameters: "<not serializable object of type: dict>",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const result = await getObservationsWithModelDataFromEventsTable({
         projectId,
@@ -454,7 +448,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       );
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       // Use the unique project ID to isolate our test data (no filters needed)
       const observations = await getObservationsWithModelDataFromEventsTable({
@@ -503,7 +497,7 @@ describe("Clickhouse Events Repository Test", () => {
         ),
       );
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const counts = await getObservationsCountsFromEventsTable({
         projectId: uniqueProjectId,
@@ -519,7 +513,7 @@ describe("Clickhouse Events Repository Test", () => {
       const matchingTraceId = randomUUID();
       const otherTraceId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -578,7 +572,7 @@ describe("Clickhouse Events Repository Test", () => {
         name: "test-span",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Verify that search columns qualified with e.* prefix do not conflict
       // with the scores_agg LEFT JOIN when both are present.
@@ -606,7 +600,7 @@ describe("Clickhouse Events Repository Test", () => {
       const otherSpanId = randomUUID();
       const now = Date.now();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: matchingSpanId,
           span_id: matchingSpanId,
@@ -626,7 +620,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         }),
       ]);
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           project_id: uniqueProjectId,
           trace_id: traceId,
@@ -688,7 +682,7 @@ describe("Clickhouse Events Repository Test", () => {
       const otherSpanId = randomUUID();
       const now = Date.now();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: matchingSpanId,
           span_id: matchingSpanId,
@@ -708,7 +702,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         }),
       ]);
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           project_id: uniqueProjectId,
           trace_id: matchingTraceId,
@@ -776,7 +770,7 @@ describe("Clickhouse Events Repository Test", () => {
         name: "test-span",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Verify basic search with qualified e.* columns works without errors.
       const count = await getObservationsCountFromEventsTable({
@@ -797,7 +791,7 @@ describe("Clickhouse Events Repository Test", () => {
       const recentLevel = "WARNING";
       const oldLevel = "ERROR";
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -881,7 +875,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const now = Date.now();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -894,7 +888,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         }),
       ]);
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           project_id: uniqueProjectId,
           trace_id: traceId,
@@ -957,7 +951,7 @@ describe("Clickhouse Events Repository Test", () => {
       const spanId = randomUUID();
       const now = Date.now();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -968,7 +962,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         }),
       ]);
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           project_id: uniqueProjectId,
           trace_id: traceId,
@@ -1025,7 +1019,7 @@ describe("Clickhouse Events Repository Test", () => {
       const recentStart = now - 7 * dayMs;
       const oldStart = now - 45 * dayMs;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -1095,7 +1089,7 @@ describe("Clickhouse Events Repository Test", () => {
       const otherRootSpanId = randomUUID();
       const nowMicro = Date.now() * 1000;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: rootSpanId,
           span_id: rootSpanId,
@@ -1223,7 +1217,7 @@ describe("Clickhouse Events Repository Test", () => {
       const uniqueProjectId = randomUUID();
       const nowMicro = Date.now() * 1000;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -1311,7 +1305,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId: uniqueProjectId,
@@ -1368,7 +1362,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId: uniqueProjectId,
@@ -1428,7 +1422,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId: uniqueProjectId,
@@ -1488,7 +1482,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const filter: FilterCondition[] = [
           {
@@ -1559,7 +1553,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1614,7 +1608,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1675,7 +1669,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1739,7 +1733,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1792,7 +1786,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1859,7 +1853,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1932,7 +1926,7 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ];
 
-        await createEventsCh(events);
+        await createEventsDoris(events);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -1985,7 +1979,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         });
 
-        await createEventsCh([event]);
+        await createEventsDoris([event]);
 
         const result = await getObservationsWithModelDataFromEventsTable({
           projectId,
@@ -2020,7 +2014,7 @@ describe("Clickhouse Events Repository Test", () => {
           start_time: now * 1000,
         });
 
-        await createEventsCh([matchEvent]);
+        await createEventsDoris([matchEvent]);
 
         // Filter for foo = "bar" (first value) should match
         const resultBar = await getObservationsWithModelDataFromEventsTable({
@@ -2093,7 +2087,7 @@ describe("Clickhouse Events Repository Test", () => {
         const now = Date.now();
         const filterTime = new Date(now - 5000);
 
-        await createEventsCh([
+        await createEventsDoris([
           createEvent({
             id: observationId,
             span_id: observationId,
@@ -2147,7 +2141,7 @@ describe("Clickhouse Events Repository Test", () => {
         const now = Date.now();
         const filterTime = new Date(now - 5000);
 
-        await createEventsCh([
+        await createEventsDoris([
           createEvent({
             id: observationId,
             span_id: observationId,
@@ -2205,7 +2199,7 @@ describe("Clickhouse Events Repository Test", () => {
         const needle = `needle-${randomUUID()}`;
         const longValue = "x".repeat(220) + needle;
 
-        await createEventsCh([
+        await createEventsDoris([
           createEvent({
             id: observationId,
             span_id: observationId,
@@ -2266,7 +2260,7 @@ describe("Clickhouse Events Repository Test", () => {
         const token = `needletoken${randomUUID().replaceAll("-", "")}`;
         const longInput = "x".repeat(220) + " " + token;
 
-        await createEventsCh([
+        await createEventsDoris([
           createEvent({
             id: observationId,
             span_id: observationId,
@@ -2321,7 +2315,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const spanId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -2352,7 +2346,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const spanId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -2394,7 +2388,7 @@ describe("Clickhouse Events Repository Test", () => {
         end_time: nowMicro + 1000000,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const observation = await getObservationByIdFromEventsTable({
         id: generationId,
@@ -2426,7 +2420,7 @@ describe("Clickhouse Events Repository Test", () => {
         output: "Should not be returned",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const observation = await getObservationByIdFromEventsTable({
         id: spanId,
@@ -2459,7 +2453,7 @@ describe("Clickhouse Events Repository Test", () => {
         provided_model_name: "gpt-4",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const observation = await getObservationByIdFromEventsTable({
         id: generationId,
@@ -2499,7 +2493,7 @@ describe("Clickhouse Events Repository Test", () => {
         name: "test-span-trace-filter",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Should find with correct traceId
       const observation = await getObservationByIdFromEventsTable({
@@ -2534,7 +2528,7 @@ describe("Clickhouse Events Repository Test", () => {
         name: "test-type-filter",
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Should find with correct type
       const observation = await getObservationByIdFromEventsTable({
@@ -2584,7 +2578,7 @@ describe("Clickhouse Events Repository Test", () => {
         start_time: startTimeMicro,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Should find with correct startTime
       const observation = await getObservationByIdFromEventsTable({
@@ -2612,7 +2606,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const generationId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: generationId,
           span_id: generationId,
@@ -2660,7 +2654,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       );
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2715,7 +2709,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2752,7 +2746,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2791,7 +2785,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2842,7 +2836,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2897,7 +2891,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: uniqueProjectId,
@@ -2964,7 +2958,7 @@ describe("Clickhouse Events Repository Test", () => {
         provided_model_name: `test-model-${modelId}`,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       const result = await getObservationsFromEventsTableForPublicApi({
         projectId: projectId,
@@ -2993,7 +2987,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId3 = randomUUID();
       const nowMicro = Date.now() * 1000;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -3075,7 +3069,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const nowMicro = Date.now() * 1000;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: randomUUID(),
           span_id: randomUUID(),
@@ -3118,213 +3112,6 @@ describe("Clickhouse Events Repository Test", () => {
           }),
         ]);
       });
-    });
-  });
-
-  maybe("Update methods", () => {
-    it("should allow to set/unset bookmarked", async () => {
-      const traceId = randomUUID();
-      const traceId2 = randomUUID();
-      const rootSpanId = randomUUID();
-      const rootEvent = createEvent({
-        id: rootSpanId,
-        span_id: rootSpanId,
-        project_id: projectId,
-        trace_id: traceId,
-        type: "GENERATION",
-        name: "root-event",
-        bookmarked: false,
-        parent_span_id: "",
-      });
-      const rootEvent2 = createEvent({
-        id: randomUUID(),
-        span_id: randomUUID(),
-        project_id: projectId,
-        trace_id: traceId2,
-        type: "GENERATION",
-        name: "root-event2",
-        bookmarked: true,
-        parent_span_id: "",
-      });
-
-      const events = Array(3)
-        .keys()
-        .map((i) => {
-          const id = randomUUID();
-          return createEvent({
-            id: id,
-            span_id: id,
-            project_id: projectId,
-            trace_id: traceId,
-            type: "GENERATION",
-            name: "event-" + i,
-            bookmarked: false,
-            parent_span_id: rootSpanId,
-          });
-        });
-
-      await createEventsCh([rootEvent, rootEvent2, ...events]);
-
-      var result = await getTraceByIdFromEventsTable({ projectId, traceId });
-      expect(result).toBeDefined();
-      expect(result?.bookmarked).toBe(false);
-
-      async function checkTraceIdsBookmarked(
-        traceId: string,
-        bookmarkedExp: boolean,
-      ) {
-        await waitForExpect(async () => {
-          // Verify events_core
-          const eventTrace = await getTraceByIdFromEventsTable({
-            projectId,
-            traceId: traceId,
-            renderingProps: {
-              truncated: true,
-              shouldJsonParse: false,
-            },
-          });
-          expect(eventTrace).toBeDefined();
-          expect(eventTrace?.bookmarked).toBe(bookmarkedExp);
-
-          // Verify events_full
-          const eventTraceFull = await getTraceByIdFromEventsTable({
-            projectId,
-            traceId: traceId,
-            renderingProps: {
-              truncated: false,
-              shouldJsonParse: true,
-            },
-          });
-          expect(eventTraceFull).toBeDefined();
-          expect(eventTraceFull?.bookmarked).toBe(bookmarkedExp);
-        });
-      }
-
-      // Model setting bookmark as true on the root span
-      await updateEvents(
-        projectId,
-        { traceIds: [traceId], rootOnly: true },
-        { bookmarked: true },
-      );
-
-      await checkTraceIdsBookmarked(traceId, true);
-
-      // Non-root event on bookmarked
-      await createEventsCh([
-        createEvent({
-          id: randomUUID(),
-          span_id: randomUUID(),
-          project_id: projectId,
-          trace_id: traceId,
-          type: "GENERATION",
-          name: "event-hijack",
-          bookmarked: true,
-          parent_span_id: rootSpanId,
-        }),
-      ]);
-
-      // Removing bookmark on all span in a trace
-      // including the non-root, added above
-      await updateEvents(
-        projectId,
-        { traceIds: [traceId] },
-        { bookmarked: false },
-      );
-
-      await checkTraceIdsBookmarked(traceId, false);
-
-      // Trace id 2 should remain bookmarked
-      await checkTraceIdsBookmarked(traceId2, true);
-    });
-
-    it("should allow to set/unset public", async () => {
-      const traceId = randomUUID();
-      const traceId2 = randomUUID();
-      const rootSpanId = randomUUID();
-      const rootEvent = createEvent({
-        id: rootSpanId,
-        span_id: rootSpanId,
-        project_id: projectId,
-        trace_id: traceId,
-        type: "GENERATION",
-        name: "root-event",
-        public: false,
-        parent_span_id: "",
-      });
-      const rootEvent2 = createEvent({
-        id: randomUUID(),
-        span_id: randomUUID(),
-        project_id: projectId,
-        trace_id: traceId2,
-        type: "GENERATION",
-        name: "root-event2",
-        public: true,
-        parent_span_id: "",
-      });
-
-      async function checkTraceIdsPublic(traceId: string, publicExp: boolean) {
-        await waitForExpect(async () => {
-          // Verify events_core
-          const eventTrace = await getTraceByIdFromEventsTable({
-            projectId,
-            traceId: traceId,
-            renderingProps: {
-              truncated: true,
-              shouldJsonParse: false,
-            },
-          });
-          expect(eventTrace).toBeDefined();
-          expect(eventTrace?.public).toBe(publicExp);
-
-          // Verify events_full
-          const eventTraceFull = await getTraceByIdFromEventsTable({
-            projectId,
-            traceId: traceId,
-            renderingProps: {
-              truncated: false,
-              shouldJsonParse: true,
-            },
-          });
-          expect(eventTraceFull).toBeDefined();
-          expect(eventTraceFull?.public).toBe(publicExp);
-        });
-      }
-
-      await createEventsCh([rootEvent, rootEvent2]);
-
-      await checkTraceIdsPublic(traceId, false);
-
-      await updateEvents(projectId, { traceIds: [traceId] }, { public: true });
-
-      await checkTraceIdsPublic(traceId, true);
-
-      await updateEvents(projectId, { traceIds: [traceId] }, { public: false });
-
-      await checkTraceIdsPublic(traceId, false);
-
-      // Non-root event with public
-      await createEventsCh([
-        createEvent({
-          id: randomUUID(),
-          span_id: randomUUID(),
-          project_id: projectId,
-          trace_id: traceId,
-          type: "GENERATION",
-          name: "event-hijack",
-          public: true,
-          parent_span_id: rootSpanId,
-        }),
-      ]);
-
-      await checkTraceIdsPublic(traceId, true);
-
-      // Clearing public on non-root
-      await updateEvents(projectId, { traceIds: [traceId] }, { public: false });
-
-      await checkTraceIdsPublic(traceId, false);
-
-      // Trace id 2 should remain public
-      await checkTraceIdsPublic(traceId2, true);
     });
   });
 
@@ -3389,7 +3176,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ];
 
-      await createEventsCh(events);
+      await createEventsDoris(events);
 
       // Batch fetch I/O and metadata
       const result = await getObservationsBatchIOFromEventsTable({
@@ -3475,7 +3262,7 @@ describe("Clickhouse Events Repository Test", () => {
         start_time: nowMicro,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Request I/O for both existing and non-existent
       const result = await getObservationsBatchIOFromEventsTable({
@@ -3516,7 +3303,7 @@ describe("Clickhouse Events Repository Test", () => {
         start_time: nowMicro,
       });
 
-      await createEventsCh([event]);
+      await createEventsDoris([event]);
 
       // Try to fetch with wrong projectId
       const result = await getObservationsBatchIOFromEventsTable({
@@ -3543,7 +3330,7 @@ describe("Clickhouse Events Repository Test", () => {
         index: 0,
       });
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: observationId,
           span_id: observationId,
@@ -3587,7 +3374,7 @@ describe("Clickhouse Events Repository Test", () => {
       const uniqueProjectId = randomUUID();
 
       // v2 SDK via classic batch ingestion: not OTel-compatible
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: Date.now() * 1000,
@@ -3610,7 +3397,7 @@ describe("Clickhouse Events Repository Test", () => {
       const now = Date.now() * 1000;
 
       // Insert v2 data (classic ingestion, must be skipped)
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: now - 10000000, // older
@@ -3622,7 +3409,7 @@ describe("Clickhouse Events Repository Test", () => {
       ]);
 
       // Insert v3 data - Langfuse SDK via OTLP, attribution from headers
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: now, // newer
@@ -3648,7 +3435,7 @@ describe("Clickhouse Events Repository Test", () => {
       const now = Date.now() * 1000;
 
       // Older direct-write event
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: now - 10000000,
@@ -3660,7 +3447,7 @@ describe("Clickhouse Events Repository Test", () => {
       ]);
 
       // Newest event arrived via the dual-write propagation path
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: now, // newest
@@ -3686,7 +3473,7 @@ describe("Clickhouse Events Repository Test", () => {
 
       // Vercel AI SDK: sent via OTel but without Langfuse SDK headers,
       // so ingestion attribution carries the 'unknown' sentinel
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           project_id: uniqueProjectId,
           start_time: now,
@@ -3720,7 +3507,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceId = randomUUID();
       const spanId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -3731,7 +3518,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ]);
 
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           project_id: uniqueProjectId,
           trace_id: traceId,
@@ -3786,7 +3573,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceScoreName = `csat-${randomUUID()}`;
       const observationScoreName = `latency-rating-${randomUUID()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -3797,7 +3584,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ]);
 
-      await createScoresCh([
+      await createScoresDoris([
         // Trace-level score (observation_id NULL) -> trace_scores_avg only.
         createTraceScore({
           project_id: uniqueProjectId,
@@ -3837,7 +3624,7 @@ describe("Clickhouse Events Repository Test", () => {
       const traceCategoryName = `hallucination-check-${randomUUID()}`;
       const observationCategoryName = `answer-relevancy-${randomUUID()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: spanId,
           span_id: spanId,
@@ -3848,7 +3635,7 @@ describe("Clickhouse Events Repository Test", () => {
         }),
       ]);
 
-      await createScoresCh([
+      await createScoresDoris([
         // Trace-level categorical (observation_id NULL) -> trace_score_categories only.
         createTraceScore({
           project_id: uniqueProjectId,

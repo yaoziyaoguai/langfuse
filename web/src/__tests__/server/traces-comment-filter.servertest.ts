@@ -5,7 +5,7 @@ import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import {
   createOrgProjectAndApiKey,
   createTrace,
-  createTracesCh,
+  createTracesDoris,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
 
@@ -48,7 +48,6 @@ describe("Traces Comment Filtering", () => {
           },
         ],
         featureFlags: {
-          excludeClickhouseRead: false,
           templateFlag: true,
           searchBar: false,
           v4BetaToggleVisible: false,
@@ -81,7 +80,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace1]);
+      await createTracesDoris([trace1]);
 
       await prisma.comment.createMany({
         data: [
@@ -106,7 +105,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace2]);
+      await createTracesDoris([trace2]);
 
       await prisma.comment.create({
         data: {
@@ -149,7 +148,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace1]);
+      await createTracesDoris([trace1]);
 
       await prisma.comment.create({
         data: {
@@ -165,7 +164,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace2]);
+      await createTracesDoris([trace2]);
 
       await prisma.comment.create({
         data: {
@@ -207,7 +206,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace1]);
+      await createTracesDoris([trace1]);
 
       await prisma.comment.createMany({
         data: [
@@ -256,7 +255,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       await prisma.comment.create({
         data: {
@@ -298,7 +297,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace1, trace2]);
+      await createTracesDoris([trace1, trace2]);
 
       // Add 2 comments to trace1
       await prisma.comment.createMany({
@@ -358,7 +357,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace1, trace2]);
+      await createTracesDoris([trace1, trace2]);
 
       await prisma.comment.create({
         data: {
@@ -406,7 +405,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       await prisma.comment.create({
         data: {
@@ -456,7 +455,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       await prisma.comment.create({
         data: {
@@ -494,7 +493,7 @@ describe("Traces Comment Filtering", () => {
         project_id: projectId,
         id: randomUUID(),
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       await prisma.comment.create({
         data: {

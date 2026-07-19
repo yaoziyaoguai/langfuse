@@ -4,7 +4,8 @@ export type CommunityCapability =
   | "evaluations"
   | "experiments"
   | "monitors"
-  | "batchExports";
+  | "batchExports"
+  | "customDashboards";
 
 export type UnsupportedFeatureBody = {
   readonly error: "UnsupportedFeature";
@@ -12,7 +13,8 @@ export type UnsupportedFeatureBody = {
     | "R1B_EVALUATIONS_UNAVAILABLE"
     | "R1B_EXPERIMENTS_UNAVAILABLE"
     | "R2_MONITORS_UNAVAILABLE"
-    | "R2_BATCH_EXPORTS_UNAVAILABLE";
+    | "R2_BATCH_EXPORTS_UNAVAILABLE"
+    | "R2_CUSTOM_DASHBOARDS_UNAVAILABLE";
   readonly message: string;
   readonly recovery: string;
 };
@@ -50,6 +52,14 @@ export const COMMUNITY_CAPABILITIES: Readonly<
     recovery:
       "Create a separately reviewed Doris export implementation before enabling this capability.",
   },
+  customDashboards: {
+    error: "UnsupportedFeature",
+    code: "R2_CUSTOM_DASHBOARDS_UNAVAILABLE",
+    message:
+      "Custom dashboard and widget authoring is not available in the Doris R1A release.",
+    recovery:
+      "Use the curated Home dashboard presets, or create a separately reviewed Doris custom-dashboard implementation before enabling authoring.",
+  },
 };
 
 export const isCommunityCapabilityAvailable = (
@@ -86,8 +96,29 @@ export function capabilityForTrpcPath(
     return "evaluations";
   }
   if (path.startsWith("experiments.")) return "experiments";
+  if (
+    /^datasets\.(runById|baseRunDataByDatasetId|runsByDatasetId|runsByDatasetIdMetrics|runFilterOptions|runItemFilterOptions|runItemsByItemId|runItemsByRunId|datasetItemsWithRunData|runItemCompareCount|deleteDatasetRuns|upsertRemoteExperiment|getRemoteExperiment|triggerRemoteExperiment|deleteRemoteExperiment)$/.test(
+      path,
+    )
+  ) {
+    return "experiments";
+  }
   if (path.startsWith("monitors.")) return "monitors";
-  if (path.startsWith("batchExport.")) return "batchExports";
+  if (
+    path.startsWith("batchExport.") ||
+    path.startsWith("posthogIntegration.") ||
+    path.startsWith("mixpanelIntegration.") ||
+    path.startsWith("blobStorageIntegration.")
+  ) {
+    return "batchExports";
+  }
+  if (
+    /^(dashboard\.(allDashboards|getDashboard|createDashboard|updateDashboardDefinition|updateDashboardMetadata|cloneDashboard|setHomeDashboard|updateDashboardFilters|delete)|dashboardWidgets\.)/.test(
+      path,
+    )
+  ) {
+    return "customDashboards";
+  }
   return null;
 }
 
@@ -97,6 +128,20 @@ export function capabilityForMcpFeature(
   if (featureName === "evals") return "evaluations";
   if (featureName === "experiments") return "experiments";
   if (featureName === "monitors") return "monitors";
+  if (featureName === "dashboardWidgets") return "customDashboards";
+  return null;
+}
+
+export function capabilityForMcpTool(
+  toolName: string,
+): CommunityCapability | null {
+  if (
+    /^(createDatasetRunItem|listDatasetRunItems|listDatasetRuns|getDatasetRun|deleteDatasetRun)$/.test(
+      toolName,
+    )
+  ) {
+    return "experiments";
+  }
   return null;
 }
 

@@ -2,16 +2,16 @@ import {
   createTrace,
   createObservation,
   createTraceScore,
-  createTracesCh,
-  createObservationsCh,
-  createScoresCh,
-  createEventsCh,
   EventRecordInsertType,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
   TraceRecordInsertType,
 } from "../../../src/server";
-import { observationToEvent, traceToEvent } from "./event-mirror";
+import { observationToEvent } from "./event-mirror";
+import {
+  seedEventFixtures,
+  seedScoreFixtures,
+} from "../utils/analytics-writer";
 import { jitter, Rng, utcDayStartMs } from "./rng";
 import {
   chunk,
@@ -56,7 +56,7 @@ const run = async (
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
   const traceCount = Math.max(1, Number(params.traces ?? 24));
-  const withV4 = params.v4 === true;
+  const withV4 = true;
 
   // Anchor on utcDayStartMs() (today's UTC midnight), NOT Date.now(): these
   // timestamps land in ClickHouse ORDER BY keys, and the seeder contract
@@ -76,7 +76,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "scored-traces",
-      target: "clickhouse",
+      target: "doris",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -225,10 +225,7 @@ const run = async (
       }),
     );
 
-    if (withV4) {
-      events.push(traceToEvent(trace));
-      events.push(observationToEvent(observation, trace));
-    }
+    events.push(observationToEvent(observation, trace));
   }
 
   const counts: Record<string, number> = {
@@ -241,17 +238,11 @@ const run = async (
   ctx.log(
     `writing ${traces.length} traces, ${observations.length} observations, ${scores.length} scores${withV4 ? `, ${events.length} events` : ""}`,
   );
-  for (const batch of chunk(traces, 1000)) {
-    await createTracesCh(batch);
-  }
-  for (const batch of chunk(observations, 1000)) {
-    await createObservationsCh(batch);
-  }
   for (const batch of chunk(scores, 1000)) {
-    await createScoresCh(batch);
+    await seedScoreFixtures(batch);
   }
   for (const batch of chunk(events, 500)) {
-    await createEventsCh(batch);
+    await seedEventFixtures(batch);
   }
 
   // uniqExact(id): count() would see pre-merge ReplacingMergeTree duplicates
@@ -298,7 +289,7 @@ const run = async (
 
   return {
     scenario: "scored-traces",
-    target: "clickhouse",
+    target: "doris",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

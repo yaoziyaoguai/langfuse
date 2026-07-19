@@ -27,7 +27,6 @@ import {
 import {
   instrumentAsync,
   getScoresAndCorrectionsForTraces,
-  convertDateToClickhouseDateTime,
   getAgentGraphDataFromEventsTable,
   getObservationsForTraceFromEventsTable,
   MAX_OBSERVATIONS_PER_TRACE,
@@ -77,7 +76,7 @@ export const BatchIOInput = zodSchema.object({
         traceId: zodSchema.string(),
       }),
     )
-    // Bounds the unbounded-LIMIT ClickHouse read; the largest legitimate
+    // Bounds the unbounded-LIMIT Doris read; the largest legitimate
     // caller is one table page (max 50 rows), eval previews send one row.
     .max(500),
   minStartTime: zodSchema.date(),
@@ -325,18 +324,11 @@ export const eventsRouter = createTRPCRouter({
 
           const { traceId, minStartTime, maxStartTime } = input;
 
-          const chMinStartTime = convertDateToClickhouseDateTime(
-            new Date(minStartTime),
-          );
-          const chMaxStartTime = convertDateToClickhouseDateTime(
-            new Date(maxStartTime),
-          );
-
           const records = await getAgentGraphDataFromEventsTable({
             projectId: input.projectId,
             traceId,
-            chMinStartTime,
-            chMaxStartTime,
+            minStartTime: new Date(minStartTime),
+            maxStartTime: new Date(maxStartTime),
           });
 
           // Transform to AgentGraphDataResponse format

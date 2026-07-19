@@ -329,7 +329,7 @@ export async function getEventList(params: GetObservationsListParams) {
 
 /**
  * Get total count of events matching filters, plus the approximate number of
- * unique traces they span (single ClickHouse pass).
+ * unique traces they span (single Doris pass).
  */
 export async function getEventCount(params: GetObservationsCountParams) {
   const queryOpts = {

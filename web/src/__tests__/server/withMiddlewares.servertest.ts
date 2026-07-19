@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
-  LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
-import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
+import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
 import {
   BaseError,
   InvalidRequestError,
@@ -12,7 +12,7 @@ import {
   ServiceUnavailableError,
 } from "@langfuse/shared";
 import {
-  ClickHouseResourceError,
+  DorisError,
   logger,
   traceException,
 } from "@langfuse/shared/src/server";
@@ -32,13 +32,13 @@ vi.mock("@langfuse/shared/src/server", async () => ({
   traceException: vi.fn(),
 }));
 
-describe("clickHouseRouteForRequest", () => {
+describe("analyticsRouteForRequest", () => {
   const request = (method: string | undefined, url: string | undefined) =>
     ({ method, url }) as NextApiRequest;
 
   it("uses only the request pathname", () => {
     expect(
-      clickHouseRouteForRequest(
+      analyticsRouteForRequest(
         request(
           "GET",
           "/api/public/v2/traces?projectId=project-1&secret=do-not-log",
@@ -49,7 +49,7 @@ describe("clickHouseRouteForRequest", () => {
 
   it("removes search params from malformed urls in the fallback path", () => {
     expect(
-      clickHouseRouteForRequest(
+      analyticsRouteForRequest(
         request("POST", "http://[::1?secret=do-not-log#fragment"),
       ),
     ).toBe("POST http://[::1");
@@ -57,7 +57,7 @@ describe("clickHouseRouteForRequest", () => {
 
   it("falls back to UNKNOWN method for missing methods", () => {
     expect(
-      clickHouseRouteForRequest(request(undefined, "/api/public/health")),
+      analyticsRouteForRequest(request(undefined, "/api/public/health")),
     ).toBe("UNKNOWN /api/public/health");
   });
 });
@@ -263,13 +263,11 @@ describe("withMiddlewares error handling", () => {
     });
   });
 
-  describe("ClickHouseResourceError handling", () => {
-    it("should handle ClickHouseResourceError with 422 status", async () => {
-      const originalError = new Error("Memory limit exceeded: maximum: 10GB");
-      const resourceError = new ClickHouseResourceError(
-        "MEMORY_LIMIT",
-        originalError,
-      );
+  describe("DorisError handling", () => {
+    it("returns a sanitized 503 for retryable failures", async () => {
+      const resourceError = new DorisError("ANALYTICS_TIMEOUT", true, {
+        correlationId: "request-1",
+      });
 
       const handler = withMiddlewares({
         POST: async () => {
@@ -286,26 +284,18 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(422);
+      expect(res._getStatusCode()).toBe(503);
       const jsonData = JSON.parse(res._getData());
-      expect(jsonData["message"]).toBeDefined();
       expect(jsonData["message"]).toContain(
-        ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
+        "Analytics storage is temporarily unavailable",
       );
-      expect(jsonData["error"]).toBe("Request timed out");
+      expect(jsonData["error"]).toBe("ANALYTICS_TIMEOUT");
     });
 
-    it("should include tags from the error in the warn log", async () => {
-      const originalError = new Error("Memory limit exceeded");
-      const resourceError = new ClickHouseResourceError(
-        "MEMORY_LIMIT",
-        originalError,
-        {
-          tag_schema_version: "1",
-          surface: "publicapi",
-          route: "GET /api/public/test",
-        },
-      );
+    it("logs only the safe error envelope", async () => {
+      const resourceError = new DorisError("ANALYTICS_UNAVAILABLE", true, {
+        correlationId: "request-2",
+      });
 
       const handler = withMiddlewares({
         GET: async () => {
@@ -322,27 +312,20 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(422);
+      expect(res._getStatusCode()).toBe(503);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn).toHaveBeenCalledWith(
-        "ClickHouse resource limit exceeded",
-        expect.objectContaining({
-          errorType: "MEMORY_LIMIT",
-          tags: {
-            tag_schema_version: "1",
-            surface: "publicapi",
-            route: "GET /api/public/test",
-          },
-        }),
+        "Analytics storage request failed",
+        {
+          code: "ANALYTICS_UNAVAILABLE",
+          retryable: true,
+          correlationId: "request-2",
+        },
       );
     });
 
-    it("should handle ClickHouseResourceError with custom advice", async () => {
-      const originalError = new Error("Timeout exceeded");
-      const resourceError = new ClickHouseResourceError(
-        "TIMEOUT",
-        originalError,
-      );
+    it("uses custom endpoint guidance", async () => {
+      const resourceError = new DorisError("ANALYTICS_TIMEOUT", true);
 
       const handler = withMiddlewares(
         {
@@ -351,8 +334,8 @@ describe("withMiddlewares error handling", () => {
           },
         },
         {
-          clickHouseResourceErrorMessage:
-            LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
+          analyticsResourceErrorMessage:
+            LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
         },
       );
 
@@ -365,10 +348,10 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(422);
+      expect(res._getStatusCode()).toBe(503);
       const jsonData = JSON.parse(res._getData());
       expect(jsonData["message"]).toBe(
-        LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
+        LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
       );
       expect(jsonData["message"]).toContain(
         "https://langfuse.com/docs/metrics/features/metrics-api",

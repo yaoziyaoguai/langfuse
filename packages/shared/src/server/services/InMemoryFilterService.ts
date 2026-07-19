@@ -1,6 +1,8 @@
 import { FilterCondition, FilterState } from "../../types";
 import { logger } from "../logger";
-import { encodeBooleanScoreEntry } from "../queries/clickhouse-sql/clickhouse-filter";
+
+const encodeBooleanScoreEntry = (key: string, value: boolean): string =>
+  `${key}:${value ? "true" : "false"}`;
 
 export class InMemoryFilterService {
   /**
@@ -382,7 +384,7 @@ export class InMemoryFilterService {
     filterValue: boolean,
     operator: string,
   ): boolean {
-    // Same encoding as the score_booleans ClickHouse aggregation — callers
+    // Same encoding as the score_booleans analytics aggregation — callers
     // must supply pre-lowercased `name:true|false` entries via their field
     // mapper (raw score string_value is "True"/"False" and would not match).
     const target = encodeBooleanScoreEntry(key, filterValue);

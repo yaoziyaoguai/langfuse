@@ -9,7 +9,6 @@ import {
 } from "../../domain/observation-field-groups";
 
 export * from "./export-source-policy";
-export * from "./blob-export-tuning";
 
 export const EXPORT_SOURCE_OPTIONS: Array<{
   value: AnalyticsIntegrationExportSource;

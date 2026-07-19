@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   AnalyticsIngestionOperationStatus,
   AnalyticsLoadBatch,
@@ -6,6 +8,40 @@ import type {
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+import { lockAnalyticsIngestionOperation } from "./analyticsIngestionLock";
+
+export function analyticsLoadBatchIdentity(input: {
+  readonly projectId: string;
+  readonly operationId: string;
+  readonly logicalBatchId: string;
+  readonly attempt: number;
+}): { readonly id: string; readonly label: string } {
+  if (
+    !input.projectId ||
+    !input.operationId ||
+    !input.logicalBatchId ||
+    !Number.isSafeInteger(input.attempt) ||
+    input.attempt < 0
+  ) {
+    throw new TypeError("Invalid analytics load-batch identity");
+  }
+  const digest = createHash("sha256")
+    .update(
+      [
+        "langfuse-doris-load-v1",
+        input.projectId,
+        input.operationId,
+        input.logicalBatchId,
+        String(input.attempt),
+      ].join("\0"),
+      "utf8",
+    )
+    .digest("hex");
+  return {
+    id: `alb_${digest.slice(0, 28)}`,
+    label: `lf_${digest}`,
+  };
+}
 
 async function quarantineLoadCandidates(input: {
   transaction: Prisma.TransactionClient;
@@ -117,12 +153,14 @@ export async function cancelAnalyticsLoadBatchIfDeleted(input: {
     const traceGenerationById = new Map(
       traceTombstones.map(({ traceId, generation }) => [traceId, generation]),
     );
+    // Tombstones are permanent anti-resurrection barriers. A candidate that
+    // was canonicalized after a barrier must be cancelled as well as one that
+    // raced with it; equality is therefore not permission to write.
     const stale = candidates.map(
-      ({ owningTraceId, traceDeletionGeneration, projectDeletionGeneration }) =>
-        (projectGeneration?.generation ?? 0n) > projectDeletionGeneration ||
+      ({ owningTraceId }) =>
+        (projectGeneration?.generation ?? 0n) !== 0n ||
         (owningTraceId
-          ? (traceGenerationById.get(owningTraceId) ?? 0n) >
-            traceDeletionGeneration
+          ? (traceGenerationById.get(owningTraceId) ?? 0n) !== 0n
           : false),
     );
     if (!stale.some(Boolean)) return { outcome: "current" as const };
@@ -200,61 +238,78 @@ export async function claimAnalyticsLoadBatch(input: {
     throw new TypeError("Invalid analytics load-batch claim");
   }
 
-  const batch = await client.analyticsLoadBatch.findFirstOrThrow({
-    where: { id: input.loadBatchId, projectId: input.projectId },
-  });
-  if (batch.status === "VISIBLE") {
-    return { outcome: "already_visible", loadBatch: batch };
-  }
-  if (batch.status === "UNKNOWN") {
-    return { outcome: "reconciliation_required", loadBatch: batch };
-  }
-  if (batch.status === "LOADING") {
-    if (
-      batch.leaseOwner !== input.leaseOwner &&
-      batch.leaseExpiresAt &&
-      batch.leaseExpiresAt > input.now
-    ) {
-      return { outcome: "leased", loadBatch: batch };
-    }
-    return { outcome: "reconciliation_required", loadBatch: batch };
-  }
-  if (batch.status !== "PENDING") {
-    return { outcome: "terminal", loadBatch: batch };
-  }
-  if (batch.fenceGeneration !== input.expectedFence) {
-    return { outcome: "stale_fence", loadBatch: batch };
-  }
-
-  const updated = await client.analyticsLoadBatch.updateMany({
-    where: {
-      id: input.loadBatchId,
+  return client.$transaction(async (transaction) => {
+    const operation = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: (
+        await transaction.analyticsLoadBatch.findFirstOrThrow({
+          where: { id: input.loadBatchId, projectId: input.projectId },
+          select: { operationId: true },
+        })
+      ).operationId,
       projectId: input.projectId,
-      status: "PENDING",
-      fenceGeneration: input.expectedFence,
-    },
-    data: {
-      status: "LOADING",
-      fenceGeneration: input.nextFence,
-      leaseOwner: input.leaseOwner,
-      leaseExpiresAt: input.leaseUntil,
-    },
-  });
-  if (updated.count !== 1) {
+    });
+    const batch = await transaction.analyticsLoadBatch.findFirstOrThrow({
+      where: { id: input.loadBatchId, projectId: input.projectId },
+    });
+    if (operation.terminalAt || batch.status !== "PENDING") {
+      if (batch.status === "VISIBLE") {
+        return { outcome: "already_visible" as const, loadBatch: batch };
+      }
+      if (batch.status === "UNKNOWN") {
+        return {
+          outcome: "reconciliation_required" as const,
+          loadBatch: batch,
+        };
+      }
+      if (batch.status === "LOADING") {
+        if (
+          batch.leaseOwner !== input.leaseOwner &&
+          batch.leaseExpiresAt &&
+          batch.leaseExpiresAt > input.now
+        ) {
+          return { outcome: "leased" as const, loadBatch: batch };
+        }
+        return {
+          outcome: "reconciliation_required" as const,
+          loadBatch: batch,
+        };
+      }
+      return { outcome: "terminal" as const, loadBatch: batch };
+    }
+    if (batch.fenceGeneration !== input.expectedFence) {
+      return { outcome: "stale_fence" as const, loadBatch: batch };
+    }
+
+    const updated = await transaction.analyticsLoadBatch.updateMany({
+      where: {
+        id: input.loadBatchId,
+        projectId: input.projectId,
+        status: "PENDING",
+        fenceGeneration: input.expectedFence,
+      },
+      data: {
+        status: "LOADING",
+        fenceGeneration: input.nextFence,
+        leaseOwner: input.leaseOwner,
+        leaseExpiresAt: input.leaseUntil,
+      },
+    });
+    if (updated.count !== 1) {
+      return {
+        outcome: "stale_fence" as const,
+        loadBatch: await transaction.analyticsLoadBatch.findFirstOrThrow({
+          where: { id: input.loadBatchId, projectId: input.projectId },
+        }),
+      };
+    }
     return {
-      outcome: "stale_fence",
-      loadBatch: await client.analyticsLoadBatch.findFirstOrThrow({
+      outcome: "claimed" as const,
+      fence: input.nextFence,
+      loadBatch: await transaction.analyticsLoadBatch.findFirstOrThrow({
         where: { id: input.loadBatchId, projectId: input.projectId },
       }),
     };
-  }
-  return {
-    outcome: "claimed",
-    fence: input.nextFence,
-    loadBatch: await client.analyticsLoadBatch.findFirstOrThrow({
-      where: { id: input.loadBatchId, projectId: input.projectId },
-    }),
-  };
+  });
 }
 
 export async function recordAnalyticsLoadOutcome(input: {
@@ -340,12 +395,84 @@ export async function recordAnalyticsLoadReconciliation(input: {
     throw new TypeError("Invalid analytics load reconciliation");
   }
 
-  const status =
-    input.status === "VISIBLE"
-      ? "VISIBLE"
-      : input.status === "ABORTED"
-        ? "FAILED"
-        : "UNKNOWN";
+  if (input.status === "ABORTED") {
+    return client.$transaction(async (transaction) => {
+      const batch = await transaction.analyticsLoadBatch.findFirstOrThrow({
+        where: { id: input.loadBatchId, projectId: input.projectId },
+      });
+      if (
+        batch.fenceGeneration !== input.fence ||
+        (batch.status !== "LOADING" && batch.status !== "UNKNOWN")
+      ) {
+        return false;
+      }
+      const requiredCandidates =
+        await transaction.analyticsIngestionCandidate.count({
+          where: {
+            projectId: input.projectId,
+            loadBatchId: input.loadBatchId,
+            disposition: "LOAD_REQUIRED",
+          },
+        });
+      const failed = await transaction.analyticsLoadBatch.updateMany({
+        where: {
+          id: input.loadBatchId,
+          projectId: input.projectId,
+          fenceGeneration: input.fence,
+          status: { in: ["LOADING", "UNKNOWN"] },
+        },
+        data: {
+          status: "FAILED",
+          transactionId: input.transactionId,
+          totalRows: input.totalRows,
+          filteredRows: input.filteredRows,
+          lastErrorCode: "LOAD_ABORTED",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        },
+      });
+      if (failed.count !== 1) return false;
+      if (requiredCandidates === 0) return true;
+
+      const nextAttempt = batch.attempt + 1;
+      const identity = analyticsLoadBatchIdentity({
+        projectId: batch.projectId,
+        operationId: batch.operationId,
+        logicalBatchId: batch.logicalBatchId,
+        attempt: nextAttempt,
+      });
+      await transaction.analyticsLoadBatch.create({
+        data: {
+          id: identity.id,
+          operationId: batch.operationId,
+          projectId: batch.projectId,
+          databaseName: batch.databaseName,
+          targetTable: batch.targetTable,
+          logicalBatchId: batch.logicalBatchId,
+          attempt: nextAttempt,
+          fenceGeneration: 0n,
+          label: identity.label,
+          payloadHash: batch.payloadHash,
+          canonicalObjectKey: batch.canonicalObjectKey,
+          partitionDate: batch.partitionDate,
+        },
+      });
+      const rebound = await transaction.analyticsIngestionCandidate.updateMany({
+        where: {
+          projectId: input.projectId,
+          loadBatchId: input.loadBatchId,
+          disposition: "LOAD_REQUIRED",
+        },
+        data: { loadBatchId: identity.id, reasonCode: "LOAD_ABORTED_RETRY" },
+      });
+      if (rebound.count !== requiredCandidates) {
+        throw new Error("Analytics load retry candidate rebind was incomplete");
+      }
+      return true;
+    });
+  }
+
+  const status = input.status === "VISIBLE" ? "VISIBLE" : "UNKNOWN";
   return client.$transaction(async (transaction) => {
     const updated = await transaction.analyticsLoadBatch.updateMany({
       where: {
@@ -359,21 +486,13 @@ export async function recordAnalyticsLoadReconciliation(input: {
         transactionId: input.transactionId,
         totalRows: input.totalRows,
         filteredRows: input.filteredRows,
-        lastErrorCode: input.status === "ABORTED" ? "LOAD_ABORTED" : null,
+        lastErrorCode: null,
         visibleAt: input.status === "VISIBLE" ? input.now : null,
         leaseOwner: null,
         leaseExpiresAt: null,
       },
     });
     if (updated.count !== 1) return false;
-    if (input.status === "ABORTED") {
-      await quarantineLoadCandidates({
-        transaction,
-        loadBatchId: input.loadBatchId,
-        projectId: input.projectId,
-        reasonCode: "LOAD_ABORTED",
-      });
-    }
     return true;
   });
 }

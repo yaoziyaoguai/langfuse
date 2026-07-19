@@ -180,12 +180,14 @@ export interface MigrationResult {
 export async function runMigrations(
   config: MigrationConfig,
 ): Promise<MigrationResult> {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.database)) {
+    throw new Error("Doris migration database must be a simple identifier");
+  }
   const conn = await createConnection({
     host: config.host,
     port: config.port,
     user: config.user,
     password: config.password,
-    database: config.database,
     connectTimeout: config.connectTimeoutMs,
     multipleStatements: false,
     ssl: config.tls
@@ -200,6 +202,11 @@ export async function runMigrations(
   } as ConnectionOptions);
   try {
     const queryTimeoutMs = config.queryTimeoutMs ?? 120_000;
+    await conn.query({
+      sql: `CREATE DATABASE IF NOT EXISTS \`${config.database}\``,
+      timeout: queryTimeoutMs,
+    });
+    await conn.changeUser({ database: config.database });
     await ensureVersionTable(conn, queryTimeoutMs);
     const migrations = loadMigrations();
     const applied: string[] = [];

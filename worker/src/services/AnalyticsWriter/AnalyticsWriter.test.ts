@@ -1,12 +1,14 @@
 import { PrismaClient } from "@prisma/client";
 import {
   canonicalPayloadHash,
+  encodeEventIdentity,
   normalizeVersionToken,
   type CanonicalAnalyticsBatch,
   type CanonicalAnalyticsEvent,
 } from "@langfuse/shared/analytics-persistence";
 import {
   createAnalyticsIngestionReceipt,
+  claimAnalyticsEntityHead,
   DorisError,
   reserveCanonicalizationFence,
 } from "@langfuse/shared/src/server";
@@ -296,6 +298,67 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
     });
   });
 
+  it("materializes an identical head when the winning operation is not yet visible", async () => {
+    const winnerOperationId = `writer-noop-winner-${suffix}`;
+    const operationId = `writer-noop-retry-${suffix}`;
+    const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
+    await createReceipt({
+      operationId: winnerOperationId,
+      rawObjectKey: `events/${projectId}/raw/${winnerOperationId}.json`,
+      checksumCharacter: "4",
+    });
+    await createReceipt({ operationId, rawObjectKey, checksumCharacter: "5" });
+    const canonicalBatch = batch({ projectId, operationId, rawObjectKey });
+    const entity = canonicalBatch.children[0]!.entity;
+    if (entity.kind !== "event") throw new Error("Expected event fixture");
+    await claimAnalyticsEntityHead({
+      client: prisma,
+      projectId,
+      operationId: winnerOperationId,
+      entityType: "EVENT",
+      entityKey: encodeEventIdentity({
+        projectId,
+        traceId: entity.traceId,
+        spanId: entity.spanId,
+      }),
+      lookupId: entity.spanId,
+      owningTraceId: entity.traceId,
+      expectedSourceVersion: null,
+      sourceVersion: entity.sourceVersion,
+      canonicalPayloadHash: entity.canonicalPayloadHash,
+      partitionDate: new Date(`${entity.partitionDate}T00:00:00.000Z`),
+      canonicalizerVersion: entity.canonicalizerVersion,
+      fenceGeneration: 0n,
+      traceDeletionGeneration: 0n,
+      projectDeletionGeneration: 0n,
+    });
+    const load = vi.fn(async (input: { label: string }) => ({
+      status: "Success",
+      label: input.label,
+      numberTotalRows: 1,
+      numberFilteredRows: 0,
+      committed: true,
+      requiresReconciliation: false,
+    }));
+    const writer = new AnalyticsWriter({
+      client: prisma,
+      artifactStore: new CanonicalIngestionArtifactStore(
+        new MemoryObjectStore(),
+      ),
+      doris: new DorisBatchSink({ load, reconcile: vi.fn() }),
+      databaseName: "langfuse_poc",
+      canonicalPrefix: "events/",
+      workerId: "writer-worker-noop",
+      now: () => new Date("2026-07-18T12:00:16.000Z"),
+    });
+
+    await expect(writer.persist(canonicalBatch)).resolves.toEqual({
+      operationId,
+      status: "VISIBLE",
+    });
+    expect(load).toHaveBeenCalledOnce();
+  });
+
   it("recovers an immutable artifact written before its pointer was published", async () => {
     const operationId = `writer-put-recovery-${suffix}`;
     const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
@@ -377,11 +440,10 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
       throw new DorisError("ANALYTICS_TIMEOUT", true);
     });
     const reconcile = vi.fn(async () => ({ status: "VISIBLE", visible: true }));
+    const objectStore = new MemoryObjectStore();
     const writer = new AnalyticsWriter({
       client: prisma,
-      artifactStore: new CanonicalIngestionArtifactStore(
-        new MemoryObjectStore(),
-      ),
+      artifactStore: new CanonicalIngestionArtifactStore(objectStore),
       doris: new DorisBatchSink({ load, reconcile }),
       databaseName: "langfuse_poc",
       canonicalPrefix: "events/",
@@ -404,11 +466,75 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
       prisma.analyticsLoadBatch.findFirstOrThrow({ where: { operationId } }),
     ).resolves.toMatchObject({ status: "UNKNOWN" });
 
+    objectStore.objects.clear();
+    await expect(
+      writer.reconcileUnresolvedOperation({ operationId, projectId }),
+    ).resolves.toBe(true);
+    expect(load).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
+  });
+
+  it("creates a new deterministic attempt after Doris confirms ABORTED", async () => {
+    const operationId = `writer-aborted-${suffix}`;
+    const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
+    await createReceipt({ operationId, rawObjectKey, checksumCharacter: "6" });
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new DorisError("ANALYTICS_TIMEOUT", true))
+      .mockImplementation(async (input: { label: string }) => ({
+        status: "Success",
+        label: input.label,
+        numberTotalRows: 1,
+        numberFilteredRows: 0,
+        committed: true,
+        requiresReconciliation: false,
+      }));
+    const reconcile = vi.fn(async () => ({
+      status: "ABORTED",
+      visible: false,
+    }));
+    const writer = new AnalyticsWriter({
+      client: prisma,
+      artifactStore: new CanonicalIngestionArtifactStore(
+        new MemoryObjectStore(),
+      ),
+      doris: new DorisBatchSink({ load, reconcile }),
+      databaseName: "langfuse_poc",
+      canonicalPrefix: "events/",
+      workerId: "writer-worker-aborted",
+      now: () => new Date("2026-07-18T12:00:22.000Z"),
+    });
+    const canonicalBatch = batch({
+      projectId,
+      operationId,
+      rawObjectKey,
+      traceId: `writer-aborted-trace-${suffix}`,
+      spanId: "writer-aborted-span",
+    });
+
+    await expect(writer.persist(canonicalBatch)).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+      retryable: true,
+    });
+    await expect(writer.persist(canonicalBatch)).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+      retryable: true,
+    });
     await expect(writer.persist(canonicalBatch)).resolves.toEqual({
       operationId,
       status: "VISIBLE",
     });
-    expect(load).toHaveBeenCalledOnce();
+
+    const attempts = await prisma.analyticsLoadBatch.findMany({
+      where: { operationId },
+      orderBy: { attempt: "asc" },
+    });
+    expect(attempts).toMatchObject([
+      { attempt: 0, status: "FAILED", lastErrorCode: "LOAD_ABORTED" },
+      { attempt: 1, status: "VISIBLE" },
+    ]);
+    expect(attempts[0]!.label).not.toBe(attempts[1]!.label);
+    expect(load).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenCalledOnce();
   });
 
@@ -515,6 +641,56 @@ describe.skipIf(!controlDatabaseUrl)("AnalyticsWriter", () => {
       terminalAt: expect.any(Date),
       candidates: [{ disposition: "QUARANTINED", reasonCode: "FILTERED_ROWS" }],
       loadBatches: [{ status: "FAILED", lastErrorCode: "FILTERED_ROWS" }],
+    });
+  });
+
+  it("never materializes a trace after its permanent deletion barrier", async () => {
+    const operationId = `writer-deleted-${suffix}`;
+    const rawObjectKey = `events/${projectId}/raw/${operationId}.json`;
+    const traceId = `writer-deleted-trace-${suffix}`;
+    await createReceipt({ operationId, rawObjectKey, checksumCharacter: "8" });
+    await prisma.analyticsDeletionTombstone.create({
+      data: {
+        projectId,
+        traceId,
+        generation: 1n,
+        status: "COMPLETED",
+        completedAt: new Date("2026-07-18T12:00:00.000Z"),
+      },
+    });
+    const load = vi.fn();
+    const writer = new AnalyticsWriter({
+      client: prisma,
+      artifactStore: new CanonicalIngestionArtifactStore(
+        new MemoryObjectStore(),
+      ),
+      doris: new DorisBatchSink({ load, reconcile: vi.fn() }),
+      databaseName: "langfuse_poc",
+      canonicalPrefix: "events/",
+      workerId: "writer-worker-deleted",
+      now: () => new Date("2026-07-18T12:00:30.000Z"),
+    });
+
+    await expect(
+      writer.persist(
+        batch({
+          projectId,
+          operationId,
+          rawObjectKey,
+          traceId,
+          spanId: "writer-deleted-span",
+        }),
+      ),
+    ).resolves.toEqual({ operationId, status: "PERSISTED" });
+    expect(load).not.toHaveBeenCalled();
+    await expect(
+      prisma.analyticsIngestionOperation.findUniqueOrThrow({
+        where: { id: operationId },
+        include: { candidates: true },
+      }),
+    ).resolves.toMatchObject({
+      status: "CANCELLED_BY_DELETION",
+      candidates: [{ disposition: "CANCELLED_BY_DELETION" }],
     });
   });
 

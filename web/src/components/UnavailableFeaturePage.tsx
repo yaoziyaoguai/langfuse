@@ -32,3 +32,9 @@ export const ExperimentsUnavailablePage = () => (
 export const MonitorsUnavailablePage = () => (
   <UnavailableFeaturePage capability="monitors" />
 );
+export const BatchExportsUnavailablePage = () => (
+  <UnavailableFeaturePage capability="batchExports" />
+);
+export const CustomDashboardsUnavailablePage = () => (
+  <UnavailableFeaturePage capability="customDashboards" />
+);

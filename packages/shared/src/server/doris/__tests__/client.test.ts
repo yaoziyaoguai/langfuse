@@ -1,5 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
+const mysql = vi.hoisted(() => ({
+  createPool: vi.fn(() => ({
+    query: vi.fn(),
+    end: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
+vi.mock("mysql2/promise", () => ({
+  default: { createPool: mysql.createPool },
+}));
+
 import { DorisClient, DorisClientManager } from "../client";
 import type { DorisQueryConfig } from "../config";
 
@@ -16,6 +27,14 @@ const config: DorisQueryConfig = {
 };
 
 describe("DorisClientManager", () => {
+  it("pins Doris DATETIME conversion to UTC", () => {
+    new DorisClient(config);
+
+    expect(mysql.createPool).toHaveBeenCalledWith(
+      expect.objectContaining({ timezone: "Z" }),
+    );
+  });
+
   it("reuses an identical pool and closes every rotation pool", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const factory = vi.fn(() => ({ close }) as unknown as DorisClient);

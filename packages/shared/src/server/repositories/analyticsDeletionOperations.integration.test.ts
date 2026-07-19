@@ -105,6 +105,57 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
     ).resolves.toMatchObject({ id: first.id, generation: 1n });
   });
 
+  it("completes outstanding trace operations behind the project deletion fence", async () => {
+    const supersededTraceId = `superseded-${suffix}`;
+    const [traceOperation] = await repository.scheduleTraceDeletionOperations({
+      client: prisma,
+      projectId,
+      organizationId,
+      traceIds: [supersededTraceId],
+      requester: { principalType: "system", principalId: "test" },
+    });
+    const projectOperation = await repository.scheduleProjectDeletionOperation({
+      client: prisma,
+      projectId,
+      organizationId,
+      requester: { principalType: "system", principalId: "test" },
+    });
+    const claimed = await repository.claimDeletionOperation({
+      client: prisma,
+      operationId: projectOperation.id,
+      projectId,
+      owner: "project-worker",
+    });
+    await repository.markDeletionBarrierVisible({
+      client: prisma,
+      operationId: projectOperation.id,
+      projectId,
+      scope: "PROJECT",
+      generation: projectOperation.generation,
+      barrierLabel: "project-barrier",
+      lease: { owner: "project-worker", fence: claimed!.workerFence },
+    });
+
+    await expect(
+      repository.completeTraceDeletionsSupersededByProject({
+        client: prisma,
+        projectOperationId: projectOperation.id,
+        projectId,
+        projectGeneration: projectOperation.generation,
+        lease: { owner: "project-worker", fence: claimed!.workerFence },
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      prisma.analyticsDeletionOperation.findUniqueOrThrow({
+        where: { id: traceOperation!.operation.id },
+      }),
+    ).resolves.toMatchObject({
+      status: "COMPLETED",
+      phase: "completed_by_project_deletion",
+      logicallyInvisible: true,
+    });
+  });
+
   it("does not complete while pre-barrier ingestion remains nonterminal", async () => {
     const operationId = `ingestion-${suffix}`;
     await prisma.analyticsIngestionOperation.create({

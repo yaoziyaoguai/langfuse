@@ -52,7 +52,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
   CachedApiKey: {
     safeParse: vi.fn((value) => ({ data: value, success: true })),
   },
-  ClickHouseClientManager: {
+  DorisClientManager: {
     getInstance: vi.fn(() => ({
       closeAllConnections: vi.fn(),
     })),

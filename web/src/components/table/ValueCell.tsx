@@ -236,7 +236,7 @@ function ValueCellActionsMenu({
   const isScalarLeaf =
     !hasChildren &&
     (type === "string" || type === "number" || type === "boolean") &&
-    // Skip empty values: `contains ""` matches every row (ClickHouse
+    // Skip empty values: `contains ""` matches every row (Doris
     // position(x, "") === 1, and Map[missingKey] defaults to "") while
     // `does not contain ""` matches none — both shortcuts would be no-ops.
     filterValue.length > 0 &&

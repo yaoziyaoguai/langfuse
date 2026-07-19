@@ -8,9 +8,9 @@ export type UiColumnMappings = readonly UiColumnMapping[];
 
 export type UiColumnMapping = UiColumnMatchable &
   Readonly<{
-    clickhouseTableName: string;
-    clickhouseSelect: string;
-    clickhouseTypeOverwrite?: string;
+    analyticsTableName: string;
+    analyticsSelect: string;
+    analyticsTypeOverwrite?: string;
     queryPrefix?: string;
     emptyEqualsNull?: boolean;
   }>;

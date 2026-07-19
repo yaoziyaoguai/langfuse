@@ -1,6 +1,6 @@
 import { VERSION } from "@/src/constants";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
-import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
+import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
 import { runHealthCheck } from "@/src/features/public-api/server/health-service";
 import { telemetry } from "@/src/features/telemetry";
 import {
@@ -20,9 +20,9 @@ export default async function handler(
     await telemetry();
     const ctx = contextWithLangfuseProps({
       headers: req.headers,
-      clickhouse: {
+      analytics: {
         surface: "publicapi",
-        route: clickHouseRouteForRequest(req),
+        route: analyticsRouteForRequest(req),
       },
     });
     const result = await opentelemetry.context.with(ctx, () =>

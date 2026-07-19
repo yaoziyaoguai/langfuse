@@ -5,7 +5,9 @@ import {
   checkAnalyticsReadiness,
   checkDorisReadiness,
   EXPECTED_DORIS_MIGRATIONS,
+  SUPPORTED_DORIS_SCHEMA_VERSIONS,
 } from "../readiness";
+import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../../analytics-persistence/acceptAnalyticsIngestion";
 
 const createTableByName: Record<string, string> = {
   events_current: `
@@ -73,6 +75,12 @@ function executorWith(overrides?: {
 }
 
 describe("Doris schema readiness", () => {
+  it("uses the current canonical receipt schema rather than the migration count", () => {
+    expect(SUPPORTED_DORIS_SCHEMA_VERSIONS).toEqual([
+      CURRENT_ANALYTICS_SCHEMA_VERSION,
+    ]);
+  });
+
   it("is ready only when migration checksums and physical fingerprints match", async () => {
     await expect(checkDorisReadiness(executorWith())).resolves.toEqual({
       ready: true,

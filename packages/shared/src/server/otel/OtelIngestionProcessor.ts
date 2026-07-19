@@ -32,7 +32,9 @@ import {
 } from "../analytics-persistence";
 import type { StorageService } from "../services/StorageService";
 import { isValidDateString, flattenJsonToPathArrays } from "./utils";
-import { convertDateToClickhouseDateTime } from "../clickhouse/client";
+
+const formatAnalyticsDateTime = (value: Date): string =>
+  value.toISOString().replace("T", " ").replace("Z", "");
 
 // Type definitions for internal processor state
 interface TraceState {
@@ -2962,7 +2964,7 @@ export class OtelIngestionProcessor {
     if (value == null || value === "") return undefined;
     const stringValue = String(value);
     if (isValidDateString(stringValue)) {
-      return convertDateToClickhouseDateTime(new Date(stringValue));
+      return formatAnalyticsDateTime(new Date(stringValue));
     }
     logger.warn(
       "OTEL invalid experiment item version, dropping. Expected timestamp.",

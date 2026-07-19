@@ -1,11 +1,10 @@
-import { prisma } from "@langfuse/shared/src/db";
 import {
   getObservationsFromEventsTableForPublicApi,
   getObservationsCountFromEventsTableForPublicApi,
 } from "@langfuse/shared/src/server";
 
 import {
-  LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
@@ -15,12 +14,7 @@ import {
   GetObservationsV1Response,
   transformDbToApiObservation,
 } from "@/src/features/public-api/types/observations";
-import {
-  generateObservationsForPublicApi,
-  getObservationsCountForPublicApi,
-} from "@/src/features/public-api/server/observations";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
-import { env } from "@/src/env.mjs";
 
 export default withMiddlewares(
   {
@@ -32,7 +26,6 @@ export default withMiddlewares(
       responseSchema: GetObservationsV1Response,
       rateLimitUpgradePath:
         legacyPublicApiRateLimitUpgradePaths.observationsList,
-      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         const filterProps = {
           projectId: auth.scope.projectId,
@@ -51,89 +44,25 @@ export default withMiddlewares(
           advancedFilters: query.filter,
         };
 
-        if (
-          query.useEventsTable ||
-          env.LANGFUSE_ANALYTICS_BACKEND === "doris"
-        ) {
-          const [items, count] = await Promise.all([
-            getObservationsFromEventsTableForPublicApi(filterProps),
-            getObservationsCountFromEventsTableForPublicApi(filterProps),
-          ]);
-
-          return {
-            data: items.map(transformDbToApiObservation),
-            meta: {
-              page: query.page,
-              limit: query.limit,
-              totalItems: count,
-              totalPages: Math.ceil(count / query.limit),
-            },
-          };
-        }
-
-        // Legacy code path using observations table
         const [items, count] = await Promise.all([
-          generateObservationsForPublicApi(filterProps),
-          getObservationsCountForPublicApi(filterProps),
+          getObservationsFromEventsTableForPublicApi(filterProps),
+          getObservationsCountFromEventsTableForPublicApi(filterProps),
         ]);
-        const uniqueModels: string[] = Array.from(
-          new Set(
-            items
-              .map((r) => r.internalModelId)
-              .filter((r): r is string => Boolean(r)),
-          ),
-        );
-
-        const models =
-          uniqueModels.length > 0
-            ? await prisma.model.findMany({
-                where: {
-                  id: {
-                    in: uniqueModels,
-                  },
-                  OR: [
-                    { projectId: auth.scope.projectId },
-                    { projectId: null },
-                  ],
-                },
-                include: {
-                  Price: true,
-                },
-              })
-            : [];
-        const finalCount = count ? count : 0;
 
         return {
-          data: items
-            .map((i) => {
-              const model = models.find((m) => m.id === i.internalModelId);
-              return {
-                ...i,
-                modelId: model?.id ?? null,
-                inputPrice:
-                  model?.Price?.find((m) => m.usageType === "input")?.price ??
-                  null,
-                outputPrice:
-                  model?.Price?.find((m) => m.usageType === "output")?.price ??
-                  null,
-                totalPrice:
-                  model?.Price?.find((m) => m.usageType === "total")?.price ??
-                  null,
-              };
-            })
-            .map(transformDbToApiObservation),
+          data: items.map(transformDbToApiObservation),
           meta: {
             page: query.page,
             limit: query.limit,
-            totalItems: finalCount,
-            totalPages: Math.ceil(finalCount / query.limit),
+            totalItems: count,
+            totalPages: Math.ceil(count / query.limit),
           },
         };
       },
     }),
   },
   {
-    clickHouseResourceErrorMessage:
-      LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
+    analyticsResourceErrorMessage:
+      LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
   },
 );

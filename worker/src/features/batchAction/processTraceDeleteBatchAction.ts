@@ -11,7 +11,6 @@ import {
 } from "@langfuse/shared";
 import {
   getTraceDeleteCursorPageFromEvents,
-  getTraceDeleteCursorPageFromTraces,
   logger,
   shouldSkipDeletionFor,
 } from "@langfuse/shared/src/server";
@@ -225,26 +224,15 @@ const selectNextTraceDeleteBatch = async (opts: {
   const filter = convertDatesInFiltersFromStrings(query.filter ?? []);
   const cutoffCreatedAt = new Date(opts.config.cutoffCreatedAt);
 
-  const rows =
-    opts.config.source === "events"
-      ? await getTraceDeleteCursorPageFromEvents({
-          projectId: opts.projectId,
-          filter,
-          cutoffCreatedAt,
-          cursor: opts.cursor,
-          searchQuery: query.searchQuery,
-          searchType: query.searchType ?? ["id"],
-          limit: opts.batchSize,
-        })
-      : await getTraceDeleteCursorPageFromTraces({
-          projectId: opts.projectId,
-          filter,
-          cutoffCreatedAt,
-          cursor: opts.cursor,
-          searchQuery: query.searchQuery,
-          searchType: query.searchType ?? ["id"],
-          limit: opts.batchSize,
-        });
+  const rows = await getTraceDeleteCursorPageFromEvents({
+    projectId: opts.projectId,
+    filter,
+    cutoffCreatedAt,
+    cursor: opts.cursor,
+    searchQuery: query.searchQuery,
+    searchType: query.searchType ?? ["id"],
+    limit: opts.batchSize,
+  });
 
   return buildInFlightBatch(rows);
 };

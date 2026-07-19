@@ -96,7 +96,7 @@ describe("Doris observations repository", () => {
       {
         ...row,
         input: '{"question":"price"}',
-        output: '{"answer":"ok"}',
+        output: '"true"',
         metadata: '{"region":"eu"}',
         model_parameters: '{"temperature":0}',
         tool_definitions: '{"search":"{}"}',
@@ -115,7 +115,7 @@ describe("Doris observations repository", () => {
       expect.objectContaining({
         id: "span-1",
         input: { question: "price" },
-        output: { answer: "ok" },
+        output: "true",
         metadata: { region: "eu" },
         toolDefinitions: { search: "{}" },
       }),

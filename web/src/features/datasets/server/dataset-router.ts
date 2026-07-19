@@ -22,7 +22,7 @@ import {
   isPresent,
   TracingSearchType,
   timeFilter,
-  isClickhouseFilterColumn,
+  isAnalyticsFilterColumn,
   optionalPaginationZod,
   LangfuseConflictError,
   LangfuseNotFoundError,
@@ -46,9 +46,9 @@ import {
 import {
   logger,
   addToDeleteDatasetQueue,
-  getDatasetRunItemsByDatasetIdCh,
+  getDatasetRunItemsByDatasetId,
   getDatasetRunItemsCountByDatasetIdCh,
-  getDatasetRunsTableMetricsCh,
+  getDatasetRunsTableMetrics,
   getScoresForExperiments,
   getTraceScoresForDatasetRuns,
   getDatasetRunItemsCountCh,
@@ -171,18 +171,18 @@ const buildPathPrefixFilter = (pathPrefix?: string): Prisma.Sql => {
 };
 
 /**
- * Determines whether the given filters require Dataset Run Items (DRI) metrics from ClickHouse.
+ * Determines whether the filters require R1B Dataset Run Item analytics.
  *
  * @param filters - Array of filter conditions to evaluate
  * @returns true if any filter requires DRI metrics, false if using basic dataset run data is sufficient
  */
-export const requiresClickhouseLookups = (filters: FilterState): boolean => {
+export const requiresAnalyticsLookups = (filters: FilterState): boolean => {
   if (filters.length === 0) {
     return false;
   }
 
   return filters.some((filter) => {
-    return isClickhouseFilterColumn(filter.column);
+    return isAnalyticsFilterColumn(filter.column);
   });
 };
 
@@ -633,7 +633,7 @@ export const datasetRouter = createTRPCRouter({
       });
 
       // Use helper function to determine if we need DRI metrics
-      if (!requiresClickhouseLookups(input.filter ?? [])) {
+      if (!requiresAnalyticsLookups(input.filter ?? [])) {
         const [runs, totalRuns] = await Promise.all([
           await ctx.prisma.datasetRuns.findMany({
             where: {
@@ -697,7 +697,7 @@ export const datasetRouter = createTRPCRouter({
       });
 
       // Get runs that have metrics (only runs with dataset_run_items_rmt)
-      const runsWithMetrics = await getDatasetRunsTableMetricsCh({
+      const runsWithMetrics = await getDatasetRunsTableMetrics({
         projectId: input.projectId,
         datasetId: input.datasetId,
         runIds: input.runIds ?? [],
@@ -723,7 +723,7 @@ export const datasetRouter = createTRPCRouter({
         return {
           id: run.id,
           name: run.name,
-          // Use ClickHouse metrics if available, otherwise use defaults for runs without dataset_run_items_rmt
+          // Use analytics metrics when available; otherwise use run defaults.
           countRunItems: run.countRunItems ?? 0,
           avgTotalCost: run.avgTotalCost ?? null,
           totalCost: run.totalCost ?? null,
@@ -1780,7 +1780,7 @@ export const datasetRouter = createTRPCRouter({
       }
 
       const [runItems, totalRunItems] = await Promise.all([
-        getDatasetRunItemsByDatasetIdCh({
+        getDatasetRunItemsByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter,
@@ -1876,7 +1876,7 @@ export const datasetRouter = createTRPCRouter({
       ] as FilterState;
 
       const [runItems, totalRunItems] = await Promise.all([
-        getDatasetRunItemsByDatasetIdCh({
+        getDatasetRunItemsByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter: combinedFilter,
@@ -1959,7 +1959,7 @@ export const datasetRouter = createTRPCRouter({
         return { data: [] };
       }
 
-      // Step 2: Given dataset item ids, lookup dataset run items in clickhouse
+      // Step 2: Given dataset item ids, look up dataset run items.
       // Note: for each unique dataset item id and dataset run id combination, we will retrieve a dataset run item
       const datasetRunItems = await getDatasetRunItemsWithoutIOByItemIds({
         projectId: input.projectId,
@@ -2013,7 +2013,7 @@ export const datasetRouter = createTRPCRouter({
 
       const { filterByRun, datasetId, projectId, runIds } = input;
 
-      // Rely on clickhouse to return only dataset item count that match the filters
+      // The analytics repository returns only item counts matching the filters.
       const datasetItemCount = await getDatasetItemsWithRunDataCount({
         projectId,
         datasetId,

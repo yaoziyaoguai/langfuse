@@ -265,9 +265,10 @@ describe("getExportSourceUnavailableMessage", () => {
     );
   });
 
-  it("names the env var for legacy-writes-disabled (self-hosted operator-facing)", () => {
+  it("explains the Doris topology for legacy-writes-disabled", () => {
     const message = getExportSourceUnavailableMessage("legacy-writes-disabled");
-    expect(message).toContain("LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only");
+    expect(message).toContain("Doris R1A topology");
+    expect(message).toContain("canonical events export source");
     expect(message).not.toContain("no longer available for this project");
   });
 });

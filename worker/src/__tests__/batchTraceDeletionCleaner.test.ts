@@ -3,8 +3,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "@langfuse/shared/src/db";
 import { logger } from "@langfuse/shared/src/server";
 import { BatchTraceDeletionCleaner } from "../features/batch-trace-deletion-cleaner";
-import * as clickhouseTraceDelete from "../features/traces/processClickhouseTraceDelete";
-import * as postgresTraceDelete from "../features/traces/processPostgresTraceDelete";
+import * as analyticsTraceDelete from "../features/traces/processAnalyticsTraceDeletionBatch";
 
 describe("BatchTraceDeletionCleaner", () => {
   let cleaner: BatchTraceDeletionCleaner;
@@ -126,15 +125,15 @@ describe("BatchTraceDeletionCleaner", () => {
         })),
       });
 
-      const processClickhouseTraceDeleteSpy = vi
-        .spyOn(clickhouseTraceDelete, "processClickhouseTraceDelete")
-        .mockRejectedValueOnce(new Error("ClickHouse timeout"));
+      const processAnalyticsTraceDeletionBatchSpy = vi
+        .spyOn(analyticsTraceDelete, "processAnalyticsTraceDeletionBatch")
+        .mockRejectedValueOnce(new Error("Doris timeout"));
 
       await expect((cleaner as any).processProject(projectId1)).resolves.toBe(
         false,
       );
 
-      expect(processClickhouseTraceDeleteSpy).toHaveBeenCalledTimes(1);
+      expect(processAnalyticsTraceDeletionBatchSpy).toHaveBeenCalledTimes(1);
 
       const deletions = await prisma.pendingDeletion.findMany({
         where: { projectId: projectId1 },
@@ -148,11 +147,11 @@ describe("BatchTraceDeletionCleaner", () => {
       const retriedDeletions = await prisma.pendingDeletion.findMany({
         where: { projectId: projectId1 },
       });
-      expect(processClickhouseTraceDeleteSpy).toHaveBeenCalledTimes(2);
+      expect(processAnalyticsTraceDeletionBatchSpy).toHaveBeenCalledTimes(2);
       expect(retriedDeletions.every((d) => d.isDeleted)).toBe(true);
     });
 
-    it("should log all failed deletion backends in a single failed run", async () => {
+    it("should log a failed Doris deletion in a single failed run", async () => {
       const traceIds = Array.from({ length: 3 }, () => randomUUID());
 
       await prisma.pendingDeletion.createMany({
@@ -165,13 +164,9 @@ describe("BatchTraceDeletionCleaner", () => {
       });
 
       vi.spyOn(
-        postgresTraceDelete,
-        "processPostgresTraceDelete",
-      ).mockRejectedValueOnce(new Error("Postgres timeout"));
-      vi.spyOn(
-        clickhouseTraceDelete,
-        "processClickhouseTraceDelete",
-      ).mockRejectedValueOnce(new Error("ClickHouse timeout"));
+        analyticsTraceDelete,
+        "processAnalyticsTraceDeletionBatch",
+      ).mockRejectedValueOnce(new Error("Doris timeout"));
       const loggerWarnSpy = vi.spyOn(logger, "warn");
 
       await expect((cleaner as any).processProject(projectId1)).resolves.toBe(
@@ -181,10 +176,7 @@ describe("BatchTraceDeletionCleaner", () => {
       expect(loggerWarnSpy).toHaveBeenCalledWith(
         "BatchTraceDeletionCleaner: Trace deletion failed, will retry later",
         expect.objectContaining({
-          failures: [
-            { backend: "postgres", errorName: "Error" },
-            { backend: "clickhouse", errorName: "Error" },
-          ],
+          failures: [{ backend: "doris", errorName: "Error" }],
         }),
       );
 

@@ -255,7 +255,7 @@ function evaluationWindow(
   return { fromTimestamp, toTimestamp };
 }
 
-/** parseNumericValue coerces a ClickHouse cell to number | null, mapping missing or non-finite values to null. */
+/** parseNumericValue coerces a Doris cell to number | null, mapping missing or non-finite values to null. */
 function parseNumericValue(raw: unknown): number | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
@@ -469,7 +469,7 @@ type MetricMap = Record<string, MetricValue>;
 /** MonitorPublisher publishes one MonitorWebhookInput onto the webhook queue. */
 export type MonitorPublisher = (input: MonitorWebhookInput) => Promise<void>;
 
-/** QueryExecutor runs a monitor's ClickHouse query. */
+/** QueryExecutor runs a monitor's Doris query. */
 export type QueryExecutor = typeof defaultExecuteQuery;
 
 /** GetTriggerConfigurations loads the trigger configurations matching a filter. */

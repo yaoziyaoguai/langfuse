@@ -1,9 +1,3 @@
-import {
-  generateDailyMetrics as _generateDailyMetrics,
-  getDailyMetricsCount as _getDailyMetricsCount,
-  convertApiProvidedFilterToClickhouseFilter,
-  isDorisAnalyticsBackend,
-} from "@langfuse/shared/src/server";
 import { InvalidRequestError, type FilterState } from "@langfuse/shared";
 import { executeQuery } from "@langfuse/shared/query/server";
 import type { QueryType } from "@langfuse/shared/query";
@@ -177,82 +171,10 @@ function readDorisDailyMetrics(
   return read;
 }
 
-const filterParams = [
-  {
-    id: "userId",
-    clickhouseSelect: "user_id",
-    filterType: "StringFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-  {
-    id: "traceName",
-    clickhouseSelect: "name",
-    filterType: "StringFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-  {
-    id: "tags",
-    clickhouseSelect: "tags",
-    filterType: "ArrayOptionsFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-  {
-    id: "traceEnvironment",
-    clickhouseSelect: "environment",
-    filterType: "StringOptionsFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-  {
-    id: "observationEnvironment",
-    clickhouseSelect: "environment",
-    filterType: "StringOptionsFilter",
-    clickhouseTable: "observations",
-    clickhousePrefix: "o",
-  },
-  {
-    id: "fromTimestamp",
-    clickhouseSelect: "timestamp",
-    operator: ">=" as const,
-    filterType: "DateTimeFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-  {
-    id: "toTimestamp",
-    clickhouseSelect: "timestamp",
-    operator: "<" as const,
-    filterType: "DateTimeFilter",
-    clickhouseTable: "traces",
-    clickhousePrefix: "t",
-  },
-];
-
 export const generateDailyMetrics = (props: DailyMetricsQueryProps) => {
-  if (isDorisAnalyticsBackend()) {
-    return readDorisDailyMetrics(props).then(({ data }) => data);
-  }
-  const filter = convertApiProvidedFilterToClickhouseFilter(
-    props,
-    filterParams,
-  );
-  return _generateDailyMetrics({
-    projectId: props.projectId,
-    filter,
-    pagination: { limit: props.limit, page: props.page },
-  });
+  return readDorisDailyMetrics(props).then(({ data }) => data);
 };
 
 export const getDailyMetricsCount = (props: DailyMetricsQueryProps) => {
-  if (isDorisAnalyticsBackend()) {
-    return readDorisDailyMetrics(props).then(({ count }) => count);
-  }
-  const filter = convertApiProvidedFilterToClickhouseFilter(
-    props,
-    filterParams,
-  );
-  return _getDailyMetricsCount({ projectId: props.projectId, filter });
+  return readDorisDailyMetrics(props).then(({ count }) => count);
 };

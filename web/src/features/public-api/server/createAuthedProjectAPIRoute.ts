@@ -25,7 +25,7 @@ import {
   unstablePublicEvalsErrorContract,
   type PublicApiErrorContract,
 } from "@/src/features/public-api/server/unstable-public-api-error-contract";
-import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
+import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
 
 /** Access levels that can be accepted by project-scoped API routes. */
 type RouteAccessLevel = Exclude<ApiAccessLevel, "organization">;
@@ -73,14 +73,6 @@ export type AuthedProjectAPIRouteConfig<
    * Only set this to true on non-mutating (GET) routes that should be callable by the in-app agent.
    */
   allowInAppAgentKey?: boolean;
-  /**
-   * When true, this route returns 404 if LANGFUSE_MIGRATION_V4_WRITE_MODE is
-   * "events_only". Set this on routes that read from the legacy traces or
-   * observations ClickHouse tables without an events_full fallback — those
-   * tables are no longer populated in events_only mode and would silently
-   * return stale or empty data.
-   */
-  rejectInEventsOnlyMode?: boolean;
   fn: (params: {
     query: z.infer<TQuery>;
     body: z.infer<TBody>;
@@ -305,21 +297,6 @@ export const createAuthedProjectAPIRoute = <
   routeConfig: AuthedProjectAPIRouteConfig<TQuery, TBody, TResponse>,
 ): ((req: NextApiRequest, res: NextApiResponse) => Promise<void>) => {
   return async (req: NextApiRequest, res: NextApiResponse) => {
-    // Short-circuit routes that read from legacy traces/observations tables
-    // when the deployment is in events_only mode — those tables are no longer
-    // populated, so the response would be stale or empty. Returning 404 keeps
-    // the surface area consistent with "this endpoint is not available here".
-    if (
-      routeConfig.rejectInEventsOnlyMode &&
-      env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "events_only"
-    ) {
-      res.status(404).json({
-        message:
-          "This endpoint is not available on deployments running in Langfuse v4 events_only mode. Learn more about Langfuse v4 at: https://langfuse.com/docs/v4",
-      });
-      return;
-    }
-
     let auth: AuthHeaderValidVerificationResult & {
       scope: { projectId: string; accessLevel: RouteAccessLevel };
     };
@@ -434,9 +411,9 @@ export const createAuthedProjectAPIRoute = <
       headers: req.headers,
       projectId: auth.scope.projectId,
       apiKeyId: auth.scope.apiKeyId,
-      clickhouse: {
+      analytics: {
         surface: "publicapi",
-        route: clickHouseRouteForRequest(req),
+        route: analyticsRouteForRequest(req),
       },
     });
     return opentelemetry.context.with(ctx, async () => {
@@ -449,6 +426,10 @@ export const createAuthedProjectAPIRoute = <
           scope: { projectId: string; accessLevel: RouteAccessLevel };
         },
       });
+
+      // Some compatibility handlers intentionally serialize a terminal error
+      // response themselves. Never validate or write a second response.
+      if (res.writableEnded || res.headersSent) return;
 
       if (env.NODE_ENV === "development" && routeConfig.responseSchema) {
         const parsingResult = routeConfig.responseSchema.safeParse(response);

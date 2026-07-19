@@ -14,8 +14,8 @@ type MutableDeep<T> = T extends readonly (infer U)[]
     ? { -readonly [K in keyof T]: MutableDeep<T[K]> }
     : T;
 
-// Column definitions for the ClickHouse events table
-// Used for filtering, sorting, and mapping UI columns to ClickHouse columns
+// Column definitions for analytics events.
+// Used for filtering, sorting, and mapping UI columns to Doris fields.
 const eventsTableColsDefinition = [
   {
     name: "ID",

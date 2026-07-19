@@ -4,6 +4,9 @@ import {
   canonicalPayloadHash,
   normalizeVersionToken,
   type CanonicalAnalyticsBatch,
+  type CanonicalAnalyticsEntity,
+  type CanonicalAnalyticsEvent,
+  type CanonicalAnalyticsFileReference,
   type CanonicalAnalyticsScore,
 } from "@langfuse/shared/analytics-persistence";
 import { describe, expect, it } from "vitest";
@@ -57,7 +60,7 @@ function score(
 }
 
 function batch(
-  children: readonly CanonicalAnalyticsScore[],
+  children: readonly CanonicalAnalyticsEntity[],
 ): CanonicalAnalyticsBatch {
   return {
     projectId: "project-1",
@@ -73,6 +76,88 @@ function batch(
       traceDeletionGeneration: 0n,
       projectDeletionGeneration: 0n,
     })),
+  };
+}
+
+function event(): CanonicalAnalyticsEvent {
+  return {
+    kind: "event",
+    projectId: "project-1",
+    partitionDate: "2026-07-17",
+    sourceContract: "otlp",
+    sourceVersion: acceptedAt + 3n,
+    canonicalizerVersion: "1",
+    schemaVersion: 3,
+    canonicalPayloadHash: canonicalPayloadHash({ kind: "event" }),
+    systemTimestamp: acceptedAt,
+    rawObjectKey: "events/project-1/raw/operation-1.json",
+    resolvedEnrichmentIds: { model: "model-1" },
+    traceId: "trace-event",
+    spanId: "span-1",
+    parentSpanId: null,
+    type: "GENERATION",
+    name: "generation",
+    environment: "default",
+    version: "v1",
+    release: null,
+    traceName: "trace",
+    startTime: acceptedAt,
+    endTime: acceptedAt + 100n,
+    completionStartTime: acceptedAt + 50n,
+    userId: "user-1",
+    sessionId: "session-1",
+    level: "DEFAULT",
+    statusMessage: null,
+    isAppRoot: true,
+    bookmarked: false,
+    public: false,
+    tags: ["one", "two"],
+    input: { prompt: ["hello", 1, true, null] },
+    output: "world",
+    metadata: { nested: { answer: 42 } },
+    providedModelName: "model",
+    internalModelId: "model-1",
+    promptId: null,
+    promptName: null,
+    promptVersion: null,
+    modelParameters: { temperature: 0.5 },
+    providedUsageDetails: { input: 2 },
+    usageDetails: { input: 2, output: 1 },
+    providedCostDetails: { input: 0.01 },
+    costDetails: { total: 0.02 },
+    totalCost: 0.02,
+    toolDefinitions: { search: "{}" },
+    toolCalls: ["call-1"],
+    toolCallNames: ["search"],
+    source: "OTEL",
+    ingestionSdkName: "sdk",
+    ingestionSdkVersion: "1.0.0",
+    serviceName: "service",
+    telemetrySdkLanguage: "typescript",
+    eventBytes: 512,
+  };
+}
+
+function fileReference(): CanonicalAnalyticsFileReference {
+  return {
+    kind: "fileReference",
+    projectId: "project-1",
+    partitionDate: "2026-07-17",
+    sourceContract: "file-reference",
+    sourceVersion: acceptedAt + 4n,
+    canonicalizerVersion: "1",
+    schemaVersion: 3,
+    canonicalPayloadHash: canonicalPayloadHash({ kind: "fileReference" }),
+    systemTimestamp: acceptedAt,
+    rawObjectKey: "events/project-1/raw/operation-1.json",
+    resolvedEnrichmentIds: {},
+    entityType: "EVENT",
+    entityId: "span-1",
+    owningTraceId: "trace-event",
+    fileId: "file-1",
+    eventId: "span-1",
+    bucketName: "bucket",
+    bucketPath: "path/file.json",
   };
 }
 
@@ -120,6 +205,22 @@ describe("CanonicalIngestionArtifactStore", () => {
     );
   });
 
+  it("round-trips every canonical entity variant through the explicit codec", () => {
+    const original = batch([
+      score("score-a", { nested: "score" }),
+      event(),
+      fileReference(),
+    ]);
+    const encoded = encodeCanonicalArtifact(original);
+
+    expect(decodeCanonicalArtifact(encoded.body, encoded.checksum)).toEqual({
+      ...original,
+      children: [...original.children].sort((left, right) =>
+        left.entity.kind.localeCompare(right.entity.kind),
+      ),
+    });
+  });
+
   it("uses a fence-specific safe key", () => {
     expect(
       canonicalArtifactObjectKey({
@@ -150,6 +251,63 @@ describe("CanonicalIngestionArtifactStore", () => {
     await expect(store.getIfExists(key)).resolves.toEqual({
       batch: original,
       checksum: created.checksum,
+    });
+  });
+
+  it("stores expanded canonical batches as deterministic immutable shards", async () => {
+    const objectStore = new MemoryConditionalObjectStore();
+    const first = score("score-a", { payload: "a".repeat(64) });
+    const second = score("score-b", { payload: "b".repeat(64) });
+    const original = batch([first, second]);
+    const maxArtifactBytes = Math.max(
+      Buffer.byteLength(encodeCanonicalArtifact(batch([first])).body, "utf8"),
+      Buffer.byteLength(encodeCanonicalArtifact(batch([second])).body, "utf8"),
+    );
+    expect(
+      Buffer.byteLength(encodeCanonicalArtifact(original).body, "utf8"),
+    ).toBeGreaterThan(maxArtifactBytes);
+    const store = new CanonicalIngestionArtifactStore(
+      objectStore,
+      maxArtifactBytes,
+    );
+    const key = "events/canonical-ingestion/project/operation/fence-2.json";
+
+    const created = await store.putIfAbsent(key, original);
+    const replay = await store.putIfAbsent(key, original);
+
+    expect(created.outcome).toBe("created");
+    expect(replay.outcome).toBe("already_exists");
+    expect(objectStore.objects.size).toBe(3);
+    await expect(store.get(key, created.checksum)).resolves.toEqual(original);
+  });
+
+  it("round-trips mixed entity variants from deterministic shards", async () => {
+    const objectStore = new MemoryConditionalObjectStore();
+    const entities = [
+      score("score-a", { payload: "a".repeat(64) }),
+      event(),
+      fileReference(),
+    ];
+    const maxArtifactBytes = Math.max(
+      ...entities.map((entity) =>
+        Buffer.byteLength(encodeCanonicalArtifact(batch([entity])).body),
+      ),
+    );
+    const store = new CanonicalIngestionArtifactStore(
+      objectStore,
+      maxArtifactBytes,
+    );
+    const original = batch(entities);
+    const key = "events/canonical-ingestion/project/operation/fence-3.json";
+
+    const created = await store.putIfAbsent(key, original);
+
+    expect(objectStore.objects.size).toBe(4);
+    await expect(store.get(key, created.checksum)).resolves.toEqual({
+      ...original,
+      children: [...original.children].sort((left, right) =>
+        left.entity.kind.localeCompare(right.entity.kind),
+      ),
     });
   });
 

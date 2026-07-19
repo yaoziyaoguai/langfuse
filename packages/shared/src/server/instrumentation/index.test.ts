@@ -1,7 +1,7 @@
 import { context } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { normalizeClickHouseQueryTags } from "../clickhouse/queryTags";
+import { normalizeAnalyticsQueryTags } from "../analyticsQueryTags";
 import { contextWithLangfuseProps } from "../headerPropagation";
 import { instrumentAsync, instrumentSync } from ".";
 
@@ -21,13 +21,13 @@ describe("instrumentation baggage propagation", () => {
   it("instrumentAsync keeps worker surface/route across startNewTrace", async () => {
     const workerContext = contextWithLangfuseProps({
       projectId: "project-1",
-      clickhouse: { surface: "worker", route: "langfuse.queue.monitor" },
+      analytics: { surface: "worker", route: "langfuse.queue.monitor" },
     });
 
     const tags = await context.with(workerContext, () =>
       instrumentAsync(
         { name: "process monitor", startNewTrace: true },
-        async () => normalizeClickHouseQueryTags(),
+        async () => normalizeAnalyticsQueryTags(),
       ),
     );
 
@@ -41,12 +41,12 @@ describe("instrumentation baggage propagation", () => {
   it("instrumentSync keeps worker surface/route across startNewTrace", () => {
     const workerContext = contextWithLangfuseProps({
       projectId: "project-1",
-      clickhouse: { surface: "worker", route: "langfuse.queue.monitor" },
+      analytics: { surface: "worker", route: "langfuse.queue.monitor" },
     });
 
     const tags = context.with(workerContext, () =>
       instrumentSync({ name: "process monitor", startNewTrace: true }, () =>
-        normalizeClickHouseQueryTags(),
+        normalizeAnalyticsQueryTags(),
       ),
     );
 

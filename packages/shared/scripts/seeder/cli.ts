@@ -13,13 +13,12 @@ const ENV_FIX = "cp .env.dev.example .env  (then review required values)";
 // src/server import itself throw before any CLI code can run.
 const REQUIRED_ENV_VARS = [
   "DATABASE_URL",
-  "CLICKHOUSE_URL",
-  "CLICKHOUSE_USER",
-  "CLICKHOUSE_PASSWORD",
+  "DORIS_QUERY_URL",
+  "DORIS_QUERY_USER",
 ];
 
 // === undefined, not falsy: empty strings are valid for some of these
-// (e.g. passwordless local ClickHouse) and pass the zod schema; only
+// (e.g. passwordless local Doris) and pass the zod schema; only
 // absence makes the src/server import throw. Malformed present values are
 // handled by the import catch below.
 const missing = REQUIRED_ENV_VARS.filter(

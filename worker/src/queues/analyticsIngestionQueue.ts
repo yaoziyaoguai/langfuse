@@ -12,8 +12,9 @@ import {
   claimAnalyticsIngestionOutbox,
   findAnalyticsIngestionOperationForProject,
   markAnalyticsIngestionOutboxPublished,
-  markAnalyticsIngestionRetrying,
   markAnalyticsIngestionTerminalFailure,
+  resolveAnalyticsIngestionAttemptFailure,
+  logger,
   QueueJobs,
   QueueName,
   recordIncrement,
@@ -28,7 +29,23 @@ interface AnalyticsIngestionQueueProducer {
     name: QueueJobs.AnalyticsIngestionJob,
     data: TQueueJobTypes[QueueName.AnalyticsIngestionQueue],
     options: JobsOptions,
-  ): Promise<unknown>;
+  ): Promise<{
+    getState(): Promise<string>;
+    retry(state: "failed"): Promise<void>;
+  }>;
+}
+
+function recordAttemptResolution(
+  resolution: "requeued" | "terminalized" | "unchanged",
+): void {
+  recordIncrement("langfuse.analytics.ingestion.queue", 1, {
+    status:
+      resolution === "requeued"
+        ? "outbox_requeued"
+        : resolution === "terminalized"
+          ? "terminalized"
+          : "stale_delivery",
+  });
 }
 
 export async function publishAnalyticsIngestionOutboxBatch(input: {
@@ -62,7 +79,7 @@ export async function publishAnalyticsIngestionOutboxBatch(input: {
 
   let published = 0;
   for (const outbox of claimed) {
-    await queue.add(
+    const delivery = await queue.add(
       QueueJobs.AnalyticsIngestionJob,
       {
         timestamp: now,
@@ -70,14 +87,22 @@ export async function publishAnalyticsIngestionOutboxBatch(input: {
         payload: {
           operationId: outbox.operationId,
           projectId: outbox.operation.projectId,
+          generation: outbox.generation,
         },
         name: QueueJobs.AnalyticsIngestionJob,
       },
-      { jobId: outbox.operationId },
+      {
+        jobId: `${outbox.operationId}-g${outbox.generation}`,
+        attempts: 1,
+      },
     );
+    if ((await delivery.getState()) === "failed") {
+      await delivery.retry("failed");
+    }
     const marked = await markPublished({
       client,
       operationId: outbox.operationId,
+      generation: outbox.generation,
       workerId: input.workerId,
       now,
     });
@@ -115,8 +140,13 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
   ) => Promise<CanonicalAnalyticsBatch>;
   readonly client?: PrismaClient;
   readonly findOperation?: typeof findAnalyticsIngestionOperationForProject;
-  readonly markRetrying?: typeof markAnalyticsIngestionRetrying;
   readonly markTerminalFailure?: typeof markAnalyticsIngestionTerminalFailure;
+  readonly resolveAttemptFailure?: typeof resolveAnalyticsIngestionAttemptFailure;
+  readonly reconcileUnresolved?: (input: {
+    readonly operationId: string;
+    readonly projectId: string;
+  }) => Promise<boolean>;
+  readonly assertReady?: () => Promise<void>;
 }): Processor<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]> {
   return async (
     job: Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>,
@@ -132,6 +162,8 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
     if (!operation) {
       throw new AnalyticsPersistenceError("ANALYTICS_NOT_FOUND", false);
     }
+    const generation = payload.generation;
+    if (operation.outboxV2?.generation !== generation) return;
     if (operation.terminalAt) {
       if (
         operation.status === "VISIBLE" ||
@@ -140,51 +172,92 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
       ) {
         return;
       }
-      throw new AnalyticsPersistenceError(
+      const terminalError = new AnalyticsPersistenceError(
         operation.status === "UNRECOVERABLE"
           ? "ANALYTICS_UNRECOVERABLE"
           : "ANALYTICS_QUARANTINED",
         false,
         { tags: { operationId: operation.id, phase: "queue_terminal" } },
       );
+      throw new UnrecoverableError(terminalError.message);
     }
 
     try {
+      await input.assertReady?.();
+      if (
+        await input.reconcileUnresolved?.({
+          operationId: operation.id,
+          projectId: operation.projectId,
+        })
+      ) {
+        recordIncrement("langfuse.analytics.ingestion.queue", 1, {
+          status: "terminal",
+        });
+        return;
+      }
       const batch = await input.canonicalize(operation);
       await input.sink.persist(batch);
       recordIncrement("langfuse.analytics.ingestion.queue", 1, {
         status: "terminal",
       });
     } catch (error) {
-      if (!(error instanceof AnalyticsPersistenceError)) throw error;
-      if (!error.retryable) {
-        await (
+      const persistenceError =
+        error instanceof AnalyticsPersistenceError
+          ? error
+          : new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+              tags: {
+                operationId: operation.id,
+                phase: "unexpected_worker_error",
+              },
+            });
+      if (!(error instanceof AnalyticsPersistenceError)) {
+        logger.error("Unexpected Doris analytics ingestion worker error", {
+          operationId: operation.id,
+          projectId: operation.projectId,
+          error,
+        });
+      }
+      if (!persistenceError.retryable) {
+        const terminalized = await (
           input.markTerminalFailure ?? markAnalyticsIngestionTerminalFailure
         )({
           client: input.client ?? prisma,
           operationId: operation.id,
           projectId: operation.projectId,
           status:
-            error.code === "ANALYTICS_QUARANTINED" ||
-            error.code === "ANALYTICS_CONFLICT"
+            persistenceError.code === "ANALYTICS_QUARANTINED" ||
+            persistenceError.code === "ANALYTICS_CONFLICT"
               ? "QUARANTINED"
               : "UNRECOVERABLE",
-          reasonCode: error.code,
+          reasonCode: persistenceError.code,
+          expectedGeneration: generation,
         });
-        throw new UnrecoverableError(error.message);
+        if (!terminalized) {
+          const resolution = await (
+            input.resolveAttemptFailure ??
+            resolveAnalyticsIngestionAttemptFailure
+          )({
+            client: input.client ?? prisma,
+            operationId: operation.id,
+            projectId: operation.projectId,
+            reasonCode: persistenceError.code,
+            expectedGeneration: generation,
+          });
+          recordAttemptResolution(resolution);
+        }
+        throw new UnrecoverableError(persistenceError.message);
       }
-      const attempts = job.opts.attempts ?? 1;
-      const exhausted = job.attemptsMade + 1 >= attempts;
-      await (input.markRetrying ?? markAnalyticsIngestionRetrying)({
+      const resolution = await (
+        input.resolveAttemptFailure ?? resolveAnalyticsIngestionAttemptFailure
+      )({
         client: input.client ?? prisma,
         operationId: operation.id,
         projectId: operation.projectId,
-        reasonCode: exhausted ? "MAX_RETRIES_EXHAUSTED" : error.code,
+        reasonCode: persistenceError.code,
+        expectedGeneration: generation,
       });
-      recordIncrement("langfuse.analytics.ingestion.queue", 1, {
-        status: exhausted ? "retry_exhausted" : "retrying",
-      });
-      throw error;
+      recordAttemptResolution(resolution);
+      throw new UnrecoverableError(persistenceError.message);
     }
   };
 }

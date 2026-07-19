@@ -120,7 +120,7 @@ function preprocessData(data: unknown): unknown {
     let messages = obj.messages;
 
     // Handle double-stringified messages: { messages: "[{...}]" }
-    // ClickHouse can store the array as a string due to double-stringification
+    // Doris can store the array as a string due to double-stringification
     if (typeof messages === "string") {
       try {
         messages = JSON.parse(messages);

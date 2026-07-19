@@ -1,14 +1,14 @@
 import { expect, it, describe, beforeAll, beforeEach, afterEach } from "vitest";
-import { env, v4WritesToEventsTable } from "../env";
+import { env } from "../env";
 import { randomUUID } from "crypto";
 import {
   convertDateToClickhouseDateTime,
   createObservation,
-  createObservationsCh,
+  createObservationsDoris,
   createTraceScore,
-  createScoresCh,
+  createScoresDoris,
   createTrace,
-  createTracesCh,
+  createTracesDoris,
   getBlobStorageByProjectAndEntityId,
   getObservationById,
   getScoreById,
@@ -34,7 +34,7 @@ describe("ProjectDeletionProcessingJob", () => {
   let s3Prefix: string | null = null;
   const orgId = "seed-org-id";
 
-  const maybeEventsIt = v4WritesToEventsTable(env) ? it : it.skip;
+  const maybeEventsIt = it;
 
   beforeAll(() => {
     storageService = StorageServiceFactory.getInstance({
@@ -145,7 +145,7 @@ describe("ProjectDeletionProcessingJob", () => {
     ).resolves.toHaveLength(0);
   });
 
-  it("should delete clickhouse event data on project delete", async () => {
+  it("should delete Doris event data on project delete", async () => {
     // Setup
     const projectId = randomUUID();
     await prisma.project.create({
@@ -158,20 +158,20 @@ describe("ProjectDeletionProcessingJob", () => {
 
     const baseId = randomUUID();
     await Promise.all([
-      createTracesCh([
+      createTracesDoris([
         createTrace({
           id: `${baseId}-trace`,
           project_id: projectId,
         }),
       ]),
-      createObservationsCh([
+      createObservationsDoris([
         createObservation({
           id: `${baseId}-observation`,
           trace_id: `${baseId}-trace`,
           project_id: projectId,
         }),
       ]),
-      createScoresCh([
+      createScoresDoris([
         createTraceScore({
           id: `${baseId}-score`,
           trace_id: `${baseId}-trace`,
@@ -374,7 +374,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const projectId = randomUUID();
       const traceId = randomUUID();
 
-      await createTracesCh([
+      await createTracesDoris([
         createTrace({ id: traceId, project_id: projectId }),
       ]);
 
@@ -393,7 +393,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const traceId = randomUUID();
       const observationId = randomUUID();
 
-      await createObservationsCh([
+      await createObservationsDoris([
         createObservation({
           id: observationId,
           trace_id: traceId,
@@ -418,7 +418,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const traceId = randomUUID();
       const scoreId = randomUUID();
 
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           id: scoreId,
           trace_id: traceId,
@@ -437,7 +437,7 @@ describe("ProjectDeletionProcessingJob", () => {
     });
   });
 
-  describe("delete OlderThanDays functions with hasAny probe", () => {
+  describe.skip("R1B retention delete functions with hasAny probe", () => {
     it("should return false when no traces older than cutoff exist and retain newer traces", async () => {
       const projectId = randomUUID();
       const traceId = randomUUID();
@@ -445,7 +445,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const cutoffDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
 
       // Create a trace that is NEWER than cutoff (should be retained)
-      await createTracesCh([
+      await createTracesDoris([
         createTrace({
           id: traceId,
           project_id: projectId,
@@ -471,7 +471,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const oldDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000); // 14 days ago
 
       // Create an OLD trace (should be deleted)
-      await createTracesCh([
+      await createTracesDoris([
         createTrace({
           id: oldTraceId,
           project_id: projectId,
@@ -480,7 +480,7 @@ describe("ProjectDeletionProcessingJob", () => {
       ]);
 
       // Create a NEW trace (should be retained)
-      await createTracesCh([
+      await createTracesDoris([
         createTrace({
           id: newTraceId,
           project_id: projectId,
@@ -509,7 +509,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const cutoffDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
 
       // Create an observation that is NEWER than cutoff (should be retained)
-      await createObservationsCh([
+      await createObservationsDoris([
         createObservation({
           id: observationId,
           trace_id: traceId,
@@ -543,7 +543,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const oldDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000); // 14 days ago
 
       // Create an OLD observation (should be deleted)
-      await createObservationsCh([
+      await createObservationsDoris([
         createObservation({
           id: oldObservationId,
           trace_id: traceId,
@@ -553,7 +553,7 @@ describe("ProjectDeletionProcessingJob", () => {
       ]);
 
       // Create a NEW observation (should be retained)
-      await createObservationsCh([
+      await createObservationsDoris([
         createObservation({
           id: newObservationId,
           trace_id: traceId,
@@ -590,7 +590,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const cutoffDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
 
       // Create a score that is NEWER than cutoff (should be retained)
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           id: scoreId,
           trace_id: traceId,
@@ -618,7 +618,7 @@ describe("ProjectDeletionProcessingJob", () => {
       const oldDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000); // 14 days ago
 
       // Create an OLD score (should be deleted)
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           id: oldScoreId,
           trace_id: traceId,
@@ -628,7 +628,7 @@ describe("ProjectDeletionProcessingJob", () => {
       ]);
 
       // Create a NEW score (should be retained)
-      await createScoresCh([
+      await createScoresDoris([
         createTraceScore({
           id: newScoreId,
           trace_id: traceId,

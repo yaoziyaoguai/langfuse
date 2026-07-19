@@ -1,9 +1,9 @@
-import { clickhouseClient } from "../../../src/server";
+import { getDorisQueryExecutor } from "../../../src/server";
 import { ScenarioContext } from "./types";
 
 /**
- * Cheap post-write readback. Not a verification framework — just enough for
- * the CLI to fail loudly when rows did not land.
+ * Cheap post-write readback. The logical table names are retained so existing
+ * scenarios stay readable while all physical reads target Doris R1A tables.
  */
 export const countRows = async (
   table: string,
@@ -11,12 +11,37 @@ export const countRows = async (
   params: Record<string, string | number | string[]>,
   countExpr = "count()",
 ): Promise<number> => {
-  const result = await clickhouseClient().query({
-    query: `SELECT ${countExpr} AS c FROM ${table} WHERE ${whereSql}`,
-    query_params: params,
-    format: "JSONEachRow",
-  });
-  const rows = await result.json<{ c: string | number }>();
+  const physicalTable =
+    table === "scores" ? "scores_current" : "events_current";
+  const idColumn =
+    table === "traces"
+      ? "trace_id"
+      : table === "scores"
+        ? "score_id"
+        : "span_id";
+  const parameterValues: unknown[] = [];
+  const replaceParameters = (sql: string) =>
+    sql.replace(/\{([A-Za-z0-9_]+): [^}]+\}/g, (_match, name: string) => {
+      parameterValues.push(params[name]!);
+      return "?";
+    });
+  const metadataExpression = /metadata\[\{([A-Za-z0-9_]+): String\}\]/g;
+  const normalizeExpression = (sql: string) =>
+    sql
+      .replace(metadataExpression, (_match, name: string) => {
+        parameterValues.push(params[name]!);
+        return "JSON_UNQUOTE(CAST(ELEMENT_AT(metadata, ?) AS STRING))";
+      })
+      .replace(/\bid\b/g, idColumn);
+  const normalizedCount = countExpr
+    .replace(/^count\(\)$/i, "COUNT(*)")
+    .replace(/^uniqExact\((.+)\)$/i, "COUNT(DISTINCT $1)");
+  const select = replaceParameters(normalizeExpression(normalizedCount));
+  const where = replaceParameters(normalizeExpression(whereSql));
+  const rows = await getDorisQueryExecutor().query<{ c: string | number }>(
+    `SELECT ${select} AS c FROM ${physicalTable} WHERE ${where}`,
+    parameterValues,
+  );
   return Number(rows[0]?.c ?? 0);
 };
 

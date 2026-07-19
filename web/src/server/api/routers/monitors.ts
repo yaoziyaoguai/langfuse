@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
-  requireV4Writes,
 } from "@/src/server/api/trpc";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { throwIfExceedsLimit } from "@/src/features/entitlements/server/hasEntitlementLimit";
@@ -19,7 +18,7 @@ import {
 } from "@langfuse/shared/monitors/server";
 
 /** monitorsProcedure protects monitor routes behind a v4Writes check. */
-const monitorsProcedure = protectedProjectProcedure.use(requireV4Writes);
+const monitorsProcedure = protectedProjectProcedure;
 
 /** sessionContextFromCtx adapts a tRPC session into a MonitorService SessionContext. */
 const sessionContextFromCtx = (ctx: {

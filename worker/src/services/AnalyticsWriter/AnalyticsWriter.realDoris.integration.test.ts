@@ -328,6 +328,10 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
         queue: {
           add: async (_name, data) => {
             queuedJobs.push(data);
+            return {
+              getState: async () => "waiting",
+              retry: async () => undefined,
+            };
           },
         },
       }),
@@ -373,11 +377,11 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
         ),
       prisma.analyticsIngestionOperation.findUniqueOrThrow({
         where: { id: operationId },
-        include: { candidates: true, loadBatches: true, outbox: true },
+        include: { candidates: true, loadBatches: true, outboxV2: true },
       }),
       prisma.analyticsIngestionOperation.findUniqueOrThrow({
         where: { id: scoreOperationId },
-        include: { candidates: true, loadBatches: true, outbox: true },
+        include: { candidates: true, loadBatches: true, outboxV2: true },
       }),
     ]);
 
@@ -404,7 +408,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       manifestState: "FROZEN",
       terminalAt: expect.any(Date),
       rawObjectKey,
-      outbox: { status: "PUBLISHED" },
+      outboxV2: { status: "PUBLISHED" },
     });
     expect(eventOperation.candidates).toHaveLength(1);
     expect(eventOperation.loadBatches).toHaveLength(1);
@@ -416,7 +420,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       manifestState: "FROZEN",
       terminalAt: expect.any(Date),
       rawObjectKey: scoreRawObjectKey,
-      outbox: { status: "PUBLISHED" },
+      outboxV2: { status: "PUBLISHED" },
     });
     expect(scoreOperation.candidates).toHaveLength(2);
     expect(scoreOperation.loadBatches).toHaveLength(2);

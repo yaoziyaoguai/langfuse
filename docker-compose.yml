@@ -3,6 +3,45 @@
 # In addition, we recommend to restrict inbound traffic on the host to langfuse-web (port 3000) and minio (port 9090) only.
 # All other components are bound to localhost (127.0.0.1) to only accept connections from the local machine.
 # External connections from other machines will not be able to reach these services directly.
+x-langfuse-common-env: &langfuse-common-env
+  NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres} # CHANGEME
+  SALT: ${SALT:-mysalt} # CHANGEME
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000} # CHANGEME: generate via `openssl rand -hex 32`
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+  DORIS_LOCAL_DEV_MODE: "true"
+  DORIS_QUERY_URL: mysql://doris-fe:9030/langfuse
+  DORIS_QUERY_USER: root
+  DORIS_QUERY_PASSWORD: ""
+  DORIS_QUERY_TLS_ENABLED: "false"
+  LANGFUSE_USE_AZURE_BLOB: ${LANGFUSE_USE_AZURE_BLOB:-false}
+  LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE: ${LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE:-false}
+  LANGFUSE_OCI_AUTH_TYPE: ${LANGFUSE_OCI_AUTH_TYPE:-workload_identity}
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:-miniosecret} # CHANGEME
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:-minio}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:-miniosecret} # CHANGEME
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
+  REDIS_HOST: ${REDIS_HOST:-redis}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_AUTH: ${REDIS_AUTH:-myredissecret} # CHANGEME
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: ${LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK:-false}
+  REDIS_TLS_ENABLED: ${REDIS_TLS_ENABLED:-false}
+  REDIS_TLS_CA: ${REDIS_TLS_CA:-/certs/ca.crt}
+  REDIS_TLS_CERT: ${REDIS_TLS_CERT:-/certs/redis.crt}
+  REDIS_TLS_KEY: ${REDIS_TLS_KEY:-/certs/redis.key}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+  SMTP_CONNECTION_URL: ${SMTP_CONNECTION_URL:-}
+
 services:
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3
@@ -14,60 +53,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
+      doris-migrate:
+        condition: service_completed_successfully
     ports:
       - 127.0.0.1:3030:3030
-    environment: &langfuse-worker-env
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres} # CHANGEME
-      SALT: ${SALT:-mysalt} # CHANGEME
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000} # CHANGEME: generate via `openssl rand -hex 32`
-      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
-      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
-      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
-      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse} # CHANGEME
-      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
-      LANGFUSE_USE_AZURE_BLOB: ${LANGFUSE_USE_AZURE_BLOB:-false}
-      LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE: ${LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE:-false}
-      LANGFUSE_OCI_AUTH_TYPE: ${LANGFUSE_OCI_AUTH_TYPE:-workload_identity}
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:-miniosecret} # CHANGEME
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:-miniosecret} # CHANGEME
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
-      LANGFUSE_S3_BATCH_EXPORT_ENABLED: ${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-false}
-      LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_S3_BATCH_EXPORT_BUCKET:-langfuse}
-      LANGFUSE_S3_BATCH_EXPORT_PREFIX: ${LANGFUSE_S3_BATCH_EXPORT_PREFIX:-exports/}
-      LANGFUSE_S3_BATCH_EXPORT_REGION: ${LANGFUSE_S3_BATCH_EXPORT_REGION:-auto}
-      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT:-http://localhost:9090}
-      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY:-miniosecret} # CHANGEME
-      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: ${LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE:-true}
-      LANGFUSE_INGESTION_QUEUE_DELAY_MS: ${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}
-      LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: ${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      REDIS_AUTH: ${REDIS_AUTH:-myredissecret} # CHANGEME
-      LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: ${LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK:-false}
-      REDIS_TLS_ENABLED: ${REDIS_TLS_ENABLED:-false}
-      REDIS_TLS_CA: ${REDIS_TLS_CA:-/certs/ca.crt}
-      REDIS_TLS_CERT: ${REDIS_TLS_CERT:-/certs/redis.crt}
-      REDIS_TLS_KEY: ${REDIS_TLS_KEY:-/certs/redis.key}
-      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
-      SMTP_CONNECTION_URL: ${SMTP_CONNECTION_URL:-}
+    environment:
+      <<: *langfuse-common-env
+      DORIS_STREAM_LOAD_FE_URL: http://doris-fe:8030
+      DORIS_STREAM_LOAD_DATABASE: langfuse
+      DORIS_STREAM_LOAD_USER: root
+      DORIS_STREAM_LOAD_PASSWORD: ""
+      DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: 172.29.0.2
+      DORIS_STREAM_LOAD_BE_ALLOWLIST: http://doris-be:8040
+      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: 172.29.0.3
+    networks:
+      - default
+      - doris-internal
 
   langfuse-web:
     image: docker.io/langfuse/langfuse:3
@@ -76,7 +77,7 @@ services:
     ports:
       - 3000:3000
     environment:
-      <<: *langfuse-worker-env
+      <<: *langfuse-common-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret} # CHANGEME
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
@@ -87,27 +88,85 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    networks:
+      - default
+      - doris-internal
 
-  clickhouse:
-    image: docker.io/clickhouse/clickhouse-server
-    restart: always
-    user: "101:101"
+  doris-fe:
+    image: apache/doris:fe-4.0.7
+    hostname: doris-fe
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        sed -i 's/-Xmx8192m -Xms8192m/-Xmx2048m -Xms2048m/' /opt/apache-doris/fe/conf/fe.conf
+        && exec bash /usr/local/bin/init_fe.sh
     environment:
-      CLICKHOUSE_DB: default
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse} # CHANGEME
+      - FE_SERVERS=fe1:172.29.0.2:9010
+      - FE_ID=1
     volumes:
-      - langfuse_clickhouse_data:/var/lib/clickhouse
-      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+      - langfuse_doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - langfuse_doris_fe_logs:/opt/apache-doris/fe/log
     ports:
-      - 127.0.0.1:8123:8123
-      - 127.0.0.1:9000:9000
+      - 127.0.0.1:8030:8030
+      - 127.0.0.1:9030:9030
+    networks:
+      doris-internal:
+        ipv4_address: 172.29.0.2
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
-      interval: 5s
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8030/api/bootstrap || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 1s
+      retries: 30
+      start_period: 90s
+
+  doris-be:
+    image: apache/doris:be-4.0.7
+    hostname: doris-be
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        echo 'mem_limit_percentage = 70' >> /opt/apache-doris/be/conf/be.conf
+        && exec bash /usr/local/bin/init_be.sh
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    environment:
+      - MASTER_FE_IP=172.29.0.2
+      - CURRENT_BE_IP=172.29.0.3
+      - CURRENT_BE_PORT=9050
+      - PRIORITY_NETWORKS=172.29.0.0/24
+    volumes:
+      - langfuse_doris_be_storage:/opt/apache-doris/be/storage
+      - langfuse_doris_be_logs:/opt/apache-doris/be/log
+    ports:
+      - 127.0.0.1:8040:8040
+    networks:
+      doris-internal:
+        ipv4_address: 172.29.0.3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8040/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+  doris-migrate:
+    image: docker.io/langfuse/langfuse:3
+    restart: "no"
+    entrypoint: ["node", "/app/packages/shared/dist/doris/scripts/migrate.js"]
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+      doris-be:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DORIS_MIGRATION_URL: mysql://doris-fe:9030/langfuse
+      DORIS_MIGRATION_USER: root
+      DORIS_MIGRATION_PASSWORD: ""
+      DORIS_MIGRATION_TLS_ENABLED: "false"
+    networks:
+      - doris-internal
 
   minio:
     image: cgr.dev/chainguard/minio
@@ -169,11 +228,22 @@ services:
 volumes:
   langfuse_postgres_data:
     driver: local
-  langfuse_clickhouse_data:
+  langfuse_doris_fe_meta:
     driver: local
-  langfuse_clickhouse_logs:
+  langfuse_doris_fe_logs:
+    driver: local
+  langfuse_doris_be_storage:
+    driver: local
+  langfuse_doris_be_logs:
     driver: local
   langfuse_minio_data:
     driver: local
   langfuse_redis_data:
     driver: local
+
+networks:
+  doris-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

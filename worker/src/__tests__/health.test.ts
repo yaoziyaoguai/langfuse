@@ -15,16 +15,11 @@ vi.mock("@langfuse/shared/src/db", () => ({
   prisma: { $queryRaw: mocks.queryRaw },
 }));
 vi.mock("@langfuse/shared/src/server", () => ({
-  checkAnalyticsReadiness: mocks.checkAnalyticsReadiness,
-  DorisClientManager: {
-    getInstance: () => ({ getClient: () => ({ query: vi.fn() }) }),
-  },
   logger: { info: vi.fn(), warn: vi.fn() },
-  parseDorisQueryConfig: vi.fn(() => ({})),
-  PrismaAnalyticsCompatibilityControlState: class {},
   redis: { ping: mocks.ping },
-  SUPPORTED_DORIS_CANONICALIZER_VERSIONS: ["1"],
-  SUPPORTED_DORIS_SCHEMA_VERSIONS: [2],
+}));
+vi.mock("../services/dorisAnalyticsReadiness", () => ({
+  probeDorisAnalyticsReadiness: mocks.checkAnalyticsReadiness,
 }));
 import { checkContainerHealth } from "../features/health";
 

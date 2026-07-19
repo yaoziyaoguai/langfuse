@@ -61,7 +61,7 @@ function truncateCategoryLabel(label: string): string {
 /**
  * Parse a raw bucket value into a Date, but ONLY when it actually looks like a
  * timestamp: an epoch-ms number, an ISO string, or a "YYYY-MM-DD[ T]HH:MM:SS"
- * ClickHouse datetime (optionally a bare "YYYY-MM-DD"). Values without an
+ * Doris datetime (optionally a bare "YYYY-MM-DD"). Values without an
  * explicit timezone are treated as UTC, because the buckets come back
  * UTC-aligned — parsing them as local is what produced wrong dates.
  *

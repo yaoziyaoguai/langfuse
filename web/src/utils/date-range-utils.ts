@@ -372,7 +372,7 @@ export type IntervalUnit =
 
 /**
  * Interval configuration with count and unit
- * Used for ClickHouse INTERVAL N UNIT queries
+ * Used for Doris INTERVAL N UNIT queries
  */
 export type IntervalConfig = {
   count: number;
@@ -528,7 +528,7 @@ export function getOptimalInterval(
 
 /**
  * Determines the optimal interval for score analytics based on time range.
- * Maps time ranges to appropriate intervals for ClickHouse aggregation.
+ * Maps time ranges to appropriate intervals for Doris aggregation.
  *
  * Target: 20-50 data points for optimal visualization
  *

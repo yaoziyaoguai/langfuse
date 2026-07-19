@@ -9,6 +9,7 @@ import {
   PromptService,
   redis,
   parseDorisStreamLoadConfig,
+  resolveDorisNodeEnv,
   type ResourceSpan,
   type StorageService,
 } from "@langfuse/shared/src/server";
@@ -31,9 +32,11 @@ import {
   warnOnUsageTotalMismatch,
 } from "./AnalyticsGenerationUsageResolver";
 import { RawAnalyticsIngestionCanonicalizer } from "./RawAnalyticsIngestionCanonicalizer";
+import { assertDorisAnalyticsReady } from "./dorisAnalyticsReadiness";
 
 type RuntimeEnvironment = {
   readonly NODE_ENV?: "development" | "test" | "production";
+  readonly DORIS_LOCAL_DEV_MODE?: "true" | "false";
   readonly LANGFUSE_S3_EVENT_UPLOAD_BUCKET: string;
   readonly LANGFUSE_S3_EVENT_UPLOAD_PREFIX?: string;
   readonly DORIS_QUERY_USER?: string;
@@ -106,7 +109,7 @@ export function createDorisAnalyticsPersistence(input: {
               runtimeEnv.DORIS_STREAM_LOAD_MAX_BODY_BYTES,
             ),
           },
-          nodeEnv,
+          resolveDorisNodeEnv(nodeEnv, runtimeEnv.DORIS_LOCAL_DEV_MODE),
         );
   const streamLoadTransport =
     input.streamLoadTransport ?? new DorisStreamLoadClient(streamConfig!);
@@ -143,6 +146,9 @@ export function createDorisAnalyticsPersistence(input: {
     processor: analyticsIngestionQueueProcessorBuilder({
       client,
       sink: writer,
+      assertReady: assertDorisAnalyticsReady,
+      reconcileUnresolved: (operation) =>
+        writer.reconcileUnresolvedOperation(operation),
       canonicalize: (operation) => canonicalizer.canonicalize(operation),
     }),
     workerId,

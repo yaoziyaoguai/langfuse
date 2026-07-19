@@ -1,77 +1,56 @@
-import { readFileSync } from "fs";
-import path from "path";
 import { prisma } from "../../../src/db";
-import { clickhouseClient } from "../../../src/server";
-import { ClickHouseQueryBuilder } from "../utils/clickhouse-builder";
+import {
+  createObservation,
+  createTrace,
+  createTraceScore,
+  type EventRecordInsertType,
+  type ScoreRecordInsertType,
+} from "../../../src/server";
+import {
+  seedEventFixtures,
+  seedScoreFixtures,
+} from "../utils/analytics-writer";
+import { observationToEvent } from "./event-mirror";
+import { utcDayStartMs } from "./rng";
 import {
   ScenarioContext,
   ScenarioDefinition,
   SeedError,
   SeedSummary,
 } from "./types";
-import { utcDayStartMs } from "./rng";
 import { countRows, escapeLike, tracesListLink } from "./verify";
 
 const SESSION_POOL_SIZE = 100;
-
-/**
- * Loads the bundled large fixtures, sliced exactly like SeederOrchestrator so
- * the inline INSERT ... SELECT FROM numbers() SQL stays under ClickHouse's
- * max_query_size.
- */
-const loadFileContent = () => {
-  const utilsDir = path.join(__dirname, "../utils");
-  const nestedJson = JSON.parse(
-    readFileSync(path.join(utilsDir, "nested_json.json"), "utf-8"),
-  );
-  const chatMlJson = JSON.parse(
-    readFileSync(path.join(utilsDir, "chat_ml_json.json"), "utf-8"),
-  );
-  return {
-    heavyMarkdown: readFileSync(path.join(utilsDir, "markdown.txt"), "utf-8"),
-    nestedJson: {
-      ...nestedJson,
-      products: nestedJson.products?.slice(0, 3) ?? [],
-    },
-    chatMlJson: {
-      ...chatMlJson,
-      messages: chatMlJson.messages?.slice(0, 4) ?? [],
-    },
-  };
-};
+const TRACE_BATCH_SIZE = 250;
 
 const run = async (
   ctx: ScenarioContext,
   params: Record<string, string | number | boolean>,
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
-  const count = params["count"] as number;
-  const days = params["days"] as number;
-  const observationsPerTrace = params["observations-per-trace"] as number;
-  const scoresPerTrace = params["scores-per-trace"] as number;
-  const richPayloads = params["rich-payloads"] as boolean;
+  const count = Number(params["count"]);
+  const days = Number(params["days"]);
+  const observationsPerTrace = Number(params["observations-per-trace"]);
+  const scoresPerTrace = Number(params["scores-per-trace"]);
+  const richPayloads = params["rich-payloads"] === true;
 
-  if (count < 1) {
+  if (!Number.isInteger(count) || count < 1) {
+    throw new SeedError(`--count must be a positive integer, got ${count}`);
+  }
+  if (!Number.isInteger(observationsPerTrace) || observationsPerTrace < 1) {
     throw new SeedError(
-      `--count must be >= 1, got ${count}`,
-      "pass a positive integer, e.g. --count 10000",
+      `--observations-per-trace must be >= 1 in the Doris events-only model, got ${observationsPerTrace}`,
     );
   }
-  if (observationsPerTrace < 0 || scoresPerTrace < 0) {
+  if (!Number.isInteger(scoresPerTrace) || scoresPerTrace < 0) {
     throw new SeedError(
-      `--observations-per-trace and --scores-per-trace must be >= 0, got ${observationsPerTrace} / ${scoresPerTrace}`,
-      "pass 0 to seed traces without observations/scores, or a positive integer",
+      `--scores-per-trace must be >= 0, got ${scoresPerTrace}`,
     );
   }
-  if (days < 0) {
-    throw new SeedError(
-      `--days must be >= 0, got ${days}`,
-      "negative windows would place traces in the future, hidden by UI time filters",
-    );
+  if (!Number.isFinite(days) || days < 0) {
+    throw new SeedError(`--days must be >= 0, got ${days}`);
   }
 
-  const builder = new ClickHouseQueryBuilder();
-  const fileContent = richPayloads ? loadFileContent() : undefined;
   const counts: Record<string, number> = {
     sessions: SESSION_POOL_SIZE,
     traces: count,
@@ -79,18 +58,17 @@ const run = async (
     scores: count * scoresPerTrace,
   };
   const links = [tracesListLink(ctx)];
-
   if (ctx.dryRun) {
     return {
       scenario: "many-traces",
-      target: "clickhouse",
+      target: "doris",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
       traceIds: [],
       sessionIds: Array.from(
         { length: 5 },
-        (_, i) => `${ctx.idPrefix}-session_${i}`,
+        (_, index) => `${ctx.idPrefix}-session_${index}`,
       ),
       counts,
       verified: {},
@@ -100,83 +78,118 @@ const run = async (
     };
   }
 
-  // Ids are `{id-prefix}-trace-bulk-{n}-{projectId-suffix}`: re-runs with the
-  // same prefix and count overwrite, a different --id-prefix adds an
-  // independent copy.
-  ctx.log(
-    `bulk-inserting ${count} traces, ${counts.observations} observations, ${counts.scores} scores over ${days} day(s)`,
-  );
-  // One shared anchor so the three INSERT statements cannot straddle a UTC
-  // midnight and anchor observations/scores to a different day than traces.
-  const bulkOpts = {
-    numberOfDays: days,
-    idPrefix: ctx.idPrefix,
-    anchorSeconds: Math.floor(utcDayStartMs() / 1000),
-    seed: ctx.seed,
-  };
-  // Link ~10% of generations to REAL prompts — fabricated prompt ids would
-  // silently break the trace-detail prompt badge. No prompts -> NULL columns.
-  const prompts = await prisma.prompt.findMany({
-    where: { projectId: ctx.projectId },
-    select: { id: true, name: true, version: true },
-    orderBy: { createdAt: "asc" },
-    take: 10,
-  });
-  const queries = [
-    builder.buildBulkTracesInsert(
-      ctx.projectId,
-      count,
-      ctx.environment,
-      fileContent,
-      bulkOpts,
-    ),
-  ];
-  if (observationsPerTrace > 0) {
-    queries.push(
-      builder.buildBulkObservationsInsert(
-        ctx.projectId,
-        count,
-        observationsPerTrace,
-        ctx.environment,
-        fileContent,
-        { ...bulkOpts, prompts },
-      ),
-    );
-  }
-  if (scoresPerTrace > 0) {
-    queries.push(
-      builder.buildBulkScoresInsert(
-        ctx.projectId,
-        count,
-        scoresPerTrace,
-        ctx.environment,
-        {
-          ...bulkOpts,
-          observationsPerTrace,
-        },
-      ),
-    );
-  }
-  // The bulk SQL references {id-prefix}-session_0..99 on ~30% of traces; the
-  // session detail page 404s without the Postgres trace_sessions rows
-  // (same contract long-session handles for its own session).
   await prisma.traceSession.createMany({
-    data: Array.from({ length: SESSION_POOL_SIZE }, (_, i) => ({
-      id: `${ctx.idPrefix}-session_${i}`,
+    data: Array.from({ length: SESSION_POOL_SIZE }, (_, index) => ({
+      id: `${ctx.idPrefix}-session_${index}`,
       projectId: ctx.projectId,
       environment: ctx.environment,
     })),
     skipDuplicates: true,
   });
 
-  for (const query of queries) {
-    await clickhouseClient().command({
-      query,
-      clickhouse_settings: { wait_end_of_query: 1 },
-    });
+  const anchor = utcDayStartMs();
+  const spreadMs = days * 24 * 60 * 60 * 1_000;
+  const suffix = ctx.projectId.slice(-8);
+  ctx.log(
+    `writing ${count} traces, ${counts.observations} observations and ${counts.scores} scores through the analytics ingestion pipeline`,
+  );
+
+  for (let offset = 0; offset < count; offset += TRACE_BATCH_SIZE) {
+    const end = Math.min(count, offset + TRACE_BATCH_SIZE);
+    const events: EventRecordInsertType[] = [];
+    const scores: ScoreRecordInsertType[] = [];
+    for (let index = offset; index < end; index += 1) {
+      const traceId = `${ctx.idPrefix}-trace-bulk-${index}-${suffix}`;
+      const timestamp =
+        anchor - Math.floor((index * spreadMs) / Math.max(count, 1));
+      const trace = createTrace({
+        id: traceId,
+        project_id: ctx.projectId,
+        environment: ctx.environment,
+        session_id:
+          index % 10 < 3
+            ? `${ctx.idPrefix}-session_${index % SESSION_POOL_SIZE}`
+            : null,
+        timestamp,
+        name: `bulk-trace-${index % 10}`,
+        user_id: index % 3 === 0 ? `${ctx.idPrefix}-user-${index % 100}` : null,
+        tags: ["seed", "many-traces"],
+        metadata: { scenario: "many-traces", index: String(index) },
+        input: richPayloads
+          ? JSON.stringify({
+              question: `Explain fixture ${index}`,
+              nested: { index },
+            })
+          : JSON.stringify({ index }),
+        output: richPayloads
+          ? `Generated fixture answer for trace ${index}`
+          : "ok",
+        public: false,
+        bookmarked: index % 20 === 0,
+        created_at: timestamp,
+        updated_at: timestamp,
+        event_ts: timestamp,
+      });
+
+      for (
+        let observationIndex = 0;
+        observationIndex < observationsPerTrace;
+        observationIndex += 1
+      ) {
+        const observation = createObservation({
+          id: `${ctx.idPrefix}-obs-bulk-${index}-${observationIndex}-${suffix}`,
+          trace_id: traceId,
+          project_id: ctx.projectId,
+          environment: ctx.environment,
+          parent_observation_id:
+            observationIndex === 0
+              ? null
+              : `${ctx.idPrefix}-obs-bulk-${index}-0-${suffix}`,
+          type: observationIndex % 3 === 0 ? "GENERATION" : "SPAN",
+          name: `bulk-observation-${observationIndex}`,
+          start_time: timestamp + observationIndex * 10,
+          end_time: timestamp + observationIndex * 10 + 5,
+          completion_start_time:
+            observationIndex % 3 === 0
+              ? timestamp + observationIndex * 10 + 2
+              : null,
+          input: trace.input,
+          output: trace.output,
+          metadata: { scenario: "many-traces" },
+          created_at: timestamp,
+          updated_at: timestamp,
+          event_ts: timestamp + observationIndex * 10 + 5,
+        });
+        events.push(observationToEvent(observation, trace));
+      }
+
+      for (let scoreIndex = 0; scoreIndex < scoresPerTrace; scoreIndex += 1) {
+        scores.push(
+          createTraceScore({
+            id: `${ctx.idPrefix}-score-bulk-${index}-${scoreIndex}-${suffix}`,
+            project_id: ctx.projectId,
+            trace_id: traceId,
+            observation_id: null,
+            environment: ctx.environment,
+            name: `bulk-score-${scoreIndex % 5}`,
+            value: ((index + scoreIndex) % 100) / 100,
+            data_type: "NUMERIC",
+            source: "EVAL",
+            comment: null,
+            metadata: {},
+            timestamp,
+            created_at: timestamp,
+            updated_at: timestamp,
+            event_ts: timestamp,
+          }),
+        );
+      }
+    }
+    await seedEventFixtures(events);
+    await seedScoreFixtures(scores);
   }
 
-  const idSuffix = escapeLike(ctx.projectId.slice(-8));
+  const idSuffix = escapeLike(suffix);
   const verified: Record<string, number> = {
     traces: await countRows(
       "traces",
@@ -207,32 +220,28 @@ const run = async (
     ),
   };
 
-  if (verified.traces < count) {
-    throw new SeedError(
-      `Readback mismatch: expected at least ${count} bulk traces, found ${verified.traces}`,
-    );
-  }
-  if (verified.observations < counts.observations) {
-    throw new SeedError(
-      `Readback mismatch: expected ${counts.observations} bulk observations, found ${verified.observations}`,
-    );
-  }
-  if (verified.scores < counts.scores) {
-    throw new SeedError(
-      `Readback mismatch: expected ${counts.scores} bulk scores, found ${verified.scores}`,
-    );
+  for (const [entity, expected] of Object.entries({
+    traces: count,
+    observations: counts.observations,
+    scores: counts.scores,
+  })) {
+    if (verified[entity] !== expected) {
+      throw new SeedError(
+        `Readback mismatch for ${entity}: expected ${expected}, found ${verified[entity]}`,
+      );
+    }
   }
 
   return {
     scenario: "many-traces",
-    target: "clickhouse",
+    target: "doris",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,
     traceIds: [],
     sessionIds: Array.from(
       { length: 5 },
-      (_, i) => `${ctx.idPrefix}-session_${i}`,
+      (_, index) => `${ctx.idPrefix}-session_${index}`,
     ),
     counts,
     verified,
@@ -244,39 +253,33 @@ const run = async (
 
 export const manyTracesScenario: ScenarioDefinition = {
   name: "many-traces",
-  description:
-    "Bulk traces/observations/scores for trace-list and filter performance work: ClickHouse numbers() SQL, fast even for 100k+ traces, deterministic ids so re-runs do not duplicate.",
-  supportsV4: false,
+  description: "Large deterministic Doris trace corpus for list performance",
+  supportsV4: true,
   flags: [
     {
       flag: "count",
       type: "number",
       default: 10_000,
-      description: "number of traces",
+      description: "Trace count",
     },
-    {
-      flag: "days",
-      type: "number",
-      default: 3,
-      description: "spread timestamps over the past N days",
-    },
+    { flag: "days", type: "number", default: 7, description: "UTC day spread" },
     {
       flag: "observations-per-trace",
       type: "number",
-      default: 5,
-      description: "observations per trace",
+      default: 3,
+      description: "Events per trace (minimum 1)",
     },
     {
       flag: "scores-per-trace",
       type: "number",
-      default: 2,
-      description: "scores per trace",
+      default: 1,
+      description: "Trace-level scores per trace",
     },
     {
       flag: "rich-payloads",
       type: "boolean",
       default: false,
-      description: "embed bundled markdown/JSON fixtures as payloads",
+      description: "Use larger nested input/output fixtures",
     },
   ],
   run,

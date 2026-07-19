@@ -1,7 +1,3 @@
-vi.hoisted(() => {
-  process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE = "dual";
-});
-
 // Mock queue operations to avoid Redis dependency in tests
 vi.mock("@langfuse/shared/src/server", async () => {
   const actual = await vi.importActual("@langfuse/shared/src/server");
@@ -39,8 +35,8 @@ import { z } from "zod";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   createEvent,
-  createEventsCh,
-  createScoresCh,
+  createEventsDoris,
+  createScoresDoris,
   createTraceScore,
 } from "@langfuse/shared/src/server";
 import { ScoreConfigDataType } from "@langfuse/shared";
@@ -53,7 +49,6 @@ import {
   verifyAuditLog,
   verifyToolAnnotations,
 } from "./mcp-helpers";
-import { env } from "@/src/env.mjs";
 import "@/src/features/mcp/server/bootstrap";
 import { toolRegistry } from "@/src/features/mcp/server/registry";
 import {
@@ -189,12 +184,8 @@ import {
   GetDatasetsMcpInput,
 } from "@/src/features/mcp/features/datasets/schema";
 
-const maybeEventsTable =
-  env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
-    ? describe
-    : describe.skip;
-const maybeEventsTableIt =
-  env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true" ? it : it.skip;
+const maybeEventsTable = describe;
+const maybeEventsTableIt = it;
 
 const createLlmEvaluatorForMcpReadTest = async (
   setup: Awaited<ReturnType<typeof createMcpTestSetup>>,
@@ -942,7 +933,7 @@ describe("MCP Read Tools", () => {
         metadata: { region: "eu-west", tenant: "acme" },
       });
 
-      await createEventsCh([matchingObservation, nonMatchingObservation]);
+      await createEventsDoris([matchingObservation, nonMatchingObservation]);
 
       const result = (await handleListObservations(
         {
@@ -992,7 +983,7 @@ describe("MCP Read Tools", () => {
         metadata: { hidden: "metadata" },
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleListObservations(
         { traceId, limit: 100 },
@@ -1035,7 +1026,7 @@ describe("MCP Read Tools", () => {
         name: `mcp-list-in-app-agent-${nanoid()}`,
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleListObservations(
         { traceId, fields: ["id"], limit: 100 },
@@ -1061,7 +1052,7 @@ describe("MCP Read Tools", () => {
         name: `mcp-list-fields-${nanoid()}`,
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleListObservations(
         { traceId, fields: ["id", "name", "type"], limit: 100 },
@@ -1096,7 +1087,7 @@ describe("MCP Read Tools", () => {
         metadata: { customer: "acme" },
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleListObservations(
         { traceId, fields: ["*"], limit: 100 },
@@ -1118,7 +1109,7 @@ describe("MCP Read Tools", () => {
       const traceId = randomUUID();
       const matchingUserId = `mcp-filter-user-${nanoid()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           traceId,
@@ -1170,7 +1161,7 @@ describe("MCP Read Tools", () => {
         input: `${"x".repeat(250)}${needle}`,
       });
 
-      await createEventsCh([
+      await createEventsDoris([
         matchingObservation,
         createObservationEvent({
           projectId,
@@ -1278,7 +1269,7 @@ describe("MCP Read Tools", () => {
         totalCost: 0.003,
       });
 
-      await createEventsCh([
+      await createEventsDoris([
         matchingObservation,
         createObservationEvent({
           projectId,
@@ -1383,7 +1374,7 @@ describe("MCP Read Tools", () => {
         tags: [matchingTag],
       });
 
-      await createEventsCh([
+      await createEventsDoris([
         matchingObservation,
         createObservationEvent({
           projectId,
@@ -1426,7 +1417,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const traceId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           traceId,
@@ -1484,7 +1475,7 @@ describe("MCP Read Tools", () => {
         name: `mcp-list-isolation-${nanoid()}`,
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result1 = (await handleListObservations(
         { traceId, fields: ["id"], limit: 100 },
@@ -1536,7 +1527,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const traceId = randomUUID();
 
-      await createEventsCh(
+      await createEventsDoris(
         Array.from({ length: 3 }, (_, index) =>
           createObservationEvent({
             projectId,
@@ -1576,7 +1567,7 @@ describe("MCP Read Tools", () => {
       const highCountName = `mcp-metrics-order-high-${nanoid()}`;
       const lowCountName = `mcp-metrics-order-low-${nanoid()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         ...Array.from({ length: 3 }, (_, index) =>
           createObservationEvent({
             projectId,
@@ -1627,7 +1618,7 @@ describe("MCP Read Tools", () => {
       const scoreName = `mcp-metrics-score-value-order-${nanoid()}`;
       const observationId = randomUUID();
 
-      await createEventsCh([
+      await createEventsDoris([
         createEvent({
           id: observationId,
           span_id: observationId,
@@ -1637,7 +1628,7 @@ describe("MCP Read Tools", () => {
           start_time: Date.parse("2026-01-01T00:00:00.000Z") * 1000,
         }),
       ]);
-      await createScoresCh([
+      await createScoresDoris([
         ...Array.from({ length: 3 }, () =>
           createTraceScore({
             id: randomUUID(),
@@ -1711,7 +1702,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const traceId = randomUUID();
 
-      await createEventsCh(
+      await createEventsDoris(
         Array.from({ length: 150 }, (_, index) =>
           createObservationEvent({
             projectId,
@@ -1749,7 +1740,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const traceId = randomUUID();
 
-      await createEventsCh(
+      await createEventsDoris(
         Array.from({ length: 20 }, (_, index) =>
           createObservationEvent({
             projectId,
@@ -1883,7 +1874,7 @@ describe("MCP Read Tools", () => {
         input: "hidden input",
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleGetObservation(
         { observationId: observation.id },
@@ -1914,7 +1905,7 @@ describe("MCP Read Tools", () => {
         name: `mcp-get-in-app-agent-${nanoid()}`,
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleGetObservation(
         { observationId: observation.id, fields: ["id"] },
@@ -1939,7 +1930,7 @@ describe("MCP Read Tools", () => {
         metadata: { customer: "acme" },
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       const result = (await handleGetObservation(
         { observationId: observation.id, fields: ["id", "metadata"] },
@@ -1974,7 +1965,7 @@ describe("MCP Read Tools", () => {
         name: `mcp-get-isolation-${nanoid()}`,
       });
 
-      await createEventsCh([observation]);
+      await createEventsDoris([observation]);
 
       await expect(
         handleGetObservation({ observationId: observation.id }, context2),
@@ -2006,7 +1997,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const uniqueModel = `mcp-model-${nanoid()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           name: `mcp-filter-values-${nanoid()}`,
@@ -2043,7 +2034,7 @@ describe("MCP Read Tools", () => {
       const lowTotalCost = 0.1;
       const highTotalCost = 0.3;
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           name: `mcp-filter-examples-${nanoid()}`,
@@ -2096,7 +2087,7 @@ describe("MCP Read Tools", () => {
       const { context, projectId } = await createMcpTestSetup();
       const uniqueTag = `mcp-tag-${nanoid()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           name: `mcp-filter-tags-${nanoid()}`,
@@ -2118,7 +2109,7 @@ describe("MCP Read Tools", () => {
     it("should return boolean values for hasParentObservation with counts", async () => {
       const { context, projectId } = await createMcpTestSetup();
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({
           projectId,
           name: `mcp-filter-has-parent-${nanoid()}`,
@@ -2152,7 +2143,7 @@ describe("MCP Read Tools", () => {
       const nextName = `mcp-filter-page-next-${nanoid()}`;
       const lastName = `mcp-filter-page-last-${nanoid()}`;
 
-      await createEventsCh([
+      await createEventsDoris([
         createObservationEvent({ projectId, name: topName }),
         createObservationEvent({ projectId, name: topName }),
         createObservationEvent({ projectId, name: topName }),
@@ -2227,7 +2218,7 @@ describe("MCP Read Tools", () => {
         string_value: "True",
       });
 
-      await createScoresCh([matchingScore, otherScore]);
+      await createScoresDoris([matchingScore, otherScore]);
 
       const result = (await handleListScores(
         {
@@ -2301,7 +2292,7 @@ describe("MCP Read Tools", () => {
         value: 0.8,
       });
 
-      await createScoresCh([score]);
+      await createScoresDoris([score]);
 
       const result = await handleGetScore({ scoreId: score.id }, context);
 
@@ -2322,7 +2313,7 @@ describe("MCP Read Tools", () => {
         id: randomUUID(),
       });
 
-      await createScoresCh([score]);
+      await createScoresDoris([score]);
 
       await expect(
         handleGetScore({ scoreId: randomUUID() }, otherContext),

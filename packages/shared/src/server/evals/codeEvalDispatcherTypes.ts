@@ -206,7 +206,7 @@ export function assertDispatchInputWithinLimits(input: DispatchInput): string {
 
 /**
  * Guard against malicious or runaway evaluator output that would blow up
- * downstream score ingestion and ClickHouse writes. Each dispatcher is
+ * downstream score ingestion and Doris writes. Each dispatcher is
  * expected to call this with the byte size at its cheapest representation:
  * Lambda has the raw response bytes (`response.Payload.byteLength`) so the
  * check is free; the local dispatcher must serialize the in-memory result

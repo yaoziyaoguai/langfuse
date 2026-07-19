@@ -93,15 +93,15 @@ export function createMcpServer(context: ServerContext): Server {
 
     // Execute handler with context
     // Handler performs validation and error handling via defineTool wrapper
-    const clickHouseCtx = contextWithLangfuseProps({
+    const analyticsCtx = contextWithLangfuseProps({
       projectId: context.projectId,
       apiKeyId: context.apiKeyId,
-      clickhouse: {
+      analytics: {
         surface: "mcp",
         route: name,
       },
     });
-    const result = await otelContext.with(clickHouseCtx, () =>
+    const result = await otelContext.with(analyticsCtx, () =>
       registeredTool.handler(args, context),
     );
 

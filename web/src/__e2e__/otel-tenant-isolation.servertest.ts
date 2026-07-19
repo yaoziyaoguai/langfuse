@@ -1,6 +1,6 @@
 import {
   createOrgProjectAndApiKey,
-  queryClickhouse,
+  getDorisQueryExecutor,
 } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 import waitForExpect from "wait-for-expect";
@@ -78,36 +78,20 @@ describe("OTEL ingestion tenant isolation", () => {
 
     await waitForExpect(
       async () => {
-        const rowsA = await queryClickhouse<{ count: string }>({
-          // ReplacingMergeTree: dedup with `LIMIT 1 BY id, project_id` so a
-          // retry-induced duplicate insert (the OtelIngestionQueue is
-          // configured with attempts: 6) cannot inflate the count and make
-          // the strict toBe(1) fail for a non-isolation reason.
-          query: `SELECT count() as count FROM (
-            SELECT id
-            FROM observations
-            WHERE project_id = {projectId: String} AND id = {spanId: String}
-            ORDER BY event_ts DESC
-            LIMIT 1 BY id, project_id
-          )`,
-          params: { projectId: projectA.projectId, spanId: spanIdHex },
-        });
+        const rowsA = await getDorisQueryExecutor().query<{ count: string }>(
+          `SELECT COUNT(*) AS count
+           FROM events_current
+           WHERE project_id = ? AND span_id = ?`,
+          [projectA.projectId, spanIdHex],
+        );
         expect(Number(rowsA[0]?.count)).toBe(1);
 
-        const rowsB = await queryClickhouse<{ count: string }>({
-          // ReplacingMergeTree: dedup with `LIMIT 1 BY id, project_id` so a
-          // retry-induced duplicate insert (the OtelIngestionQueue is
-          // configured with attempts: 6) cannot inflate the count and make
-          // the strict toBe(1) fail for a non-isolation reason.
-          query: `SELECT count() as count FROM (
-            SELECT id
-            FROM observations
-            WHERE project_id = {projectId: String} AND id = {spanId: String}
-            ORDER BY event_ts DESC
-            LIMIT 1 BY id, project_id
-          )`,
-          params: { projectId: projectB.projectId, spanId: spanIdHex },
-        });
+        const rowsB = await getDorisQueryExecutor().query<{ count: string }>(
+          `SELECT COUNT(*) AS count
+           FROM events_current
+           WHERE project_id = ? AND span_id = ?`,
+          [projectB.projectId, spanIdHex],
+        );
         expect(Number(rowsB[0]?.count)).toBe(0);
       },
       40_000,

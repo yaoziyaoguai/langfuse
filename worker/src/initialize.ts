@@ -1,14 +1,10 @@
 import { upsertDefaultModelPrices } from "./scripts/upsertDefaultModelPrices";
-import { upsertManagedEvaluators } from "./scripts/upsertManagedEvaluators";
 import { upsertLangfuseDashboards } from "./scripts/upsertLangfuseDashboards";
-import { initializeClickhouseCompatibility } from "@langfuse/shared/src/server";
+import { assertDorisAnalyticsReady } from "./services/dorisAnalyticsReadiness";
 
 export const initializeWorker = async (): Promise<void> => {
-  await initializeClickhouseCompatibility();
-
-  await Promise.all([
-    upsertDefaultModelPrices(),
-    upsertManagedEvaluators(),
-    upsertLangfuseDashboards(),
-  ]);
+  // Fail closed before app.ts can register any BullMQ consumer or outbox
+  // publisher against an incompatible Doris schema.
+  await assertDorisAnalyticsReady({ force: true });
+  await Promise.all([upsertDefaultModelPrices(), upsertLangfuseDashboards()]);
 };

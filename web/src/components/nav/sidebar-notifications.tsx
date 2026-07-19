@@ -49,7 +49,7 @@ export const notifications: SidebarNotification[] = [
     id: "lw5-3",
     title: "Launch Week: Day 3",
     description: "Fast full-text search on observation I/O via the UI and API",
-    link: "https://langfuse.com/changelog/2026-05-27-clickhouse-full-text-search-fast-mode",
+    link: "https://langfuse.com/changelog/2026-05-27-Doris-full-text-search-fast-mode",
     linkTitle: "Learn more",
     createdAt: "2026-05-27",
   },

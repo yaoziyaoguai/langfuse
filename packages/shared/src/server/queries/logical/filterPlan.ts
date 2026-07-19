@@ -24,6 +24,7 @@ const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
   level: { expression: "e.`level`" },
   statusMessage: { expression: "e.status_message" },
   promptName: { expression: "e.prompt_name" },
+  promptId: { expression: "e.prompt_id" },
   promptVersion: { expression: "e.prompt_version" },
   modelId: { expression: "e.internal_model_id" },
   providedModelName: { expression: "e.provided_model_name" },
@@ -99,6 +100,55 @@ const U6_COLUMNS = new Set([
   "trace_score_booleans",
 ]);
 
+const EVENT_COLUMN_ALIASES: Readonly<Record<string, string>> = {
+  "Trace Tags": "traceTags",
+  "User ID": "userId",
+  "Session ID": "sessionId",
+  "Trace Name": "traceName",
+  "Trace Environment": "environment",
+  Environment: "environment",
+  ID: "id",
+  Type: "type",
+  Name: "name",
+  "Trace ID": "traceId",
+  "Parent Observation ID": "parentObservationId",
+  "Start Time": "startTime",
+  "End Time": "endTime",
+  Timestamp: "startTime",
+  "Time To First Token (s)": "timeToFirstToken",
+  "Latency (s)": "latency",
+  "Tokens per second": "tokensPerSecond",
+  "Input Cost ($)": "inputCost",
+  "Output Cost ($)": "outputCost",
+  "Total Cost ($)": "totalCost",
+  Level: "level",
+  "Status Message": "statusMessage",
+  Model: "providedModelName",
+  "Model ID": "modelId",
+  "Input Tokens": "inputTokens",
+  "Output Tokens": "outputTokens",
+  "Total Tokens": "totalTokens",
+  "Prompt Name": "promptName",
+  "Prompt ID": "promptId",
+  "Prompt Version": "promptVersion",
+  Version: "version",
+  Release: "release",
+  Tags: "traceTags",
+  model: "providedModelName",
+  tokens: "totalTokens",
+  tags: "traceTags",
+  traceEnvironment: "environment",
+};
+
+export function normalizeDorisEventFilters(
+  filters: EventsTableFilterState,
+): EventsTableFilterState {
+  return filters.map((filter) => ({
+    ...filter,
+    column: EVENT_COLUMN_ALIASES[filter.column] ?? filter.column,
+  })) as EventsTableFilterState;
+}
+
 export type LogicalEventFilter = {
   readonly filter: EventsTableFilterState[number];
   readonly expression: string;
@@ -115,7 +165,9 @@ export function buildEventFilterPlan(filters: EventsTableFilterState): {
   readonly positionFilter?: LogicalPositionFilter;
   readonly requiresFullContent: boolean;
 } {
-  const parsed = eventsTableFilterState.safeParse(filters);
+  const parsed = eventsTableFilterState.safeParse(
+    normalizeDorisEventFilters(filters),
+  );
   if (!parsed.success) {
     throw new InvalidRequestError("Invalid analytics filter state");
   }

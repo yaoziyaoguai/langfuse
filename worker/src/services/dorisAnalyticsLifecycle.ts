@@ -7,6 +7,7 @@ import {
   getDeletionProgressForProject,
   getDorisQueryExecutor,
   parseDorisStreamLoadConfig,
+  resolveDorisNodeEnv,
   toEventIdentity,
   toFileReferenceIdentity,
   toScoreIdentity,
@@ -43,7 +44,7 @@ function lifecycleTransport(): LifecycleTransport {
         env.DORIS_STREAM_LOAD_MAX_BODY_BYTES,
       ),
     },
-    env.NODE_ENV,
+    resolveDorisNodeEnv(env.NODE_ENV, env.DORIS_LOCAL_DEV_MODE),
   );
   return new DorisStreamLoadClient(config);
 }
@@ -123,7 +124,13 @@ function batches(heads: readonly AnalyticsEntityHead[]): DeleteBatch[] {
     ],
   ]);
 
-  for (const head of heads) {
+  const orderedHeads = [...heads].sort((left, right) => {
+    const leftKey = `${left.entityType}\0${left.partitionDate.toISOString()}\0${left.entityKey}`;
+    const rightKey = `${right.entityType}\0${right.partitionDate.toISOString()}\0${right.entityKey}`;
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+
+  for (const head of orderedHeads) {
     if (head.entityType === "EVENT") {
       const identity = toEventIdentity(head.entityKey);
       if (identity.projectId !== head.projectId) {
@@ -226,16 +233,17 @@ export class DorisMaterializedDeletionWriter {
         label,
         mergeType: "DELETE",
       });
-      const visible =
-        result.committed && !result.requiresReconciliation
-          ? true
-          : result.requiresReconciliation
-            ? (await this.transport.reconcile({ label })).visible
-            : false;
+      const reconciled = result.requiresReconciliation
+        ? await this.transport.reconcile({ label })
+        : null;
+      const visible = reconciled
+        ? reconciled.visible
+        : result.committed && !result.requiresReconciliation;
       if (
         !visible ||
-        result.numberFilteredRows > 0 ||
-        result.numberTotalRows !== batch.rowCount
+        (!reconciled &&
+          (result.numberFilteredRows > 0 ||
+            result.numberTotalRows !== batch.rowCount))
       ) {
         throw new Error(
           `Doris materialized deletion is not visible for ${batch.table} (status=${result.status}, visible=${visible}, total=${result.numberTotalRows}, filtered=${result.numberFilteredRows}, expected=${batch.rowCount})`,

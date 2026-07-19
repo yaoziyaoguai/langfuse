@@ -14,7 +14,6 @@ import {
   TRACE_FIELD_GROUPS,
 } from "@langfuse/shared/src/server";
 import { z } from "zod";
-import { useEventsTableSchema } from "@langfuse/shared/query";
 export {
   TRACE_FIELD_GROUPS,
   type TraceFieldGroup,
@@ -83,7 +82,6 @@ export const GetTracesV1Query = z.object({
   fields: commaSeparatedEnumArray(TRACE_FIELD_GROUPS, null, {
     unknownValues: "filter",
   }).transform((fields) => (fields && fields.length > 0 ? fields : null)),
-  useEventsTable: useEventsTableSchema,
   filter: optionalJsonParam(z.array(singleFilter), "filter"),
 });
 export const GetTracesV1Response = z

@@ -11,19 +11,23 @@ vi.mock("@langfuse/shared/src/server", async () => ({
 import type { Session } from "next-auth";
 import { TRPCError } from "@trpc/server";
 import * as z from "zod";
-import { ClickHouseResourceError, logger } from "@langfuse/shared/src/server";
+import { DorisError, logger } from "@langfuse/shared/src/server";
 import {
   createInnerTRPCContext,
   createTRPCRouter,
   protectedProcedureWithoutTracing,
 } from "@/src/server/api/trpc";
+import {
+  COMMUNITY_CAPABILITIES,
+  CommunityCapabilityUnavailableError,
+} from "@/src/features/capabilities/communityAvailability";
 
 describe("tRPC error formatting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("ClickHouseResourceError", async () => {
+  it("sanitizes DorisError", async () => {
     const session = {
       user: {
         id: "user-1",
@@ -31,14 +35,11 @@ describe("tRPC error formatting", () => {
     } as Session;
 
     const formatterTestRouter = createTRPCRouter({
-      clickhouse: protectedProcedureWithoutTracing
-        .input(z.object({}))
-        .query(() => {
-          throw new ClickHouseResourceError(
-            "MEMORY_LIMIT",
-            new Error("Memory limit exceeded"),
-          );
-        }),
+      doris: protectedProcedureWithoutTracing.input(z.object({})).query(() => {
+        throw new DorisError("ANALYTICS_TIMEOUT", true, {
+          correlationId: "request-1",
+        });
+      }),
     });
 
     const formatter = (formatterTestRouter as any)._def._config
@@ -54,7 +55,7 @@ describe("tRPC error formatting", () => {
 
     let error: TRPCError | undefined;
     try {
-      await caller.clickhouse({});
+      await caller.doris({});
     } catch (caught) {
       error = caught as TRPCError;
     }
@@ -67,27 +68,28 @@ describe("tRPC error formatting", () => {
         message: error!.message,
         data: {
           code: error!.code,
-          httpStatus: 422,
+          httpStatus: 503,
         },
       },
       error: error!,
     });
 
-    expect(formatted.data["errorName"]).toBe("ClickHouseResourceError");
+    expect(formatted.data["errorName"]).toBe("DorisError");
     expect(formatted.data["stack"]).toBeNull();
     expect(formatted.data["zodError"]).toBeNull();
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      "ClickHouse resource limit exceeded",
-      expect.objectContaining({
-        errorType: "MEMORY_LIMIT",
-        message: "Memory limit exceeded",
-      }),
+      "Analytics storage request failed",
+      {
+        code: "ANALYTICS_TIMEOUT",
+        retryable: true,
+        correlationId: "request-1",
+      },
     );
     expect(logger.error).not.toHaveBeenCalled();
   });
 
-  it("preserves the default stack behavior for non-ClickHouse errors", () => {
+  it("preserves the default stack behavior for non-Doris errors", () => {
     const formatterTestRouter = createTRPCRouter({});
 
     const formatter = (formatterTestRouter as any)._def._config
@@ -129,5 +131,37 @@ describe("tRPC error formatting", () => {
     });
 
     expect(formattedWithStack.data["stack"]).toBe("dev stack");
+  });
+
+  it("returns capability failures as structured, stack-free data", () => {
+    const formatterTestRouter = createTRPCRouter({});
+    const formatter = (formatterTestRouter as any)._def._config
+      .errorFormatter as (args: any) => {
+      data: Record<string, unknown>;
+    };
+    const cause = new CommunityCapabilityUnavailableError("experiments");
+    const error = new TRPCError({
+      code: "NOT_IMPLEMENTED",
+      message: cause.message,
+      cause,
+    });
+
+    const formatted = formatter({
+      shape: {
+        code: -32603,
+        message: error.message,
+        data: {
+          code: error.code,
+          httpStatus: 501,
+          stack: "internal stack",
+        },
+      },
+      error,
+    });
+
+    expect(formatted.data["unsupportedFeature"]).toEqual(
+      COMMUNITY_CAPABILITIES.experiments,
+    );
+    expect(formatted.data["stack"]).toBeNull();
   });
 });

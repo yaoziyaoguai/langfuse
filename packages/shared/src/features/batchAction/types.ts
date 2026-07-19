@@ -37,10 +37,6 @@ export const BatchActionQuerySchema = z.object({
   searchQuery: z.string().optional(),
   searchType: z.array(TracingSearchType).optional(),
   pathPrefix: z.string().optional(),
-  // Routes worker reads to the events table instead of the legacy tables.
-  // The v4 events view declares it and the server validates the declaration;
-  // otherwise createBatchActionJob snapshots the user's v4 beta flag.
-  useEventsTable: z.boolean().optional(),
 });
 
 export type BatchActionQuery = z.infer<typeof BatchActionQuerySchema>;
@@ -77,11 +73,10 @@ export type TraceDeleteBatchActionCursor = z.infer<
 >;
 
 export const createTraceDeleteBatchActionConfig = (opts: {
-  useEventsTable: boolean;
   cutoffCreatedAt: Date;
 }): TraceDeleteBatchActionConfig => ({
   version: 1,
-  source: opts.useEventsTable ? "events" : "traces",
+  source: "events",
   cutoffCreatedAt: opts.cutoffCreatedAt.toISOString(),
   failureCount: 0,
   inFlightBatch: null,

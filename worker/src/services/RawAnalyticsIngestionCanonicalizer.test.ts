@@ -41,7 +41,7 @@ function canonicalizer(
 ) {
   return new RawAnalyticsIngestionCanonicalizer({
     storageService: {
-      download: vi.fn(async () => body),
+      downloadIfExists: vi.fn(async () => body),
     } as never,
     eventCanonicalizer: new EventCanonicalizer({
       warnOnUsageTotalMismatch: vi.fn(),
@@ -188,6 +188,52 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     await expect(
       canonicalizer(`${body} `).canonicalize(operation(body)),
     ).rejects.toMatchObject({ code: "ANALYTICS_CONFLICT" });
+  });
+
+  it("routes raw storage failures through the durable retry state machine", async () => {
+    const body = encodeRawAnalyticsIngestionEnvelope({
+      formatVersion: 1,
+      source: "otlp",
+      attribution: {
+        ingestionApiKey: "",
+        ingestionSdkName: "",
+        ingestionSdkVersion: "",
+      },
+      payload: [],
+    });
+    const storageService = {
+      downloadIfExists: vi.fn().mockRejectedValue(new Error("storage down")),
+    } as never;
+
+    await expect(
+      canonicalizer(body, { storageService }).canonicalize(operation(body)),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+      retryable: true,
+    });
+  });
+
+  it("marks a confirmed missing raw artifact as unrecoverable", async () => {
+    const body = encodeRawAnalyticsIngestionEnvelope({
+      formatVersion: 1,
+      source: "otlp",
+      attribution: {
+        ingestionApiKey: "",
+        ingestionSdkName: "",
+        ingestionSdkVersion: "",
+      },
+      payload: [],
+    });
+    const storageService = {
+      downloadIfExists: vi.fn().mockResolvedValue(null),
+    } as never;
+
+    await expect(
+      canonicalizer(body, { storageService }).canonicalize(operation(body)),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_UNRECOVERABLE",
+      retryable: false,
+    });
   });
 
   it("applies injected masking after reading raw storage and before OTLP canonicalization", async () => {

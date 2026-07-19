@@ -1,15 +1,62 @@
+import { createHash, randomUUID } from "node:crypto";
+
 import type {
   AnalyticsCandidateDisposition,
   AnalyticsEntityType,
   AnalyticsIngestionOperation,
+  AnalyticsIngestionOperationStatus,
   Prisma,
   PrismaClient,
 } from "@prisma/client";
 
 import { prisma } from "../../db";
 import { getActiveCheckpointGenerationForAcceptance } from "./analyticsCheckpoints";
+import {
+  findAndLockAnalyticsIngestionOperation,
+  lockAnalyticsIngestionOperation,
+} from "./analyticsIngestionLock";
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
+const RETRY_BASE_DELAY_MS = 5_000;
+const RETRY_MAX_DELAY_MS = 30 * 60_000;
+const LEGACY_HANDOFF_ADVISORY_LOCK_KEY = 181_865_275_000_002n;
+const LEGACY_HANDOFF_LOCK_PREFIX = "doris-handoff:";
+const LEGACY_HANDOFF_LOCK_MS = 5 * 60_000;
+
+async function tryAcquireLegacyHandoffLock(
+  transaction: Prisma.TransactionClient,
+): Promise<boolean> {
+  const [lock] = await transaction.$queryRaw<
+    Array<{ acquired: boolean }>
+  >`SELECT pg_try_advisory_xact_lock(${LEGACY_HANDOFF_ADVISORY_LOCK_KEY}) AS acquired`;
+  return lock?.acquired === true;
+}
+
+export function calculateAnalyticsIngestionRetryDelayMs(input: {
+  readonly operationId: string;
+  readonly generation: number;
+}): number {
+  if (
+    !input.operationId ||
+    !Number.isSafeInteger(input.generation) ||
+    input.generation < 1
+  ) {
+    throw new TypeError("Invalid analytics ingestion retry generation");
+  }
+  const nominal = Math.min(
+    RETRY_MAX_DELAY_MS,
+    RETRY_BASE_DELAY_MS * 2 ** Math.min(input.generation - 1, 20),
+  );
+  const entropy = createHash("sha256")
+    .update(`${input.operationId}:${input.generation}`)
+    .digest()
+    .readUInt32BE(0);
+  const jitter = 0.75 + (entropy / 0xffffffff) * 0.5;
+  return Math.max(
+    1_000,
+    Math.min(RETRY_MAX_DELAY_MS, Math.round(nominal * jitter)),
+  );
+}
 
 function isUniqueConstraintError(error: unknown): boolean {
   return (
@@ -108,8 +155,12 @@ export async function createAnalyticsIngestionReceipt(
           statusExpiresAt: input.statusExpiresAt,
         },
       });
-      await transaction.analyticsIngestionOutbox.create({
-        data: { operationId: created.id, nextAttemptAt: input.acceptedAt },
+      await transaction.analyticsIngestionOutboxV2.create({
+        data: {
+          operationId: created.id,
+          status: "PENDING",
+          nextAttemptAt: input.acceptedAt,
+        },
       });
       return created;
     });
@@ -169,6 +220,9 @@ export async function reserveCanonicalizationFence(input: {
   const operation = await client.analyticsIngestionOperation.findFirstOrThrow({
     where: { id: input.operationId, projectId: input.projectId },
   });
+  if (operation.terminalAt) {
+    return { outcome: "stale_fence", operation };
+  }
   if (operation.canonicalObjectKey) {
     return { outcome: "already_published", operation };
   }
@@ -196,6 +250,7 @@ export async function reserveCanonicalizationFence(input: {
       canonicalizationFence: input.expectedFence,
       canonicalObjectKey: null,
       manifestState: "PENDING",
+      terminalAt: null,
       reservedCanonicalObjectKey: operation.reservedCanonicalObjectKey,
       OR: [
         { canonicalizationLeaseOwner: input.leaseOwner },
@@ -246,7 +301,7 @@ export async function claimAnalyticsIngestionOutbox(input: {
   }
 
   return client.$transaction(async (transaction) => {
-    const available = await transaction.analyticsIngestionOutbox.findMany({
+    const available = await transaction.analyticsIngestionOutboxV2.findMany({
       where: {
         status: "PENDING",
         nextAttemptAt: { lte: input.now },
@@ -257,7 +312,7 @@ export async function claimAnalyticsIngestionOutbox(input: {
     });
     const claimed = [];
     for (const row of available) {
-      const updated = await transaction.analyticsIngestionOutbox.updateMany({
+      const updated = await transaction.analyticsIngestionOutboxV2.updateMany({
         where: {
           id: row.id,
           status: "PENDING",
@@ -272,7 +327,7 @@ export async function claimAnalyticsIngestionOutbox(input: {
       });
       if (updated.count === 1) {
         claimed.push(
-          await transaction.analyticsIngestionOutbox.findUniqueOrThrow({
+          await transaction.analyticsIngestionOutboxV2.findUniqueOrThrow({
             where: { id: row.id },
             include: { operation: true },
           }),
@@ -286,13 +341,24 @@ export async function claimAnalyticsIngestionOutbox(input: {
 export async function markAnalyticsIngestionOutboxPublished(input: {
   client?: PrismaClient;
   operationId: string;
+  generation: number;
   workerId: string;
   now: Date;
 }): Promise<boolean> {
+  if (
+    !input.operationId ||
+    !Number.isSafeInteger(input.generation) ||
+    input.generation < 1 ||
+    !input.workerId ||
+    !Number.isFinite(input.now.getTime())
+  ) {
+    throw new TypeError("Invalid analytics ingestion outbox publication");
+  }
   const client = input.client ?? prisma;
-  const updated = await client.analyticsIngestionOutbox.updateMany({
+  const updated = await client.analyticsIngestionOutboxV2.updateMany({
     where: {
       operationId: input.operationId,
+      generation: input.generation,
       status: "PENDING",
       lockedBy: input.workerId,
       lockedUntil: { gt: input.now },
@@ -305,6 +371,201 @@ export async function markAnalyticsIngestionOutboxPublished(input: {
     },
   });
   return updated.count === 1;
+}
+
+export async function recoverStalePublishedAnalyticsIngestionOutbox(input: {
+  client?: PrismaClient;
+  now: Date;
+  updatedBefore: Date;
+  limit: number;
+}): Promise<number> {
+  if (
+    !Number.isFinite(input.now.getTime()) ||
+    !Number.isFinite(input.updatedBefore.getTime()) ||
+    input.updatedBefore >= input.now ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 100
+  ) {
+    throw new TypeError("Invalid stale analytics ingestion outbox recovery");
+  }
+  const client = input.client ?? prisma;
+  const candidates = await client.analyticsIngestionOutboxV2.findMany({
+    where: {
+      status: "PUBLISHED",
+      updatedAt: { lte: input.updatedBefore },
+      operation: {
+        terminalAt: null,
+        updatedAt: { lte: input.updatedBefore },
+        loadBatches: {
+          none: {
+            OR: [
+              { updatedAt: { gt: input.updatedBefore } },
+              { leaseExpiresAt: { gt: input.now } },
+            ],
+          },
+        },
+      },
+    },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: input.limit,
+    select: {
+      operationId: true,
+      generation: true,
+      operation: { select: { projectId: true } },
+    },
+  });
+
+  let recovered = 0;
+  for (const candidate of candidates) {
+    const reset = await client.$transaction(async (transaction) => {
+      const operation = await findAndLockAnalyticsIngestionOperation(
+        transaction,
+        {
+          operationId: candidate.operationId,
+          projectId: candidate.operation.projectId,
+        },
+      );
+      if (
+        !operation ||
+        operation.terminalAt !== null ||
+        operation.updatedAt > input.updatedBefore
+      ) {
+        return false;
+      }
+      const activeLoadProgress = await transaction.analyticsLoadBatch.count({
+        where: {
+          operationId: candidate.operationId,
+          projectId: candidate.operation.projectId,
+          OR: [
+            { updatedAt: { gt: input.updatedBefore } },
+            { leaseExpiresAt: { gt: input.now } },
+          ],
+        },
+      });
+      if (activeLoadProgress > 0) return false;
+      const updated = await transaction.analyticsIngestionOutboxV2.updateMany({
+        where: {
+          operationId: candidate.operationId,
+          generation: candidate.generation,
+          status: "PUBLISHED",
+          updatedAt: { lte: input.updatedBefore },
+        },
+        data: {
+          status: "PENDING",
+          nextAttemptAt: input.now,
+          lockedBy: null,
+          lockedUntil: null,
+          publishedAt: null,
+        },
+      });
+      return updated.count === 1;
+    });
+    if (reset) recovered += 1;
+  }
+  return recovered;
+}
+
+export async function handoffLegacyAnalyticsIngestionOutbox(input: {
+  client?: PrismaClient;
+  now: Date;
+  limit: number;
+}): Promise<number> {
+  if (
+    !Number.isFinite(input.now.getTime()) ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 100
+  ) {
+    throw new TypeError("Invalid legacy analytics ingestion outbox handoff");
+  }
+  const client = input.client ?? prisma;
+  const claimId = `${LEGACY_HANDOFF_LOCK_PREFIX}${randomUUID()}`;
+  const claimUntil = new Date(input.now.getTime() + LEGACY_HANDOFF_LOCK_MS);
+  const candidates = await client.$transaction(
+    async (transaction) => {
+      // The advisory lock serializes only the short batch claim. Row leases
+      // then distribute work across replicas and recover after a crash.
+      if (!(await tryAcquireLegacyHandoffLock(transaction))) return [];
+      const available = await transaction.analyticsIngestionOutbox.findMany({
+        where: {
+          operation: { terminalAt: null },
+          OR: [
+            { lockedBy: null },
+            {
+              lockedBy: {
+                not: { startsWith: LEGACY_HANDOFF_LOCK_PREFIX },
+              },
+            },
+            { lockedUntil: null },
+            { lockedUntil: { lte: input.now } },
+          ],
+        },
+        orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+        take: input.limit,
+        select: {
+          id: true,
+          operationId: true,
+          operation: { select: { projectId: true } },
+        },
+      });
+      if (available.length === 0) return [];
+      await transaction.analyticsIngestionOutbox.updateMany({
+        where: { id: { in: available.map(({ id }) => id) } },
+        data: { lockedBy: claimId, lockedUntil: claimUntil },
+      });
+      return available;
+    },
+    { timeout: 10_000 },
+  );
+
+  let handedOff = 0;
+  for (const candidate of candidates) {
+    const moved = await client.$transaction(
+      async (transaction) => {
+        const operation = await findAndLockAnalyticsIngestionOperation(
+          transaction,
+          {
+            operationId: candidate.operationId,
+            projectId: candidate.operation.projectId,
+          },
+        );
+        if (!operation || operation.terminalAt !== null) return false;
+
+        const legacy = await transaction.analyticsIngestionOutbox.findUnique({
+          where: { operationId: candidate.operationId },
+          select: { id: true, attempts: true, lockedBy: true },
+        });
+        if (!legacy || legacy.lockedBy !== claimId) return false;
+
+        const current = await transaction.analyticsIngestionOutboxV2.findUnique(
+          {
+            where: { operationId: candidate.operationId },
+            select: { id: true },
+          },
+        );
+        if (!current) {
+          await transaction.analyticsIngestionOutboxV2.create({
+            data: {
+              operationId: candidate.operationId,
+              status: "PENDING",
+              generation: 1,
+              attempts: legacy.attempts,
+              nextAttemptAt: input.now,
+            },
+          });
+        }
+
+        const deleted = await transaction.analyticsIngestionOutbox.deleteMany({
+          where: { id: legacy.id, operationId: candidate.operationId },
+        });
+        return deleted.count === 1;
+      },
+      { timeout: 10_000 },
+    );
+    if (moved) handedOff += 1;
+  }
+  return handedOff;
 }
 
 export type AnalyticsIngestionCandidateInput = {
@@ -356,10 +617,10 @@ export async function publishCanonicalArtifact(input: {
   }
 
   return client.$transaction(async (transaction) => {
-    const current =
-      await transaction.analyticsIngestionOperation.findFirstOrThrow({
-        where: { id: input.operationId, projectId: input.projectId },
-      });
+    const current = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: input.operationId,
+      projectId: input.projectId,
+    });
     if (current.canonicalObjectKey !== null) {
       if (
         current.canonicalObjectKey !== input.canonicalObjectKey ||
@@ -368,6 +629,9 @@ export async function publishCanonicalArtifact(input: {
         throw new AnalyticsIngestionReceiptConflictError();
       }
       return { outcome: "already_published" as const, operation: current };
+    }
+    if (current.terminalAt) {
+      return { outcome: "stale_fence" as const, operation: current };
     }
 
     const updated = await transaction.analyticsIngestionOperation.updateMany({
@@ -379,6 +643,7 @@ export async function publishCanonicalArtifact(input: {
         reservedCanonicalObjectKey: input.canonicalObjectKey,
         canonicalObjectKey: null,
         manifestState: "PENDING",
+        terminalAt: null,
       },
       data: {
         canonicalObjectKey: input.canonicalObjectKey,
@@ -433,6 +698,7 @@ export function findAnalyticsIngestionOperationForProject(input: {
   return client.analyticsIngestionOperation.findFirst({
     where: { id: input.operationId, projectId: input.projectId },
     include: {
+      outboxV2: true,
       candidates: { orderBy: { candidateKey: "asc" } },
       loadBatches: { orderBy: { logicalBatchId: "asc" } },
     },
@@ -460,6 +726,7 @@ export async function getAnalyticsIngestionStatusForProject(input: {
       cancellationReasonCode: true,
       lastErrorCode: true,
       outbox: { select: { status: true } },
+      outboxV2: { select: { status: true } },
       candidates: {
         orderBy: { candidateKey: "asc" },
         select: {
@@ -493,7 +760,7 @@ export async function getAnalyticsIngestionStatusForProject(input: {
     operationId: operation.id,
     status: operation.status,
     manifest: operation.manifestState,
-    outbox: operation.outbox?.status ?? "PENDING",
+    outbox: operation.outboxV2?.status ?? operation.outbox?.status ?? "PENDING",
     acceptedAt: operation.acceptedAt,
     recoverableUntil: operation.recoverableUntil,
     statusExpiresAt: operation.statusExpiresAt,
@@ -506,31 +773,133 @@ export async function getAnalyticsIngestionStatusForProject(input: {
   };
 }
 
-export async function markAnalyticsIngestionRetrying(input: {
-  client?: PrismaClient;
-  operationId: string;
-  projectId: string;
-  reasonCode: string;
+async function terminalizeAnalyticsIngestion(input: {
+  readonly transaction: Prisma.TransactionClient;
+  readonly operation: AnalyticsIngestionOperation;
+  readonly fallbackStatus: "QUARANTINED" | "UNRECOVERABLE";
+  readonly reasonCode: string;
+  readonly now: Date;
 }): Promise<boolean> {
-  if (
-    !input.operationId ||
-    !input.projectId ||
-    !/^[A-Z0-9_]{1,64}$/.test(input.reasonCode)
-  ) {
-    throw new TypeError("Invalid analytics ingestion retry state");
-  }
-  const client = input.client ?? prisma;
-  const updated = await client.analyticsIngestionOperation.updateMany({
+  const terminalLoads = await input.transaction.analyticsLoadBatch.findMany({
     where: {
-      id: input.operationId,
-      projectId: input.projectId,
-      terminalAt: null,
+      operationId: input.operation.id,
+      projectId: input.operation.projectId,
+      status: { in: ["PENDING", "FAILED"] },
+    },
+    select: { id: true },
+  });
+  const terminalLoadIds = terminalLoads.map(({ id }) => id);
+  await input.transaction.analyticsIngestionCandidate.updateMany({
+    where: {
+      operationId: input.operation.id,
+      projectId: input.operation.projectId,
+      disposition: { in: ["PENDING", "LOAD_REQUIRED"] },
+      ...(terminalLoadIds.length > 0
+        ? {
+            OR: [
+              { loadBatchId: null },
+              { loadBatchId: { in: terminalLoadIds } },
+            ],
+          }
+        : { loadBatchId: null }),
     },
     data: {
-      status: "RETRYING",
-      lastErrorCode: input.reasonCode,
+      disposition: "QUARANTINED",
+      reasonCode: input.reasonCode,
+      quarantineExpiresAt: input.operation.recoverableUntil,
     },
   });
+  await input.transaction.analyticsLoadBatch.updateMany({
+    where: {
+      operationId: input.operation.id,
+      projectId: input.operation.projectId,
+      status: "PENDING",
+    },
+    data: {
+      status: "FAILED",
+      lastErrorCode: input.reasonCode,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    },
+  });
+
+  let status: AnalyticsIngestionOperationStatus = input.fallbackStatus;
+  let visibleAt: Date | null = null;
+  if (input.operation.manifestState === "FROZEN") {
+    const [candidates, visibleLoads] = await Promise.all([
+      input.transaction.analyticsIngestionCandidate.findMany({
+        where: {
+          operationId: input.operation.id,
+          projectId: input.operation.projectId,
+        },
+        select: { disposition: true, loadBatchId: true },
+      }),
+      input.transaction.analyticsLoadBatch.findMany({
+        where: {
+          operationId: input.operation.id,
+          projectId: input.operation.projectId,
+          status: "VISIBLE",
+        },
+        select: { id: true },
+      }),
+    ]);
+    const visibleLoadIds = new Set(visibleLoads.map(({ id }) => id));
+    const required = candidates.filter(
+      ({ disposition }) => disposition === "LOAD_REQUIRED",
+    );
+    if (
+      candidates.some(({ disposition }) => disposition === "PENDING") ||
+      required.some(
+        ({ loadBatchId }) =>
+          loadBatchId === null || !visibleLoadIds.has(loadBatchId),
+      )
+    ) {
+      throw new Error("Analytics ingestion terminal state is inconsistent");
+    }
+    const hasVisible = required.length > 0;
+    const hasQuarantine = candidates.some(
+      ({ disposition }) => disposition === "QUARANTINED",
+    );
+    const hasCancellation = candidates.some(
+      ({ disposition }) => disposition === "CANCELLED_BY_DELETION",
+    );
+    status = hasQuarantine
+      ? hasVisible
+        ? "PARTIAL_FAILED"
+        : input.fallbackStatus
+      : hasCancellation
+        ? hasVisible
+          ? "COMPLETED_WITH_CANCELLATIONS"
+          : "CANCELLED_BY_DELETION"
+        : "VISIBLE";
+    if (
+      status === "VISIBLE" ||
+      status === "PARTIAL_FAILED" ||
+      status === "COMPLETED_WITH_CANCELLATIONS"
+    ) {
+      visibleAt = input.now;
+    }
+  }
+
+  const updated =
+    await input.transaction.analyticsIngestionOperation.updateMany({
+      where: {
+        id: input.operation.id,
+        projectId: input.operation.projectId,
+        terminalAt: null,
+      },
+      data: {
+        status,
+        lastErrorCode:
+          status === "QUARANTINED" ||
+          status === "UNRECOVERABLE" ||
+          status === "PARTIAL_FAILED"
+            ? input.reasonCode
+            : null,
+        visibleAt,
+        terminalAt: input.now,
+      },
+    });
   return updated.count === 1;
 }
 
@@ -540,6 +909,7 @@ export async function markAnalyticsIngestionTerminalFailure(input: {
   projectId: string;
   status: "QUARANTINED" | "UNRECOVERABLE";
   reasonCode: string;
+  expectedGeneration: number;
   now?: Date;
 }): Promise<boolean> {
   const now = input.now ?? new Date();
@@ -547,24 +917,137 @@ export async function markAnalyticsIngestionTerminalFailure(input: {
     !input.operationId ||
     !input.projectId ||
     !/^[A-Z0-9_]{1,64}$/.test(input.reasonCode) ||
+    !Number.isSafeInteger(input.expectedGeneration) ||
+    input.expectedGeneration < 1 ||
     !Number.isFinite(now.getTime())
   ) {
     throw new TypeError("Invalid analytics ingestion terminal failure");
   }
   const client = input.client ?? prisma;
-  const updated = await client.analyticsIngestionOperation.updateMany({
-    where: {
-      id: input.operationId,
+  return client.$transaction(async (transaction) => {
+    const operation = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: input.operationId,
       projectId: input.projectId,
-      terminalAt: null,
-    },
-    data: {
-      status: input.status,
-      lastErrorCode: input.reasonCode,
-      terminalAt: now,
-    },
+    });
+    if (operation.terminalAt) return false;
+    const outbox =
+      await transaction.analyticsIngestionOutboxV2.findUniqueOrThrow({
+        where: { operationId: input.operationId },
+        select: { generation: true },
+      });
+    if (outbox.generation !== input.expectedGeneration) {
+      return false;
+    }
+    const unresolvedLoads = await transaction.analyticsLoadBatch.count({
+      where: {
+        operationId: input.operationId,
+        projectId: input.projectId,
+        status: { in: ["LOADING", "UNKNOWN"] },
+      },
+    });
+    if (unresolvedLoads > 0) return false;
+    return terminalizeAnalyticsIngestion({
+      transaction,
+      operation,
+      fallbackStatus: input.status,
+      reasonCode: input.reasonCode,
+      now,
+    });
   });
-  return updated.count === 1;
+}
+
+export async function resolveAnalyticsIngestionAttemptFailure(input: {
+  client?: PrismaClient;
+  operationId: string;
+  projectId: string;
+  reasonCode: string;
+  expectedGeneration: number;
+  now?: Date;
+  retryDelayMs?: number;
+}): Promise<"requeued" | "terminalized" | "unchanged"> {
+  const now = input.now ?? new Date();
+  if (
+    !input.operationId ||
+    !input.projectId ||
+    !/^[A-Z0-9_]{1,64}$/.test(input.reasonCode) ||
+    !Number.isSafeInteger(input.expectedGeneration) ||
+    input.expectedGeneration < 1 ||
+    !Number.isFinite(now.getTime()) ||
+    (input.retryDelayMs !== undefined &&
+      (!Number.isSafeInteger(input.retryDelayMs) || input.retryDelayMs < 1_000))
+  ) {
+    throw new TypeError("Invalid analytics ingestion attempt failure");
+  }
+  const client = input.client ?? prisma;
+  return client.$transaction(async (transaction) => {
+    const operation = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: input.operationId,
+      projectId: input.projectId,
+    });
+    if (operation.terminalAt) return "unchanged" as const;
+    const outbox =
+      await transaction.analyticsIngestionOutboxV2.findUniqueOrThrow({
+        where: { operationId: input.operationId },
+        select: { generation: true },
+      });
+    if (outbox.generation !== input.expectedGeneration) {
+      return "unchanged" as const;
+    }
+    const unresolvedLoads = await transaction.analyticsLoadBatch.count({
+      where: {
+        operationId: input.operationId,
+        projectId: input.projectId,
+        status: { in: ["LOADING", "UNKNOWN"] },
+      },
+    });
+    if (unresolvedLoads > 0 || now < operation.recoverableUntil) {
+      const updated = await transaction.analyticsIngestionOperation.updateMany({
+        where: {
+          id: input.operationId,
+          projectId: input.projectId,
+          terminalAt: null,
+        },
+        data: {
+          status: "RETRYING",
+          lastErrorCode: input.reasonCode,
+        },
+      });
+      if (updated.count !== 1) return "unchanged" as const;
+      const retryDelayMs =
+        input.retryDelayMs ??
+        calculateAnalyticsIngestionRetryDelayMs({
+          operationId: input.operationId,
+          generation: outbox.generation,
+        });
+      const requeued = await transaction.analyticsIngestionOutboxV2.updateMany({
+        where: {
+          operationId: input.operationId,
+          generation: outbox.generation,
+        },
+        data: {
+          generation: { increment: 1 },
+          status: "PENDING",
+          nextAttemptAt: new Date(now.getTime() + retryDelayMs),
+          lockedBy: null,
+          lockedUntil: null,
+          publishedAt: null,
+        },
+      });
+      if (requeued.count !== 1) {
+        throw new Error("Analytics ingestion outbox disappeared during retry");
+      }
+      return "requeued" as const;
+    }
+
+    const terminalized = await terminalizeAnalyticsIngestion({
+      transaction,
+      operation,
+      fallbackStatus: "UNRECOVERABLE",
+      reasonCode: input.reasonCode,
+      now,
+    });
+    return terminalized ? ("terminalized" as const) : ("unchanged" as const);
+  });
 }
 
 type AnalyticsCandidateDispositionInput = {
@@ -683,14 +1166,15 @@ export async function freezeAnalyticsIngestionManifest(input: {
   }
 
   return client.$transaction(async (transaction) => {
-    const current =
-      await transaction.analyticsIngestionOperation.findFirstOrThrow({
-        where: { id: input.operationId, projectId: input.projectId },
-      });
+    const current = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: input.operationId,
+      projectId: input.projectId,
+    });
     if (current.manifestState === "FROZEN") {
       return { outcome: "already_frozen" as const, operation: current };
     }
     if (
+      current.terminalAt !== null ||
       current.canonicalizationFence !== input.fence ||
       current.canonicalObjectKey !== input.canonicalObjectKey ||
       current.manifestState !== "CANDIDATE_PUBLISHED"
@@ -789,6 +1273,7 @@ export async function freezeAnalyticsIngestionManifest(input: {
         canonicalizationFence: input.fence,
         canonicalObjectKey: input.canonicalObjectKey,
         manifestState: "CANDIDATE_PUBLISHED",
+        terminalAt: null,
       },
       data: {
         manifestState: "FROZEN",

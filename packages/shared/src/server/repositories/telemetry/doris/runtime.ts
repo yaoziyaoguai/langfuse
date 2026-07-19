@@ -1,6 +1,9 @@
 import { env } from "../../../../env";
 import { DorisClientManager } from "../../../doris/client";
-import { parseDorisQueryConfig } from "../../../doris/config";
+import {
+  parseDorisQueryConfig,
+  resolveDorisNodeEnv,
+} from "../../../doris/config";
 import {
   createDorisTelemetryRepositories,
   type DorisTelemetryRepositories,
@@ -9,14 +12,7 @@ import {
 let repositories: DorisTelemetryRepositories | undefined;
 let executor: ReturnType<DorisClientManager["getClient"]> | undefined;
 
-export function isDorisAnalyticsBackend(): boolean {
-  return env.LANGFUSE_ANALYTICS_BACKEND === "doris";
-}
-
 export function getDorisTelemetryRepositories(): DorisTelemetryRepositories {
-  if (!isDorisAnalyticsBackend()) {
-    throw new Error("Doris analytics repositories are not active");
-  }
   repositories ??= createDorisTelemetryRepositories(getDorisQueryExecutor());
   return repositories;
 }
@@ -24,9 +20,6 @@ export function getDorisTelemetryRepositories(): DorisTelemetryRepositories {
 export function getDorisQueryExecutor(): ReturnType<
   DorisClientManager["getClient"]
 > {
-  if (!isDorisAnalyticsBackend()) {
-    throw new Error("Doris analytics repositories are not active");
-  }
   executor ??= DorisClientManager.getInstance().getClient(
     parseDorisQueryConfig(
       {
@@ -41,7 +34,7 @@ export function getDorisQueryExecutor(): ReturnType<
         ),
         DORIS_QUERY_TIMEOUT_MS: String(env.DORIS_QUERY_TIMEOUT_MS),
       },
-      env.NODE_ENV,
+      resolveDorisNodeEnv(env.NODE_ENV, env.DORIS_LOCAL_DEV_MODE),
     ),
   );
   return executor;

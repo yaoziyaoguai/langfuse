@@ -18,12 +18,10 @@ const now = new Date("2026-07-18T13:00:00.000Z");
 
 function queueJob(operationId: string, projectId: string) {
   return {
-    attemptsMade: 0,
-    opts: { attempts: 10 },
     data: {
       timestamp: now,
       id: operationId,
-      payload: { operationId, projectId },
+      payload: { operationId, projectId, generation: 1 },
       name: QueueJobs.AnalyticsIngestionJob,
     },
   } as Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>;
@@ -32,8 +30,13 @@ function queueJob(operationId: string, projectId: string) {
 describe("analytics ingestion durable queue", () => {
   it("publishes a deterministic body-free job before marking the outbox row", async () => {
     const order: string[] = [];
+    const delivery = {
+      getState: vi.fn(async () => "waiting"),
+      retry: vi.fn(async () => undefined),
+    };
     const add = vi.fn(async () => {
       order.push("queue");
+      return delivery;
     });
     const markPublished = vi.fn(async () => {
       order.push("outbox");
@@ -49,6 +52,8 @@ describe("analytics ingestion durable queue", () => {
         claimOutbox: vi.fn(async () => [
           {
             operationId: "operation-1",
+            generation: 1,
+            attempts: 1,
             operation: { projectId: "project-1" },
           },
         ]) as never,
@@ -62,11 +67,16 @@ describe("analytics ingestion durable queue", () => {
       {
         timestamp: now,
         id: "operation-1",
-        payload: { operationId: "operation-1", projectId: "project-1" },
+        payload: {
+          operationId: "operation-1",
+          projectId: "project-1",
+          generation: 1,
+        },
         name: QueueJobs.AnalyticsIngestionJob,
       },
-      { jobId: "operation-1" },
+      { jobId: "operation-1-g1", attempts: 1 },
     );
+    expect(delivery.retry).not.toHaveBeenCalled();
   });
 
   it("does not mark an outbox row when BullMQ publication fails", async () => {
@@ -84,6 +94,8 @@ describe("analytics ingestion durable queue", () => {
         claimOutbox: vi.fn(async () => [
           {
             operationId: "operation-1",
+            generation: 1,
+            attempts: 1,
             operation: { projectId: "project-1" },
           },
         ]) as never,
@@ -91,6 +103,41 @@ describe("analytics ingestion durable queue", () => {
       }),
     ).rejects.toThrow("redis unavailable");
     expect(markPublished).not.toHaveBeenCalled();
+  });
+
+  it("reuses the generation job id and retries a retained failed delivery", async () => {
+    const delivery = {
+      getState: vi.fn(async () => "failed"),
+      retry: vi.fn(async () => undefined),
+    };
+    const add = vi.fn(async () => delivery);
+
+    await expect(
+      publishAnalyticsIngestionOutboxBatch({
+        client: {} as PrismaClient,
+        queue: { add },
+        workerId: "publisher-a",
+        now,
+        claimOutbox: vi.fn(async () => [
+          {
+            operationId: "operation-1",
+            generation: 3,
+            attempts: 27,
+            operation: { projectId: "project-1" },
+          },
+        ]) as never,
+        markPublished: vi.fn(async () => true) as never,
+      }),
+    ).resolves.toBe(1);
+
+    expect(add).toHaveBeenCalledWith(
+      QueueJobs.AnalyticsIngestionJob,
+      expect.objectContaining({
+        payload: expect.objectContaining({ generation: 3 }),
+      }),
+      { jobId: "operation-1-g3", attempts: 1 },
+    );
+    expect(delivery.retry).toHaveBeenCalledWith("failed");
   });
 
   it("awaits canonical persistence and skips already-successful terminal jobs", async () => {
@@ -112,6 +159,7 @@ describe("analytics ingestion durable queue", () => {
       schemaVersion: 3,
       terminalAt: null,
       status: "QUEUED",
+      outboxV2: { generation: 1 },
     }));
     const processor = analyticsIngestionQueueProcessorBuilder({
       sink: { persist },
@@ -133,6 +181,7 @@ describe("analytics ingestion durable queue", () => {
       projectId: "project-1",
       terminalAt: now,
       status: "VISIBLE",
+      outboxV2: { generation: 1 },
     } as never);
     await expect(
       processor(queueJob("operation-1", "project-1"), "token"),
@@ -141,7 +190,7 @@ describe("analytics ingestion durable queue", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
-  it("fails non-retryable persistence errors without consuming all attempts", async () => {
+  it("terminalizes non-retryable persistence errors on the current delivery", async () => {
     const markTerminalFailure = vi.fn(async () => true);
     const processor = analyticsIngestionQueueProcessorBuilder({
       sink: { persist: vi.fn() },
@@ -157,6 +206,7 @@ describe("analytics ingestion durable queue", () => {
         projectId: "project-1",
         terminalAt: null,
         status: "QUEUED",
+        outboxV2: { generation: 1 },
       })) as never,
       markTerminalFailure: markTerminalFailure as never,
     });
@@ -170,12 +220,94 @@ describe("analytics ingestion durable queue", () => {
         projectId: "project-1",
         status: "UNRECOVERABLE",
         reasonCode: "ANALYTICS_VALIDATION_ERROR",
+        expectedGeneration: 1,
       }),
     );
   });
 
-  it("records retry exhaustion before leaving the body-free job in BullMQ failed state", async () => {
-    const markRetrying = vi.fn(async () => true);
+  it("routes unexpected worker errors through durable retry bookkeeping", async () => {
+    const resolveAttemptFailure = vi.fn(async () => "requeued" as const);
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist: vi.fn() },
+      canonicalize: vi.fn(async () => {
+        throw new Error("unexpected dependency error");
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "QUEUED",
+        outboxV2: { generation: 1 },
+      })) as never,
+      resolveAttemptFailure: resolveAttemptFailure as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    expect(resolveAttemptFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "operation-1",
+        projectId: "project-1",
+        reasonCode: "ANALYTICS_UNAVAILABLE",
+        expectedGeneration: 1,
+      }),
+    );
+  });
+
+  it("does not retry a previously terminalized partial failure", async () => {
+    const canonicalize = vi.fn();
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist: vi.fn() },
+      canonicalize,
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: now,
+        status: "PARTIAL_FAILED",
+        outboxV2: { generation: 1 },
+      })) as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    expect(canonicalize).not.toHaveBeenCalled();
+  });
+
+  it("does not canonicalize or persist while Doris readiness is closed", async () => {
+    const canonicalize = vi.fn();
+    const persist = vi.fn();
+    const resolveAttemptFailure = vi.fn(async () => "requeued" as const);
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist },
+      canonicalize,
+      assertReady: vi.fn(async () => {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true);
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "QUEUED",
+        outboxV2: { generation: 1 },
+      })) as never,
+      resolveAttemptFailure: resolveAttemptFailure as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    expect(canonicalize).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    expect(resolveAttemptFailure).toHaveBeenCalledOnce();
+  });
+
+  it("durably requeues each retryable failure through a new outbox generation", async () => {
+    const resolveAttemptFailure = vi.fn(async () => "requeued" as const);
     const processor = analyticsIngestionQueueProcessorBuilder({
       sink: { persist: vi.fn() },
       canonicalize: vi.fn(async () => {
@@ -187,22 +319,69 @@ describe("analytics ingestion durable queue", () => {
         projectId: "project-1",
         terminalAt: null,
         status: "QUEUED",
+        outboxV2: { generation: 1 },
       })) as never,
-      markRetrying: markRetrying as never,
+      resolveAttemptFailure: resolveAttemptFailure as never,
     });
     const job = queueJob("operation-1", "project-1");
-    job.attemptsMade = 9;
-    job.opts.attempts = 10;
 
     await expect(processor(job, "token")).rejects.toMatchObject({
-      code: "ANALYTICS_UNAVAILABLE",
+      name: "UnrecoverableError",
     });
-    expect(markRetrying).toHaveBeenCalledWith(
+    expect(resolveAttemptFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         operationId: "operation-1",
         projectId: "project-1",
-        reasonCode: "MAX_RETRIES_EXHAUSTED",
+        reasonCode: "ANALYTICS_UNAVAILABLE",
+        expectedGeneration: 1,
       }),
     );
+  });
+
+  it("reconciles unknown loads before reading an expired canonical artifact", async () => {
+    const canonicalize = vi.fn();
+    const persist = vi.fn();
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist },
+      canonicalize,
+      reconcileUnresolved: vi.fn(async () => true),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "RETRYING",
+        outboxV2: { generation: 1 },
+      })) as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).resolves.toBeUndefined();
+    expect(canonicalize).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late job from a superseded retry generation", async () => {
+    const canonicalize = vi.fn();
+    const persist = vi.fn();
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist },
+      canonicalize,
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "RETRYING",
+        outboxV2: { generation: 2 },
+      })) as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).resolves.toBeUndefined();
+    expect(canonicalize).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
   });
 });

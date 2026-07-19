@@ -1,4 +1,5 @@
 import type { DorisQueryExecutor } from "./client";
+import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../analytics-persistence/acceptAnalyticsIngestion";
 
 export const EXPECTED_DORIS_MIGRATIONS = [
   {
@@ -19,7 +20,11 @@ export const EXPECTED_DORIS_MIGRATIONS = [
 ] as const;
 
 export const SUPPORTED_DORIS_CANONICALIZER_VERSIONS = ["1"] as const;
-export const SUPPORTED_DORIS_SCHEMA_VERSIONS = [3] as const;
+// This is the canonical artifact/receipt contract version, not the number of
+// physical Doris migrations applied to the database.
+export const SUPPORTED_DORIS_SCHEMA_VERSIONS = [
+  CURRENT_ANALYTICS_SCHEMA_VERSION,
+] as const;
 
 export type DorisReadinessCode =
   | "READY"

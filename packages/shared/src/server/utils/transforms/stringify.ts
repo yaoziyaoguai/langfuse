@@ -20,7 +20,7 @@ export const stringify = (data: any, key?: string, indent?: number): string => {
 
 /**
  * CSV-specific stringify that returns strings as-is instead of JSON-encoding them.
- * This avoids double-encoding when string fields (e.g. JSON input/output from ClickHouse)
+ * This avoids double-encoding when string fields (e.g. JSON input/output from Doris)
  * are passed through JSON.stringify and then CSV-escaped.
  */
 export const stringifyForCsv = (data: any, key?: string): string => {

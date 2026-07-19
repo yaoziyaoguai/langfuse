@@ -1,13 +1,11 @@
 import {
   createTrace,
   createObservation,
-  createTracesCh,
-  createObservationsCh,
-  createEventsCh,
   ObservationRecordInsertType,
 } from "../../../src/server";
 import { ObservationType } from "../../../src/domain";
-import { observationToEvent, traceToEvent } from "./event-mirror";
+import { observationToEvent } from "./event-mirror";
+import { seedEventFixtures } from "../utils/analytics-writer";
 import { utcDayStartMs } from "./rng";
 import {
   chunk,
@@ -447,7 +445,7 @@ const run = async (
   params: Record<string, string | number | boolean>,
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
-  const withV4 = params["v4"] as boolean;
+  const withV4 = true;
 
   // The prefix IS the trace id (no "-trace" suffix): the id shows in the
   // trace header, so a demo seeded with a hex-looking prefix (e.g.
@@ -459,7 +457,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "support-agent",
-      target: "clickhouse",
+      target: "doris",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -578,12 +576,9 @@ const run = async (
     });
   });
 
-  const events = withV4
-    ? [
-        traceToEvent(trace),
-        ...observations.map((o) => observationToEvent(o, trace)),
-      ]
-    : [];
+  const events = observations.map((observation) =>
+    observationToEvent(observation, trace),
+  );
 
   const counts: Record<string, number> = {
     traces: 1,
@@ -594,12 +589,8 @@ const run = async (
   ctx.log(
     `writing 1 support-copilot trace, ${observations.length} observations${withV4 ? `, ${events.length} events` : ""}`,
   );
-  await createTracesCh([trace]);
-  for (const batch of chunk(observations, 1000)) {
-    await createObservationsCh(batch);
-  }
   for (const batch of chunk(events, 500)) {
-    await createEventsCh(batch);
+    await seedEventFixtures(batch);
   }
 
   const verified: Record<string, number> = {
@@ -643,7 +634,7 @@ const run = async (
 
   return {
     scenario: "support-agent",
-    target: "clickhouse",
+    target: "doris",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

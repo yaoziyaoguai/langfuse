@@ -33,7 +33,7 @@ vi.mock("rate-limiter-flexible", () => {
 });
 
 vi.mock("@langfuse/shared/src/server", () => ({
-  ClickHouseClientManager: {
+  DorisClientManager: {
     getInstance: () => ({ closeAllConnections: vi.fn() }),
   },
   createNewRedisInstance: vi.fn(),

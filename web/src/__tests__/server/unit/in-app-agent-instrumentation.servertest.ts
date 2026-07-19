@@ -44,7 +44,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("@langfuse/shared/src/server", () => ({
   getInternalTracingHandler: mocks.getInternalTracingHandler,
   redis: undefined,
-  ClickHouseClientManager: {
+  DorisClientManager: {
     getInstance: vi.fn(() => ({
       closeAllConnections: vi.fn(async () => undefined),
     })),

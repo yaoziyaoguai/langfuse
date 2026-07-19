@@ -8,6 +8,7 @@ import {
 } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 
+import { markPendingTraceDeletionsCompleted } from "../features/traces/markPendingTraceDeletionsCompleted";
 import { processAnalyticsTraceDeletionBatch } from "../features/traces/processAnalyticsTraceDeletionBatch";
 import { env } from "../env";
 
@@ -102,18 +103,9 @@ export const traceDeleteProcessor: Processor = async (
 
     // Mark only the pending traces as deleted (not the ones from the event, as they might be legacy)
     if (toBeDeletedTraces.length > 0) {
-      await prisma.pendingDeletion.updateMany({
-        where: {
-          projectId,
-          object: "trace",
-          objectId: {
-            in: traceIdsToDelete,
-          },
-          isDeleted: false,
-        },
-        data: {
-          isDeleted: true,
-        },
+      await markPendingTraceDeletionsCompleted({
+        projectId,
+        traceIds: traceIdsToDelete,
       });
     }
 

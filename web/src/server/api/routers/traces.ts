@@ -39,18 +39,14 @@ import {
   getObservationsForTrace,
   getTraceById,
   logger,
-  upsertTrace,
-  convertTraceDomainToClickhouse,
   hasAnyTracingData,
   traceDeletionProcessor,
   getTracesTableMetrics,
   getCategoricalScoresGroupedByName,
-  convertDateToClickhouseDateTime,
   getAgentGraphData,
   tracesTableUiColumnDefinitions,
   getTracesGroupedByUsers,
   getTracesGroupedBySessionId,
-  updateEvents,
   updateTraceControlState,
   getScoresAndCorrectionsForTraces,
 } from "@langfuse/shared/src/server";
@@ -62,7 +58,6 @@ import {
   type AgentGraphDataResponse,
   AgentGraphDataSchema,
 } from "@/src/features/trace-graph-view/types";
-import { env } from "@/src/env.mjs";
 import {
   toDomainWithStringifiedMetadata,
   toDomainArrayWithStringifiedMetadata,
@@ -479,7 +474,7 @@ export const traceRouter = createTRPCRouter({
         // Comment filters (commentCount/commentContent in both the v3 traces
         // and v4 events views) resolve via Postgres lookups at read time
         // (applyCommentFilters); when the worker translates the stored
-        // filters into ClickHouse SQL, these columns map to a nonexistent
+        // filters into Doris SQL, these columns map to a nonexistent
         // "comments" table and would deterministically fail every batch, so
         // reject them at dispatch.
         const hasCommentFilter = (input.query.filter ?? []).some(
@@ -493,26 +488,6 @@ export const traceRouter = createTRPCRouter({
           });
         }
 
-        // Decide here whether this delete reads from the events table: the
-        // v4 events view sets query.useEventsTable: true, which we honor
-        // after checking the events view is actually available to this user
-        // (v4 beta flag, or the instance-wide preview opt-in). In every
-        // other case createBatchActionJob infers the choice from the user's
-        // v4 beta flag.
-        const declaresEventsTable = input.query.useEventsTable === true;
-        if (declaresEventsTable) {
-          const eventsSurfaceAvailable =
-            ctx.session.user.v4BetaEnabled === true ||
-            env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
-          if (!eventsSurfaceAvailable) {
-            throw new TRPCError({
-              code: "BAD_REQUEST",
-              message:
-                "Events-backed batch deletion is not available for this user on this instance.",
-            });
-          }
-        }
-
         await createBatchActionJob({
           projectId: input.projectId,
           actionId: ActionId.TraceDelete,
@@ -520,7 +495,6 @@ export const traceRouter = createTRPCRouter({
           tableName: BatchExportTableName.Traces,
           session: ctx.session,
           query: input.query,
-          useEventsTableOverride: declaresEventsTable ? true : undefined,
         });
         return { deletionOperations: [] };
       }
@@ -574,45 +548,28 @@ export const traceRouter = createTRPCRouter({
 
         let trace;
 
-        // eslint-disable-next-line @typescript-eslint/no-deprecated
-        const clickhouseTrace = await getTraceById({
+        const analyticsTrace = await getTraceById({
           traceId: input.traceId,
           projectId: input.projectId,
         });
-        if (clickhouseTrace) {
-          trace = clickhouseTrace;
+        if (analyticsTrace) {
+          trace = analyticsTrace;
           const initialState = {
-            bookmarked: clickhouseTrace.bookmarked,
-            public: clickhouseTrace.public,
+            bookmarked: analyticsTrace.bookmarked,
+            public: analyticsTrace.public,
           };
-          clickhouseTrace.bookmarked = input.bookmarked;
-          if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
-            await updateTraceControlState({
-              client: ctx.prisma,
-              projectId: input.projectId,
-              traceId: input.traceId,
-              initialState,
-              updates: { bookmarked: input.bookmarked },
-              mutationSource: "ui:traces.bookmark",
-            });
-            return trace;
-          }
-          const promises = [
-            upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
-          ];
-          if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy") {
-            promises.push(
-              updateEvents(
-                input.projectId,
-                { traceIds: [clickhouseTrace.id], rootOnly: true },
-                { bookmarked: input.bookmarked },
-              ),
-            );
-          }
-          await Promise.all(promises);
+          analyticsTrace.bookmarked = input.bookmarked;
+          await updateTraceControlState({
+            client: ctx.prisma,
+            projectId: input.projectId,
+            traceId: input.traceId,
+            initialState,
+            updates: { bookmarked: input.bookmarked },
+            mutationSource: "ui:traces.bookmark",
+          });
         } else {
           logger.error(
-            `Trace not found in Clickhouse: ${input.traceId}. Skipping bookmark.`,
+            `Trace not found in Doris: ${input.traceId}. Skipping bookmark.`,
           );
         }
 
@@ -647,14 +604,13 @@ export const traceRouter = createTRPCRouter({
           after: input.public,
         });
 
-        // eslint-disable-next-line @typescript-eslint/no-deprecated
-        const clickhouseTrace = await getTraceById({
+        const analyticsTrace = await getTraceById({
           traceId: input.traceId,
           projectId: input.projectId,
         });
-        if (!clickhouseTrace) {
+        if (!analyticsTrace) {
           logger.error(
-            `Trace not found in Clickhouse: ${input.traceId}. Skipping publishing.`,
+            `Trace not found in Doris: ${input.traceId}. Skipping publishing.`,
           );
           throw new TRPCError({
             code: "NOT_FOUND",
@@ -662,35 +618,19 @@ export const traceRouter = createTRPCRouter({
           });
         }
         const initialState = {
-          bookmarked: clickhouseTrace.bookmarked,
-          public: clickhouseTrace.public,
+          bookmarked: analyticsTrace.bookmarked,
+          public: analyticsTrace.public,
         };
-        clickhouseTrace.public = input.public;
-        if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
-          await updateTraceControlState({
-            client: ctx.prisma,
-            projectId: input.projectId,
-            traceId: input.traceId,
-            initialState,
-            updates: { public: input.public },
-            mutationSource: "ui:traces.publish",
-          });
-          return clickhouseTrace;
-        }
-        const promises = [
-          upsertTrace(convertTraceDomainToClickhouse(clickhouseTrace)),
-        ];
-        if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy") {
-          promises.push(
-            updateEvents(
-              input.projectId,
-              { traceIds: [clickhouseTrace.id] },
-              { public: input.public },
-            ),
-          );
-        }
-        await Promise.all(promises);
-        return clickhouseTrace;
+        analyticsTrace.public = input.public;
+        await updateTraceControlState({
+          client: ctx.prisma,
+          projectId: input.projectId,
+          traceId: input.traceId,
+          initialState,
+          updates: { public: input.public },
+          mutationSource: "ui:traces.publish",
+        });
+        return analyticsTrace;
       } catch (error) {
         logger.error("Failed to call traces.publish", error);
         throw new TRPCError({
@@ -713,12 +653,8 @@ export const traceRouter = createTRPCRouter({
     .query(async ({ input }): Promise<Required<AgentGraphDataResponse>[]> => {
       const { traceId, projectId, minStartTime, maxStartTime } = input;
 
-      const chMinStartTime = convertDateToClickhouseDateTime(
-        new Date(minStartTime),
-      );
-      const chMaxStartTime = convertDateToClickhouseDateTime(
-        new Date(maxStartTime),
-      );
+      const chMinStartTime = new Date(minStartTime).toISOString();
+      const chMaxStartTime = new Date(maxStartTime).toISOString();
 
       const records = await getAgentGraphData({
         projectId,

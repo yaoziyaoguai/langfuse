@@ -218,8 +218,3 @@ export const query = z
       !(query.timeDimension && query.entityDimension),
     { message: "timeDimension and entityDimension are mutually exclusive" },
   );
-
-export const useEventsTableSchema = z
-  .union([z.literal("true"), z.literal("false"), z.boolean()])
-  .optional()
-  .transform((val) => val === "true" || val === true);

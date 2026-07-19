@@ -19,7 +19,6 @@ import {
   listObservationsTool,
   handleListObservations,
 } from "./tools/listObservations";
-import { env } from "@/src/env.mjs";
 
 export const observationsFeature = {
   name: "observations",
@@ -47,6 +46,4 @@ export const observationsFeature = {
       handler: handleGetObservationFilterValues,
     },
   ],
-  isEnabled: async () =>
-    env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true",
 } as const satisfies McpFeatureModule;

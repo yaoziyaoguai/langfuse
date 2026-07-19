@@ -73,9 +73,8 @@ const EXPORT_SOURCE_UNAVAILABLE_MESSAGES: Record<
     "This integration is configured to export enriched observations, but enriched export is not available on this deployment. Saving is blocked until you select an available export source above. To keep the current configuration instead, re-enable enriched export (V4 preview opt-in) on your deployment.",
   "cloud-cutoff":
     "This integration is configured to export legacy traces and observations, which is no longer available for this project. Saving is blocked until you select an available export source above.",
-  // Self-hosted-operator-facing: naming the env var is intentional.
   "legacy-writes-disabled":
-    "This integration is configured to export legacy traces and observations, but this deployment runs LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only and no longer writes the legacy traces/observations tables. Saving is blocked until you select an available export source above.",
+    "This integration is configured to export legacy traces and observations, but the Doris R1A topology does not write those tables. Saving is blocked until you select the canonical events export source above.",
 };
 
 export function getExportSourceUnavailableMessage(

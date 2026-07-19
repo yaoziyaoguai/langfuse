@@ -9,11 +9,13 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   traceGet: vi.fn(),
   modelFindMany: vi.fn(),
+  traceControlStateFindMany: vi.fn(),
 }));
 
 vi.mock("../../db", () => ({
   prisma: {
     model: { findMany: mocks.modelFindMany },
+    traceControlState: { findMany: mocks.traceControlStateFindMany },
   },
 }));
 
@@ -110,6 +112,7 @@ describe("legacy observation repository Doris routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.modelFindMany.mockResolvedValue([]);
+    mocks.traceControlStateFindMany.mockResolvedValue([]);
   });
 
   it("routes generation list/count contracts through Doris", async () => {

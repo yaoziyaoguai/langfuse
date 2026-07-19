@@ -11,6 +11,7 @@ import type { TraceRecordExtraFieldsType } from "../../definitions";
 import { InvalidRequestError } from "../../../../errors";
 import { toDorisTraceDomain } from "./adapters";
 import { getDorisTelemetryRepositories } from "./runtime";
+import { normalizeDorisEventFilters } from "../../../queries/logical/filterPlan";
 
 export type DorisPublicApiTracesQuery = {
   readonly projectId: string;
@@ -97,7 +98,7 @@ function optionalStringFilter(
 function buildFilters(
   input: DorisPublicApiTracesQuery,
 ): EventsTableFilterState {
-  const filters = [...(input.advancedFilters ?? [])];
+  const filters = normalizeDorisEventFilters(input.advancedFilters ?? []);
   optionalStringFilter(filters, "userId", input.userId);
   optionalStringFilter(filters, "name", input.name);
   optionalStringFilter(filters, "sessionId", input.sessionId);

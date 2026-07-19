@@ -412,8 +412,8 @@ describe("events repository Doris routing", () => {
       getAgentGraphDataFromEventsTable({
         projectId: "project-1",
         traceId: "trace-1",
-        chMinStartTime: "2026-07-17 09:59:00.000",
-        chMaxStartTime: "2026-07-17 10:01:00.000",
+        minStartTime: new Date("2026-07-17T09:59:00.000Z"),
+        maxStartTime: new Date("2026-07-17T10:01:00.000Z"),
       }),
     ).resolves.toEqual([
       {

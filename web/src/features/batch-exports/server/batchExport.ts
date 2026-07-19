@@ -18,7 +18,6 @@ import {
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
 
 export const batchExportRouter = createTRPCRouter({
   create: protectedProjectProcedure
@@ -34,13 +33,7 @@ export const batchExportRouter = createTRPCRouter({
 
         const { projectId, format, name } = input;
 
-        // Snapshot the user's v4 beta flag into the persisted query so the
-        // worker reads events-aware data sources from the dispatch-time
-        // snapshot, never the live user record. Overrides any client-sent value.
-        const query = {
-          ...input.query,
-          useEventsTable: ctx.session.user.v4BetaEnabled ?? false,
-        };
+        const query = input.query;
 
         if (query.tableName === BatchExportTableName.AuditLogs) {
           throwIfNoEntitlement({
@@ -54,12 +47,6 @@ export const batchExportRouter = createTRPCRouter({
             scope: "auditLogs:read",
           });
         }
-
-        assertLegacyTracingIoSearchCanCreateBatchJob({
-          searchQuery: query.searchQuery,
-          searchType: query.searchType,
-          tableName: query.tableName,
-        });
 
         logger.info("[BATCH EXPORT] Creating export job", { job: input });
         const userId = ctx.session.user.id;

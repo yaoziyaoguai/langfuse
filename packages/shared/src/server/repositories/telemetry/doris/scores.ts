@@ -2,6 +2,7 @@ import type {
   ScoreDataTypeType,
   ScoreDomain,
   ScoreSourceType,
+  ListableScore,
 } from "../../../../domain/scores";
 import { InvalidRequestError, LangfuseConflictError } from "../../../../errors";
 import type { EventsTableFilterState } from "../../../../types";
@@ -95,9 +96,26 @@ type DorisScoreRow = Record<string, unknown> & {
   readonly score_id: string;
 };
 
+export type DorisScoreAnalyticsIdentifier = {
+  readonly name: string;
+  readonly source: string;
+  readonly dataType: string;
+};
+
+export type DorisScoreAnalyticsObjectType =
+  | "all"
+  | "trace"
+  | "session"
+  | "observation";
+
 export type DorisScoresPage = {
   readonly items: readonly ScoreDomain[];
   readonly nextCursor: string | null;
+};
+
+export type DorisPromptScore = ListableScore & {
+  readonly promptId: string;
+  readonly hasMetadata: boolean;
 };
 
 function dateTime(value: unknown): Date {
@@ -312,6 +330,48 @@ LEFT JOIN project_tombstones project_deletion
   };
 }
 
+function analyticsFilters(
+  identifier: DorisScoreAnalyticsIdentifier,
+  objectType: DorisScoreAnalyticsObjectType,
+): EventsTableFilterState {
+  const filters: EventsTableFilterState = [
+    { type: "string", column: "name", operator: "=", value: identifier.name },
+    {
+      type: "string",
+      column: "source",
+      operator: "=",
+      value: identifier.source,
+    },
+    {
+      type: "string",
+      column: "dataType",
+      operator: "=",
+      value: identifier.dataType,
+    },
+  ];
+  if (objectType === "trace") {
+    filters.push(
+      { type: "null", column: "traceId", operator: "is not null", value: "" },
+      { type: "null", column: "observationId", operator: "is null", value: "" },
+      { type: "null", column: "sessionId", operator: "is null", value: "" },
+    );
+  } else if (objectType === "observation") {
+    filters.push({
+      type: "null",
+      column: "observationId",
+      operator: "is not null",
+      value: "",
+    });
+  } else if (objectType === "session") {
+    filters.push(
+      { type: "null", column: "sessionId", operator: "is not null", value: "" },
+      { type: "null", column: "observationId", operator: "is null", value: "" },
+      { type: "null", column: "traceId", operator: "is null", value: "" },
+    );
+  }
+  return filters;
+}
+
 export class DorisScoresRepository {
   private readonly locateScore: LocateScore;
 
@@ -399,6 +459,99 @@ export class DorisScoresRepository {
     return rows[0] ? numberValue(rows[0].count) : 0;
   }
 
+  async comparisonCounts(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange;
+    readonly score1: DorisScoreAnalyticsIdentifier;
+    readonly score2: DorisScoreAnalyticsIdentifier;
+    readonly objectType: DorisScoreAnalyticsObjectType;
+  }): Promise<{
+    readonly score1Count: number;
+    readonly score2Count: number;
+    readonly matchedCount: number;
+  }> {
+    const first = compileScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: analyticsFilters(input.score1, input.objectType),
+    });
+    const identical =
+      input.score1.name === input.score2.name &&
+      input.score1.source === input.score2.source &&
+      input.score1.dataType === input.score2.dataType;
+    if (identical) {
+      const rows = await this.dependencies.query<{ readonly count: unknown }>(
+        `SELECT COUNT(*) AS count\n${first.fromSql}\nWHERE ${first.whereSql}`,
+        first.params,
+      );
+      const count = rows[0] ? numberValue(rows[0].count) : 0;
+      return { score1Count: count, score2Count: count, matchedCount: count };
+    }
+    const second = compileScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: analyticsFilters(input.score2, input.objectType),
+    });
+    const rows = await this.dependencies.query<Record<string, unknown>>(
+      `WITH score1 AS (
+  SELECT s.trace_id, s.observation_id, s.session_id
+  ${first.fromSql}
+  WHERE ${first.whereSql}
+), score2 AS (
+  SELECT s.trace_id, s.observation_id, s.session_id
+  ${second.fromSql}
+  WHERE ${second.whereSql}
+), matched AS (
+  SELECT 1 AS matched
+  FROM score1 a
+  INNER JOIN score2 b
+    ON COALESCE(a.trace_id, '') = COALESCE(b.trace_id, '')
+   AND COALESCE(a.observation_id, '') = COALESCE(b.observation_id, '')
+   AND COALESCE(a.session_id, '') = COALESCE(b.session_id, '')
+  LIMIT 1000000
+)
+SELECT
+  (SELECT COUNT(*) FROM score1) AS score1_count,
+  (SELECT COUNT(*) FROM score2) AS score2_count,
+  (SELECT COUNT(*) FROM matched) AS matched_count`,
+      [...first.params, ...second.params],
+    );
+    const row = rows[0];
+    return {
+      score1Count: numberValue(row?.score1_count ?? 0),
+      score2Count: numberValue(row?.score2_count ?? 0),
+      matchedCount: numberValue(row?.matched_count ?? 0),
+    };
+  }
+
+  async analyticsRows(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange;
+    readonly score: DorisScoreAnalyticsIdentifier;
+    readonly objectType: DorisScoreAnalyticsObjectType;
+    readonly limit: number;
+  }): Promise<readonly ScoreDomain[]> {
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 100_000
+    ) {
+      throw new InvalidRequestError(
+        "Invalid Doris score analytics sample size",
+      );
+    }
+    const scope = compileScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: analyticsFilters(input.score, input.objectType),
+    });
+    const rows = await this.dependencies.query<DorisScoreRow>(
+      `SELECT ${SCORE_PROJECTION}\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY COALESCE(s.trace_id, ''), COALESCE(s.observation_id, ''), COALESCE(s.session_id, ''), s.score_id ASC\nLIMIT ?`,
+      [...scope.params, input.limit],
+    );
+    return rows.map(decodeScore);
+  }
+
   async aggregateGroups(input: {
     readonly projectId: string;
     readonly range: AnalyticsTimeRange;
@@ -464,5 +617,132 @@ export class DorisScoresRepository {
       throw new LangfuseConflictError("Score locator returned duplicates");
     }
     return rows[0] ? decodeScore(rows[0]) : null;
+  }
+
+  async listForPrompts(input: {
+    readonly projectId: string;
+    readonly promptIds: readonly string[];
+    readonly relation: "observation" | "trace";
+    readonly from?: Date;
+    readonly to?: Date;
+  }): Promise<readonly DorisPromptScore[]> {
+    if (!input.projectId || input.promptIds.length === 0) return [];
+    const params: unknown[] = [input.projectId, [...input.promptIds]];
+    const timePredicates: string[] = [];
+    if (input.from) {
+      timePredicates.push("o.start_time >= ?");
+      params.push(input.from);
+    }
+    if (input.to) {
+      timePredicates.push("o.start_time <= ?");
+      params.push(input.to);
+    }
+    const rows = await this.dependencies.query<
+      DorisScoreRow & { readonly prompt_id: string }
+    >(
+      `SELECT ${SCORE_PROJECTION}, o.prompt_id
+FROM scores_current s
+JOIN events_current o
+  ON o.project_id = s.project_id
+ AND o.trace_id = s.trace_id
+ ${input.relation === "observation" ? "AND o.span_id = s.observation_id" : ""}
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = s.project_id
+ AND trace_deletion.trace_id = s.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = s.project_id
+WHERE s.project_id = ?
+  AND o.prompt_id IN (?)
+  AND UPPER(o.\`type\`) = 'GENERATION'
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL
+  AND s.data_type IN ('NUMERIC', 'BOOLEAN', 'CATEGORICAL', 'TEXT')
+  ${input.relation === "trace" ? "AND s.observation_id IS NULL" : ""}
+  ${timePredicates.length > 0 ? `AND ${timePredicates.join(" AND ")}` : ""}`,
+      params,
+    );
+    return rows.map((row) => ({
+      ...(decodeScore(row) as ListableScore),
+      promptId: row.prompt_id,
+      hasMetadata: Object.keys(metadataValue(row.metadata)).length > 0,
+    }));
+  }
+
+  async countByProjectCreatedAt(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly { readonly projectId: string; readonly count: number }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly count: unknown;
+    }>(
+      `SELECT s.project_id, COUNT(*) AS count
+FROM scores_current s
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = s.project_id
+ AND trace_deletion.trace_id = s.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = s.project_id
+WHERE s.created_at >= ? AND s.created_at < ?
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL
+GROUP BY s.project_id`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      count: numberValue(row.count),
+    }));
+  }
+
+  async countProjectsSince(input: {
+    readonly projectIds: readonly string[];
+    readonly start: Date;
+  }): Promise<number> {
+    if (input.projectIds.length === 0) return 0;
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(*) AS count
+FROM scores_current s
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = s.project_id
+WHERE s.project_id IN (?)
+  AND s.created_at >= ?
+  AND project_deletion.project_id IS NULL`,
+      [[...input.projectIds], input.start],
+    );
+    return rows[0] ? numberValue(rows[0].count) : 0;
+  }
+
+  async countByProjectAndDay(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly {
+      readonly projectId: string;
+      readonly date: string;
+      readonly count: number;
+    }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly date: string;
+      readonly count: unknown;
+    }>(
+      `SELECT s.project_id, CAST(DATE(s.\`timestamp\`) AS STRING) AS date, COUNT(*) AS count
+FROM scores_current s
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = s.project_id
+WHERE s.\`timestamp\` >= ? AND s.\`timestamp\` < ?
+  AND project_deletion.project_id IS NULL
+GROUP BY s.project_id, DATE(s.\`timestamp\`)`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      date: row.date,
+      count: numberValue(row.count),
+    }));
   }
 }

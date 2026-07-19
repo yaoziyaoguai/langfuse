@@ -14,7 +14,7 @@ import { granularities, metric as MetricSchema, viewsV2 } from "../query/types";
 import { isValidQuery } from "./isValidQuery";
 import { isValidThresholdOrder } from "./isValidThresholdOrder";
 
-/** monitorEvaluationOffsetMs shifts the query window back so ClickHouse reads settled data past the events-table write lag. */
+/** monitorEvaluationOffsetMs shifts the query window back so Doris reads settled data past the events-table write lag. */
 export const monitorEvaluationOffsetMs = 30 * 1000;
 
 /** ErrorNameRequired is the message emitted when the Monitor name is missing or empty. */

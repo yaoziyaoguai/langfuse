@@ -45,10 +45,10 @@ const HistogramChart = ({
   const transformHistogramData = (data: DataPoint[]): HistogramDataPoint[] => {
     if (!data.length) return [];
 
-    // Check if this is ClickHouse histogram format (array of tuples)
+    // Check if this is Doris histogram format (array of tuples)
     const firstDataPoint = data[0];
     if (firstDataPoint?.metric && Array.isArray(firstDataPoint.metric)) {
-      // ClickHouse histogram format: [(lower, upper, height), ...]
+      // Doris histogram format: [(lower, upper, height), ...]
       return (firstDataPoint.metric as [number, number, number][]).map(
         ([lower, upper, height]) => ({
           binLabel: `[${formatBinEdge(lower)}, ${formatBinEdge(upper)}]`,

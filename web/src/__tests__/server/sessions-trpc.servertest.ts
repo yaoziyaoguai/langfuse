@@ -4,9 +4,9 @@ import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import {
   createObservation,
-  createObservationsCh,
+  createObservationsDoris,
   createTrace,
-  createTracesCh,
+  createTracesDoris,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
 
@@ -44,7 +44,6 @@ describe("traces trpc", () => {
         },
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
         searchBar: false,
         v4BetaToggleVisible: false,
@@ -80,7 +79,7 @@ describe("traces trpc", () => {
         session_id: sessionId,
       });
 
-      await createTracesCh([trace, trace2]);
+      await createTracesDoris([trace, trace2]);
 
       const observation = createObservation({
         project_id: projectId,
@@ -97,7 +96,7 @@ describe("traces trpc", () => {
         trace_id: trace2.id,
       });
 
-      await createObservationsCh([observation, observation2, observation3]);
+      await createObservationsDoris([observation, observation2, observation3]);
 
       const sessionRes = await caller.sessions.byIdWithScores({
         projectId,
@@ -182,7 +181,7 @@ describe("traces trpc", () => {
         session_id: sessionId,
         environment: testEnvironment,
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       // When - filter by correct session_id but wrong environment
       const sessions = await caller.sessions.all({
@@ -230,7 +229,7 @@ describe("traces trpc", () => {
         project_id: projectId,
         session_id: sessionId,
       });
-      await createTracesCh([trace]);
+      await createTracesDoris([trace]);
 
       // When
       const sessions = await caller.sessions.countAll({

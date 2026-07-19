@@ -29,12 +29,12 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import {
   createObservation,
-  createObservationsCh,
+  createObservationsDoris,
   createTrace,
-  createTracesCh,
+  createTracesDoris,
   createOrgProjectAndApiKey,
-  getDatasetRunItemsByDatasetIdCh,
-  createDatasetRunItemsCh,
+  getDatasetRunItemsByDatasetId,
+  createDatasetRunItemsDoris,
   createDatasetRunItem,
   getDatasetItemById,
   createDatasetItemFilterState,
@@ -78,8 +78,8 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
       version: "2.0.0",
     });
 
-    await createTracesCh([trace]);
-    await createObservationsCh([observation]);
+    await createTracesDoris([trace]);
+    await createObservationsDoris([observation]);
   });
 
   it("should create and get a dataset (v1), include special characters", async () => {
@@ -542,19 +542,6 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
       datasetName: "dataset-name-2", // not included in db table
     });
 
-    await makeZodVerifiedAPICall(
-      PostDatasetRunItemsV1Response,
-      "POST",
-      "/api/public/dataset-run-items",
-      {
-        datasetItemId: datasetItemId,
-        observationId: observationId,
-        runName: "test-run",
-        metadata: { key: "value" },
-      },
-      auth,
-    );
-
     const getDatasetsV1 = await makeZodVerifiedAPICall(
       GetDatasetsV1Response,
       "GET",
@@ -897,7 +884,33 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     expect(dbDatasetItem?.status).toBe("ARCHIVED");
   });
 
-  it("should create and get a dataset run, include special characters", async () => {
+  it("returns structured 501 responses for R1B dataset-run routes", async () => {
+    const requests = await Promise.all([
+      makeAPICall("POST", "/api/public/dataset-run-items", {}, auth),
+      makeAPICall(
+        "GET",
+        "/api/public/datasets/test-dataset/runs",
+        undefined,
+        auth,
+      ),
+      makeAPICall(
+        "DELETE",
+        "/api/public/datasets/test-dataset/runs/test-run",
+        undefined,
+        auth,
+      ),
+    ]);
+
+    for (const response of requests) {
+      expect(response.status).toBe(501);
+      expect(response.body).toMatchObject({
+        error: "UnsupportedFeature",
+        code: "R1B_EXPERIMENTS_UNAVAILABLE",
+      });
+    }
+  });
+
+  it.skip("should create and get a dataset run, include special characters", async () => {
     const dataset = await makeZodVerifiedAPICall(
       PostDatasetsV1Response,
       "POST",
@@ -949,8 +962,8 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
       version: "2.0.0",
     });
 
-    await createTracesCh([trace]);
-    await createObservationsCh([observation]);
+    await createTracesDoris([trace]);
+    await createObservationsDoris([observation]);
 
     const runItemObservation = await makeZodVerifiedAPICall(
       PostDatasetRunItemsV1Response,
@@ -979,7 +992,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     expect(runItemObservation.status).toBe(200);
 
     await waitForExpect(async () => {
-      const runItems = await getDatasetRunItemsByDatasetIdCh({
+      const runItems = await getDatasetRunItemsByDatasetId({
         projectId,
         datasetId: dbRunObservation!.datasetId,
         filter: [
@@ -1080,7 +1093,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     expect(runItemBoth.status).toBe(200);
   }, 90000);
 
-  it("GET /api/public/datasets/{datasetName}/runs", async () => {
+  it.skip("GET /api/public/datasets/{datasetName}/runs", async () => {
     // create multiple runs
     await makeZodVerifiedAPICall(
       PostDatasetsV1Response,
@@ -1129,8 +1142,8 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
       version: "2.0.0",
     });
 
-    await createTracesCh([trace]);
-    await createObservationsCh([observation]);
+    await createTracesDoris([trace]);
+    await createObservationsDoris([observation]);
 
     await makeZodVerifiedAPICall(
       PostDatasetRunItemsV1Response,
@@ -1224,7 +1237,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     });
   });
 
-  it("should delete a dataset run and its run items", async () => {
+  it.skip("should delete a dataset run and its run items", async () => {
     const datasetName = `dataset-${uuidv4()}`;
     const runName = `run-${uuidv4()}`;
     const nonExistentRunName = `non-existent-${uuidv4()}`;
@@ -1333,7 +1346,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     // worker/src/__tests__/datasetDelete.test.ts.
   });
 
-  it("dataset-run-items should fail when neither trace nor observation provided", async () => {
+  it.skip("dataset-run-items should fail when neither trace nor observation provided", async () => {
     const response = await makeAPICall(
       "POST",
       "/api/public/dataset-run-items",
@@ -1444,7 +1457,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     );
   });
 
-  it("should delete a dataset item but not its run items", async () => {
+  it.skip("should delete a dataset item but not its run items", async () => {
     const datasetName = `dataset-${uuidv4()}`;
     const itemId = `item-${uuidv4()}`;
     const nonExistentItemId = `non-existent-${uuidv4()}`;
@@ -1499,7 +1512,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     );
     expect(deleteNonExistent.status).toBe(404);
 
-    await createDatasetRunItemsCh([
+    await createDatasetRunItemsDoris([
       createDatasetRunItem({
         dataset_item_id: itemId,
         trace_id: traceId,
@@ -1542,7 +1555,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
 
     // Verify run items are also deleted
     await waitForExpect(async () => {
-      const dbRunItems = await getDatasetRunItemsByDatasetIdCh({
+      const dbRunItems = await getDatasetRunItemsByDatasetId({
         projectId: dataset.body.projectId,
         datasetId: dataset.body.id,
         filter: [],
@@ -1556,7 +1569,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     }, 60000);
   }, 90000);
 
-  it("should properly paginate and filter dataset run items", async () => {
+  it.skip("should properly paginate and filter dataset run items", async () => {
     // Create a dataset
     const datasetName = `pagination-test-${v4()}`;
     const dataset = await makeZodVerifiedAPICall(
@@ -1624,7 +1637,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     // Wrapping the GET run response verification inside a waitForExpect block ensures
     // the test waits for eventual consistency (from asynchronous writes to ClickHouse for dataset run items)
     await waitForExpect(async () => {
-      const runItems = await getDatasetRunItemsByDatasetIdCh({
+      const runItems = await getDatasetRunItemsByDatasetId({
         projectId,
         datasetId: dataset.body.id,
         filter: [
@@ -1693,7 +1706,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     expect(nonExistent.status).toBe(404);
   }, 90000);
 
-  it("should create and fetch a dataset with slashes in the name", async () => {
+  it.skip("should create and fetch a dataset with slashes in the name", async () => {
     const datasetName = `folder/subfolder/dataset-${v4()}`;
 
     // Create dataset with slashes in name
@@ -1901,7 +1914,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     expect(invalidVersion.status).toBe(400); // Should fail validation
   }, 90000);
 
-  it("should support creating experiment runs at specific dataset version", async () => {
+  it.skip("should support creating experiment runs at specific dataset version", async () => {
     const datasetName = `experiment-version-dataset-${v4()}`;
     const runName = `experiment-run-${v4()}`;
 
@@ -1978,7 +1991,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     });
   }, 90000);
 
-  it("should return createdAt timestamp when creating a dataset run item", async () => {
+  it.skip("should return createdAt timestamp when creating a dataset run item", async () => {
     const datasetName = `dataset-createdAt-test-${v4()}`;
 
     // Create dataset
@@ -2054,7 +2067,7 @@ describe("/api/public/datasets and /api/public/dataset-items API Endpoints", () 
     );
   });
 
-  it("should propagate createdAt to dataset run only when creating new run", async () => {
+  it.skip("should propagate createdAt to dataset run only when creating new run", async () => {
     const datasetName = `dataset-run-createdAt-${v4()}`;
     const runName = `run-createdAt-test-${v4()}`;
 

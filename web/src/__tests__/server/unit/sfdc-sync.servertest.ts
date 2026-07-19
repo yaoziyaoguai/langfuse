@@ -100,7 +100,7 @@ vi.mock("@langfuse/shared/src/db", async (importOriginal) => {
   return { ...actual, prisma: prismaMock };
 });
 // Partial mock — keep real exports for teardown.ts which imports `redis` and
-// `ClickHouseClientManager` from this module.
+// `DorisClientManager` from this module.
 vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
@@ -668,7 +668,6 @@ function buildOwnerSession(orgId: string): Session {
       ],
       featureFlags: {
         searchBar: false,
-        excludeClickhouseRead: false,
         templateFlag: true,
         v4BetaToggleVisible: false,
         observationEvals: false,

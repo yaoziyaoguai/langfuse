@@ -1,6 +1,6 @@
 import {
   checkTraceExistsAndGetTimestamp,
-  createTracesCh,
+  createTracesDoris,
 } from "@langfuse/shared/src/server";
 import {
   getTraceById,
@@ -9,7 +9,7 @@ import {
 } from "@langfuse/shared/src/server";
 import { v4 } from "uuid";
 import { createObservation, createTrace } from "@langfuse/shared/src/server";
-import { createObservationsCh } from "@langfuse/shared/src/server";
+import { createObservationsDoris } from "@langfuse/shared/src/server";
 
 const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
 
@@ -50,7 +50,7 @@ describe("Clickhouse Traces Repository Test", () => {
       is_deleted: 0,
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const result = await getTraceById({
       traceId,
@@ -107,7 +107,7 @@ describe("Clickhouse Traces Repository Test", () => {
       is_deleted: 0,
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const result = await getTraceById({ traceId, projectId });
     expect(result).not.toBeNull();
@@ -150,7 +150,7 @@ describe("Clickhouse Traces Repository Test", () => {
       timestamp: Date.now(),
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const result = await getTraceByIdFromTracesTable({
       traceId,
@@ -209,7 +209,7 @@ describe("Clickhouse Traces Repository Test", () => {
       is_deleted: 0,
     });
 
-    await createTracesCh([trace1, trace2]);
+    await createTracesDoris([trace1, trace2]);
 
     const results = await getTracesBySessionId(projectId, [sessionId]);
     expect(results).toHaveLength(2);
@@ -254,8 +254,8 @@ describe("Clickhouse Traces Repository Test", () => {
       }),
     ];
 
-    await createTracesCh([trace]);
-    await createObservationsCh(observations);
+    await createTracesDoris([trace]);
+    await createObservationsDoris(observations);
 
     const { exists } = await checkTraceExistsAndGetTimestamp({
       projectId,
@@ -309,8 +309,8 @@ describe("Clickhouse Traces Repository Test", () => {
       }),
     ];
 
-    await createTracesCh([trace]);
-    await createObservationsCh(observations);
+    await createTracesDoris([trace]);
+    await createObservationsDoris(observations);
 
     const { exists } = await checkTraceExistsAndGetTimestamp({
       projectId,
@@ -363,8 +363,8 @@ describe("Clickhouse Traces Repository Test", () => {
       }),
     ];
 
-    await createTracesCh([trace]);
-    await createObservationsCh(observations);
+    await createTracesDoris([trace]);
+    await createObservationsDoris(observations);
 
     const { exists } = await checkTraceExistsAndGetTimestamp({
       projectId,
@@ -410,8 +410,8 @@ describe("Clickhouse Traces Repository Test", () => {
       }),
     ];
 
-    await createTracesCh([trace]);
-    await createObservationsCh(observations);
+    await createTracesDoris([trace]);
+    await createObservationsDoris(observations);
 
     const { exists } = await checkTraceExistsAndGetTimestamp({
       projectId,
@@ -442,7 +442,7 @@ describe("Clickhouse Traces Repository Test", () => {
       timestamp: Date.now(),
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const { exists } = await checkTraceExistsAndGetTimestamp({
       projectId,

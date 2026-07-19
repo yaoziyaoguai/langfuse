@@ -13,40 +13,37 @@ import { cloudSpendAlertQueueProcessor } from "./queues/cloudSpendAlertQueue";
 import { cloudFreeTierUsageThresholdQueueProcessor } from "./queues/cloudFreeTierUsageThresholdQueue";
 import { WorkerManager } from "./queues/workerManager";
 import {
-  PostHogIntegrationQueue,
-  MixpanelIntegrationQueue,
   QueueName,
   logger,
   DeadLetterRetryQueue,
   AnalyticsIngestionQueue,
   CloudFreeTierUsageThresholdQueue,
   CloudUsageMeteringQueue,
+  BatchActionQueue,
+  findRecoverableDeletionOperations,
+  handoffLegacyAnalyticsIngestionOutbox,
 } from "@langfuse/shared/src/server";
+import type { AnalyticsDeletionScope } from "@prisma/client";
 import { env } from "./env";
 import { BackgroundMigrationManager } from "./backgroundMigrations/backgroundMigrationManager";
 import { traceDeleteProcessor } from "./queues/traceDelete";
 import { projectDeleteProcessor } from "./queues/projectDelete";
-import {
-  postHogIntegrationProcessingProcessor,
-  postHogIntegrationProcessor,
-} from "./queues/postHogIntegrationQueue";
-import {
-  mixpanelIntegrationProcessingProcessor,
-  mixpanelIntegrationProcessor,
-} from "./queues/mixpanelIntegrationQueue";
 import { scoreDeleteProcessor } from "./queues/scoreDelete";
 import { DlqRetryService } from "./services/dlq/dlqRetryService";
 import { entityChangeQueueProcessor } from "./queues/entityChangeQueue";
 import { webhookProcessor } from "./queues/webhooks";
 import { datasetDeleteProcessor } from "./queues/datasetDelete";
 import { notificationQueueProcessor } from "./queues/notificationQueue";
-import { MediaRetentionCleaner } from "./features/media-retention-cleaner";
 import { BatchTraceDeletionCleaner } from "./features/batch-trace-deletion-cleaner";
 import { BatchProjectMediaCleaner } from "./features/batch-project-media-cleaner";
 import { QueueMetricsRunner } from "./features/queue-metrics-runner";
 import { TraceDeleteBatchActionRunner } from "./features/trace-delete-batch-action-runner";
 import { createDorisAnalyticsPersistence } from "./services/dorisAnalyticsPersistence";
 import { AnalyticsIngestionOutboxRunner } from "./features/analytics-ingestion-outbox-runner";
+import { batchActionQueueProcessor } from "./queues/batchActionQueue";
+import { assertDorisAnalyticsReady } from "./services/dorisAnalyticsReadiness";
+import { AnalyticsDeletionRecoveryRunner } from "./features/analytics-deletion-recovery-runner";
+import { processAnalyticsDeletionRecoveryOperation } from "./features/analytics-deletion-recovery-runner/processOperation";
 
 const app = express();
 
@@ -120,6 +117,8 @@ if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
 }
 
 const dorisAnalyticsPersistence = createDorisAnalyticsPersistence({});
+const legacyIngestionHandoffEnabled =
+  env.LANGFUSE_ANALYTICS_INGESTION_LEGACY_HANDOFF_ENABLED === "true";
 
 export let analyticsIngestionOutboxRunner: AnalyticsIngestionOutboxRunner | null =
   null;
@@ -136,8 +135,43 @@ analyticsIngestionOutboxRunner = new AnalyticsIngestionOutboxRunner({
   workerId: dorisAnalyticsPersistence.workerId,
   intervalMs: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_INTERVAL_MS,
   batchSize: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE,
+  // Enable only after every legacy ingestion producer and consumer has stopped.
+  handoffLegacy: legacyIngestionHandoffEnabled
+    ? handoffLegacyAnalyticsIngestionOutbox
+    : undefined,
+  assertReady: assertDorisAnalyticsReady,
 });
 analyticsIngestionOutboxRunner.start();
+
+export let analyticsDeletionRecoveryRunner: AnalyticsDeletionRecoveryRunner | null =
+  null;
+
+const deletionRecoveryScopes: AnalyticsDeletionScope[] = [];
+if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
+  deletionRecoveryScopes.push("TRACE");
+}
+if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
+  deletionRecoveryScopes.push("PROJECT");
+}
+if (deletionRecoveryScopes.length > 0) {
+  analyticsDeletionRecoveryRunner = new AnalyticsDeletionRecoveryRunner({
+    intervalMs: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_INTERVAL_MS,
+    batchSize: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_BATCH_SIZE,
+    assertReady: assertDorisAnalyticsReady,
+    findRecoverableOperations: (input) =>
+      findRecoverableDeletionOperations({
+        ...input,
+        scopes: deletionRecoveryScopes,
+      }),
+    processOperation: processAnalyticsDeletionRecoveryOperation,
+  });
+  analyticsDeletionRecoveryRunner.start();
+}
+
+BatchActionQueue.getInstance();
+WorkerManager.register(QueueName.BatchActionQueue, batchActionQueueProcessor, {
+  concurrency: 1,
+});
 
 if (
   env.QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED === "true" &&
@@ -203,72 +237,6 @@ if (
   );
 }
 
-if (env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true") {
-  // Instantiate the queue to trigger scheduled jobs
-  PostHogIntegrationQueue.getInstance();
-
-  WorkerManager.register(
-    QueueName.PostHogIntegrationQueue,
-    postHogIntegrationProcessor,
-    {
-      concurrency: 1,
-    },
-  );
-
-  WorkerManager.register(
-    QueueName.PostHogIntegrationProcessingQueue,
-    postHogIntegrationProcessingProcessor,
-    {
-      concurrency: 1,
-      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
-      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
-      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
-      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
-      lockDuration: 60000, // 60 seconds
-      stalledInterval: 120000, // 120 seconds
-      maxStalledCount: 3,
-      limiter: {
-        // Process at most one PostHog job globally per 10s.
-        max: 1,
-        duration: 10_000,
-      },
-    },
-  );
-}
-
-if (env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true") {
-  // Instantiate the queue to trigger scheduled jobs
-  MixpanelIntegrationQueue.getInstance();
-
-  WorkerManager.register(
-    QueueName.MixpanelIntegrationQueue,
-    mixpanelIntegrationProcessor,
-    {
-      concurrency: 1,
-    },
-  );
-
-  WorkerManager.register(
-    QueueName.MixpanelIntegrationProcessingQueue,
-    mixpanelIntegrationProcessingProcessor,
-    {
-      concurrency: 1,
-      limiter: {
-        // Process at most one Mixpanel job globally per 10s.
-        max: 1,
-        duration: 10_000,
-      },
-      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
-      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
-      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
-      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
-      lockDuration: 60000, // 60 seconds
-      stalledInterval: 120000, // 120 seconds
-      maxStalledCount: 3,
-    },
-  );
-}
-
 if (env.QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED === "true") {
   // Instantiate the queue to trigger scheduled jobs
   DeadLetterRetryQueue.getInstance();
@@ -306,14 +274,6 @@ if (env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true") {
       concurrency: 5, // Process up to 5 notification jobs concurrently
     },
   );
-}
-
-// Media retention cleaner for media files and blob storage
-export let mediaRetentionCleaner: MediaRetentionCleaner | null = null;
-
-if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
-  mediaRetentionCleaner = new MediaRetentionCleaner();
-  mediaRetentionCleaner.start();
 }
 
 // Batch project media cleaner for S3 media cleanup of soft-deleted projects

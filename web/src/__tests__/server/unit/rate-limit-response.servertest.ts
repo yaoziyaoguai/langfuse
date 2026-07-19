@@ -66,7 +66,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
   },
   createNewRedisInstance: vi.fn(),
   redisQueueRetryOptions: {},
-  ClickHouseClientManager: {
+  DorisClientManager: {
     getInstance: () => ({
       closeAllConnections: vi.fn(async () => undefined),
     }),

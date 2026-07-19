@@ -47,4 +47,46 @@ describe("MCP tool registry community capability gates", () => {
     });
     expect(handler).not.toHaveBeenCalled();
   });
+
+  it("blocks R1B dataset-run tools without hiding R1A dataset tools", async () => {
+    const runHandler = vi.fn().mockResolvedValue({ executed: true });
+    const itemHandler = vi.fn().mockResolvedValue({ executed: true });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "datasets",
+      description: "Dataset tools",
+      tools: [
+        {
+          definition: {
+            name: "listDatasetRuns",
+            description: "List dataset runs",
+            inputSchema: { type: "object" },
+          },
+          handler: runHandler,
+        },
+        {
+          definition: {
+            name: "listDatasetItems",
+            description: "List dataset items",
+            inputSchema: { type: "object" },
+          },
+          handler: itemHandler,
+        },
+      ],
+    });
+
+    await expect(registry.getToolDefinitions(context)).resolves.toHaveLength(2);
+
+    const runTool = await registry.getEnabledTool("listDatasetRuns", context);
+    await expect(runTool?.handler({}, context)).rejects.toMatchObject({
+      message: expect.stringContaining("R1B_EXPERIMENTS_UNAVAILABLE"),
+    });
+    expect(runHandler).not.toHaveBeenCalled();
+
+    const itemTool = await registry.getEnabledTool("listDatasetItems", context);
+    await expect(itemTool?.handler({}, context)).resolves.toEqual({
+      executed: true,
+    });
+    expect(itemHandler).toHaveBeenCalledOnce();
+  });
 });

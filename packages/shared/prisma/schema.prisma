@@ -1964,6 +1964,7 @@ model AnalyticsIngestionOperation {
   updatedAt                  DateTime                          @default(now()) @updatedAt @map("updated_at")
 
   outbox      AnalyticsIngestionOutbox?
+  outboxV2    AnalyticsIngestionOutboxV2?
   candidates  AnalyticsIngestionCandidate[]
   loadBatches AnalyticsLoadBatch[]
   entityHeads AnalyticsEntityHead[]
@@ -1975,6 +1976,7 @@ model AnalyticsIngestionOperation {
   @@index([manifestState, canonicalizationLeaseUntil])
   @@index([projectId, status, acceptedAt])
   @@index([canonicalizerVersion, schemaVersion, recoverableUntil])
+  @@index([terminalAt, id])
   @@map("analytics_ingestion_operations")
 }
 
@@ -2021,7 +2023,27 @@ model AnalyticsIngestionOutbox {
   updatedAt     DateTime                    @default(now()) @updatedAt @map("updated_at")
 
   @@index([status, nextAttemptAt, lockedUntil])
+  @@index([updatedAt, id])
   @@map("analytics_ingestion_outbox")
+}
+
+model AnalyticsIngestionOutboxV2 {
+  id            String                      @id @default(cuid())
+  operationId   String                      @unique @map("operation_id")
+  operation     AnalyticsIngestionOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  status        AnalyticsOutboxStatus       @default(PENDING)
+  generation    Int                         @default(1)
+  attempts      Int                         @default(0)
+  nextAttemptAt DateTime                    @default(now()) @map("next_attempt_at")
+  lockedBy      String?                     @map("locked_by")
+  lockedUntil   DateTime?                   @map("locked_until")
+  publishedAt   DateTime?                   @map("published_at")
+  createdAt     DateTime                    @default(now()) @map("created_at")
+  updatedAt     DateTime                    @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt, lockedUntil])
+  @@index([status, updatedAt])
+  @@map("analytics_ingestion_outbox_v2")
 }
 
 model AnalyticsLoadBatch {

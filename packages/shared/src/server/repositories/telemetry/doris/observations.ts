@@ -445,7 +445,9 @@ function decodeObservation(row: DorisEventRow): DorisObservation {
   return observation;
 }
 
-function encodeCursor(observation: DorisObservation): string {
+export function encodeDorisObservationCursor(
+  observation: DorisObservation,
+): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
@@ -566,7 +568,7 @@ export class DorisObservationsRepository {
       items,
       nextCursor:
         !input.orderBy && rows.length > input.limit && items.length > 0
-          ? encodeCursor(items[items.length - 1]!)
+          ? encodeDorisObservationCursor(items[items.length - 1]!)
           : null,
     };
   }
@@ -640,6 +642,10 @@ export class DorisObservationsRepository {
     readonly column: string;
     readonly limit: number;
     readonly offset?: number;
+    readonly requireScore?: {
+      readonly scoreName?: string;
+      readonly scoreSource?: string;
+    };
   }): Promise<
     readonly {
       readonly column: DorisEventFilterOptionColumn;
@@ -664,6 +670,27 @@ export class DorisObservationsRepository {
       });
     }
     const scope = compileDorisVisibleEventScope(input);
+    const scorePredicates = input.requireScore
+      ? [
+          "s.project_id = e.project_id",
+          "s.trace_id = e.trace_id",
+          ...(input.requireScore.scoreName ? ["s.`name` = ?"] : []),
+          ...(input.requireScore.scoreSource ? ["s.`source` = ?"] : []),
+        ]
+      : [];
+    const scoreParams = input.requireScore
+      ? [
+          ...(input.requireScore.scoreName
+            ? [input.requireScore.scoreName]
+            : []),
+          ...(input.requireScore.scoreSource
+            ? [input.requireScore.scoreSource]
+            : []),
+        ]
+      : [];
+    const scoreExists = input.requireScore
+      ? `\n  AND EXISTS (\n    SELECT 1\n    FROM scores_current s\n    WHERE ${scorePredicates.join("\n      AND ")}\n  )`
+      : "";
     const valueExpression =
       definition.kind === "boolean"
         ? `IF(${definition.expression}, 'true', 'false')`
@@ -672,8 +699,8 @@ export class DorisObservationsRepository {
           : definition.expression;
     const fromSql =
       definition.kind === "array"
-        ? `FROM (\n  SELECT ${definition.expression} AS facet_values\n  ${scope.fromSql}\n  WHERE ${scope.whereSql}\n) scoped\nLATERAL VIEW explode(scoped.facet_values) exploded AS value`
-        : `${scope.fromSql}\nWHERE ${scope.whereSql}`;
+        ? `FROM (\n  SELECT ${definition.expression} AS facet_values\n  ${scope.fromSql}\n  WHERE ${scope.whereSql}${scoreExists}\n) scoped\nLATERAL VIEW explode(scoped.facet_values) exploded AS value`
+        : `${scope.fromSql}\nWHERE ${scope.whereSql}${scoreExists}`;
     const includeWhen =
       definition.kind === "array"
         ? "value IS NOT NULL AND value != ''"
@@ -690,7 +717,12 @@ export class DorisObservationsRepository {
       readonly count: unknown;
     }>(
       `SELECT ${valueExpression} AS value, COUNT(*) AS count\n${fromSql}${definition.kind === "array" ? "\nWHERE" : " AND"} ${includeWhen ?? "TRUE"}\nGROUP BY value\nORDER BY ${orderBy}\nLIMIT ?${offsetSql}`,
-      [...scope.params, input.limit, ...(input.offset ? [input.offset] : [])],
+      [
+        ...scope.params,
+        ...scoreParams,
+        input.limit,
+        ...(input.offset ? [input.offset] : []),
+      ],
     );
     return rows.map((row) => ({
       column,
@@ -745,6 +777,181 @@ export class DorisObservationsRepository {
       avg: numberValue(row.avg),
       count: numberValue(row.count),
     };
+  }
+
+  async promptNameCounts(input: {
+    readonly projectId: string;
+    readonly promptNames: readonly string[];
+    readonly range: AnalyticsTimeRange;
+  }): Promise<
+    readonly { readonly promptName: string; readonly count: number }[]
+  > {
+    if (input.promptNames.length === 0) return [];
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "promptName",
+          operator: "any of",
+          value: [...input.promptNames],
+        },
+      ],
+    });
+    const rows = await this.dependencies.query<{
+      readonly prompt_name: unknown;
+      readonly count: unknown;
+    }>(
+      `SELECT e.prompt_name, COUNT(*) AS count\n${scope.fromSql}\nWHERE ${scope.whereSql}\nGROUP BY e.prompt_name`,
+      scope.params,
+    );
+    return rows.map((row) => ({
+      promptName: String(row.prompt_name),
+      count: numberValue(row.count),
+    }));
+  }
+
+  async promptMetrics(input: {
+    readonly projectId: string;
+    readonly promptIds: readonly string[];
+    readonly range: AnalyticsTimeRange;
+  }): Promise<
+    readonly {
+      readonly count: number;
+      readonly promptId: string;
+      readonly promptVersion: number;
+      readonly firstObservation: Date;
+      readonly lastObservation: Date;
+      readonly medianInputUsage: number;
+      readonly medianOutputUsage: number;
+      readonly medianTotalCost: number;
+      readonly medianLatencyMs: number;
+    }[]
+  > {
+    if (input.promptIds.length === 0) return [];
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "promptId",
+          operator: "any of",
+          value: [...input.promptIds],
+        },
+        {
+          type: "string",
+          column: "type",
+          operator: "=",
+          value: "GENERATION",
+        },
+      ],
+    });
+    const rows = await this.dependencies.query<Record<string, unknown>>(
+      `SELECT
+  e.prompt_id,
+  e.prompt_version,
+  COUNT(*) AS count,
+  MIN(e.start_time) AS first_observation,
+  MAX(e.start_time) AS last_observation,
+  PERCENTILE_APPROX(COALESCE(e.total_input_tokens, 0), 0.5) AS median_input_usage,
+  PERCENTILE_APPROX(COALESCE(e.total_output_tokens, 0), 0.5) AS median_output_usage,
+  PERCENTILE_APPROX(COALESCE(e.total_cost, 0), 0.5) AS median_total_cost,
+  PERCENTILE_APPROX(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000.0, 0.5) AS median_latency_ms
+${scope.fromSql}
+WHERE ${scope.whereSql}
+GROUP BY e.prompt_id, e.prompt_version
+ORDER BY e.prompt_version DESC`,
+      scope.params,
+    );
+    return rows.map((row) => ({
+      count: numberValue(row.count),
+      promptId: String(row.prompt_id),
+      promptVersion: numberValue(row.prompt_version),
+      firstObservation: dateTime(row.first_observation),
+      lastObservation: dateTime(row.last_observation),
+      medianInputUsage: numberValue(row.median_input_usage),
+      medianOutputUsage: numberValue(row.median_output_usage),
+      medianTotalCost: numberValue(row.median_total_cost),
+      medianLatencyMs: numberValue(row.median_latency_ms),
+    }));
+  }
+
+  async lastUsedByModelIds(input: {
+    readonly projectId: string;
+    readonly modelIds: readonly string[];
+  }): Promise<
+    readonly { readonly modelId: string; readonly lastUsed: Date }[]
+  > {
+    if (input.modelIds.length === 0) return [];
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: { from: new Date(0), to: new Date(Date.now() + 1) },
+      filters: [
+        {
+          type: "stringOptions",
+          column: "modelId",
+          operator: "any of",
+          value: [...input.modelIds],
+        },
+        {
+          type: "string",
+          column: "type",
+          operator: "=",
+          value: "GENERATION",
+        },
+      ],
+    });
+    const rows = await this.dependencies.query<{
+      readonly model_id: unknown;
+      readonly last_used: unknown;
+    }>(
+      `SELECT e.internal_model_id AS model_id, MAX(e.start_time) AS last_used\n${scope.fromSql}\nWHERE ${scope.whereSql}\nGROUP BY e.internal_model_id`,
+      scope.params,
+    );
+    return rows.map((row) => ({
+      modelId: String(row.model_id),
+      lastUsed: dateTime(row.last_used),
+    }));
+  }
+
+  async costAndLatencyByIds(input: {
+    readonly projectId: string;
+    readonly observationIds: readonly string[];
+    readonly from?: Date;
+  }): Promise<
+    readonly {
+      readonly id: string;
+      readonly totalCost: number;
+      readonly latency: number | null;
+    }[]
+  > {
+    if (input.observationIds.length === 0) return [];
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: { from: input.from ?? new Date(0), to: new Date(Date.now() + 1) },
+      filters: [
+        {
+          type: "stringOptions",
+          column: "id",
+          operator: "any of",
+          value: [...input.observationIds],
+        },
+      ],
+    });
+    const rows = await this.dependencies.query<Record<string, unknown>>(
+      `SELECT e.span_id, e.total_cost, TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0 AS latency\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
+      scope.params,
+    );
+    return rows.map((row) => ({
+      id: String(row.span_id),
+      totalCost: numberValue(row.total_cost),
+      latency:
+        row.latency === null || row.latency === undefined
+          ? null
+          : numberValue(row.latency),
+    }));
   }
 
   async latestSdkMetadata(input: {
@@ -920,5 +1127,90 @@ export class DorisObservationsRepository {
       );
     }
     return rows[0] ? decodeObservation(rows[0]) : null;
+  }
+
+  async countByProjectCreatedAt(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly { readonly projectId: string; readonly count: number }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly count: unknown;
+    }>(
+      `SELECT e.project_id, COUNT(*) AS count
+FROM events_current e
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = e.project_id
+ AND trace_deletion.trace_id = e.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = e.project_id
+WHERE e.created_at >= ? AND e.created_at < ?
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL
+GROUP BY e.project_id`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      count: numberValue(row.count),
+    }));
+  }
+
+  async countProjectsSince(input: {
+    readonly projectIds: readonly string[];
+    readonly start: Date;
+  }): Promise<number> {
+    if (input.projectIds.length === 0) return 0;
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(*) AS count
+FROM events_current e
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = e.project_id
+ AND trace_deletion.trace_id = e.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = e.project_id
+WHERE e.project_id IN (?) AND e.created_at >= ?
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL`,
+      [[...input.projectIds], input.start],
+    );
+    return rows[0] ? numberValue(rows[0].count) : 0;
+  }
+
+  async countByProjectAndDay(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly {
+      readonly projectId: string;
+      readonly date: string;
+      readonly count: number;
+    }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly date: string;
+      readonly count: unknown;
+    }>(
+      `SELECT e.project_id, CAST(DATE(e.start_time) AS STRING) AS date, COUNT(*) AS count
+FROM events_current e
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = e.project_id
+ AND trace_deletion.trace_id = e.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = e.project_id
+WHERE e.start_time >= ? AND e.start_time < ?
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL
+GROUP BY e.project_id, DATE(e.start_time)`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      date: row.date,
+      count: numberValue(row.count),
+    }));
   }
 }

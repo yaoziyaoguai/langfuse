@@ -20,6 +20,16 @@ function prefixedTotal(
     : null;
 }
 
+export function reduceUsageOrCostDetails(
+  details: Readonly<Record<string, number>> | null | undefined,
+): { input: number | null; output: number | null; total: number | null } {
+  return {
+    input: prefixedTotal(details ?? {}, "input"),
+    output: prefixedTotal(details ?? {}, "output"),
+    total: Number(details?.total ?? 0),
+  };
+}
+
 function stringRecord(
   value: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, string> | null {

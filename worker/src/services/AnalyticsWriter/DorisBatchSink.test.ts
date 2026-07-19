@@ -171,7 +171,8 @@ describe("DorisBatchSink", () => {
       end_time: "2026-07-17 10:01:00.999999",
       completion_start_time: "2026-07-17 10:00:30.000001",
       input: '{"question":"价格"}',
-      output: "answer",
+      output: '"answer"',
+      output_preview: "answer",
       total_input_tokens: "10",
       total_output_tokens: "2",
       total_cost: "0.7",
@@ -215,6 +216,47 @@ describe("DorisBatchSink", () => {
       { entityType: "FILE_REFERENCE", lookupId: "file-1" },
       { entityType: "SCORE", lookupId: "score-1" },
     ]);
+  });
+
+  it("deterministically splits expanded canonical rows below the load limit", () => {
+    const first = entities()[0]!;
+    if (first.kind !== "event") throw new Error("Expected event fixture");
+    const second: CanonicalAnalyticsEvent = {
+      ...first,
+      spanId: "span-2",
+      output: "true",
+      canonicalPayloadHash: canonicalPayloadHash({
+        traceId: first.traceId,
+        spanId: "span-2",
+        output: "true",
+      }),
+    };
+    const single = prepareDorisLoadBatches(batch([first]))[0]!;
+    const limit = Buffer.byteLength(single.ndjsonBody, "utf8");
+
+    const prepared = prepareDorisLoadBatches(
+      batch([first, second]),
+      undefined,
+      limit,
+    );
+    const reordered = prepareDorisLoadBatches(
+      batch([second, first]),
+      undefined,
+      limit,
+    );
+
+    expect(prepared).toEqual(reordered);
+    expect(prepared).toHaveLength(2);
+    expect(
+      prepared.every(
+        ({ ndjsonBody }) => Buffer.byteLength(ndjsonBody, "utf8") <= limit,
+      ),
+    ).toBe(true);
+    expect(
+      prepared.some(({ ndjsonBody }) =>
+        ndjsonBody.includes('"output":"\\"true\\""'),
+      ),
+    ).toBe(true);
   });
 
   it("keeps the entity-head key stable so a cross-day mutation reaches the partition CAS", () => {

@@ -20,9 +20,4 @@ export const getDatasetItemTabs = ({
     label: "Item",
     href: `/project/${projectId}/datasets/${datasetId}/items/${itemId}`,
   },
-  {
-    value: DATASET_ITEM_TABS.RUNS,
-    label: "Experiments",
-    href: `/project/${projectId}/datasets/${datasetId}/items/${itemId}/runs`,
-  },
 ];

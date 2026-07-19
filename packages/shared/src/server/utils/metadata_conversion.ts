@@ -2,9 +2,9 @@ import { parseJsonPrioritised } from "../../utils/json";
 import { MetadataDomain } from "../../domain";
 
 /**
- * Zips parallel ClickHouse array columns (`metadata_names`, `metadata_values`)
+ * Zips parallel Doris array columns (`metadata_names`, `metadata_values`)
  * into a plain object. If a key appears more than once the **first** occurrence
- * wins, matching the ClickHouse `mapFromArrays(arrayReverse(...))` convention.
+ * wins, matching the Doris `mapFromArrays(arrayReverse(...))` convention.
  *
  * Returns `undefined` when the names array is empty so callers can distinguish
  * "no metadata" from "empty metadata object".

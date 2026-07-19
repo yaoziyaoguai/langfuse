@@ -84,16 +84,14 @@ export class WorkerManager {
         ...shardTag,
       });
 
-      const clickHouseCtx = contextWithLangfuseProps({
+      const analyticsCtx = contextWithLangfuseProps({
         projectId: WorkerManager.extractProjectId(job),
-        clickhouse: {
+        analytics: {
           surface: "worker",
           route: baseMetric,
         },
       });
-      const result = await otelContext.with(clickHouseCtx, () =>
-        processor(job),
-      );
+      const result = await otelContext.with(analyticsCtx, () => processor(job));
 
       const queue = resolveQueueInstance(queueName);
       // Sample queue depth gauges for sharded queues to reduce metric volume.

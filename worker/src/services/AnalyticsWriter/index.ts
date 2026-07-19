@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import type { PrismaClient } from "@prisma/client";
 import {
   AnalyticsPersistenceError,
@@ -10,6 +8,7 @@ import {
 } from "@langfuse/shared/analytics-persistence";
 import {
   acquireAnalyticsMutationPermit,
+  analyticsLoadBatchIdentity,
   claimAnalyticsEntityHead,
   claimAnalyticsLoadBatch,
   cancelAnalyticsLoadBatchIfDeleted,
@@ -27,6 +26,7 @@ import {
 } from "@langfuse/shared/src/server";
 
 import {
+  CanonicalArtifactIntegrityError,
   CanonicalIngestionArtifactStore,
   canonicalArtifactObjectKey,
 } from "../CanonicalIngestionArtifactStore";
@@ -58,10 +58,6 @@ type FrozenCandidateDisposition = {
   reasonCode: string | null;
   quarantineExpiresAt: Date | null;
 };
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
 
 function partitionDate(value: string): Date {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -155,27 +151,6 @@ function controlStateRepresentative(
   return leftEvent.spanId <= rightEvent.spanId ? left : right;
 }
 
-function loadBatchIdentity(input: {
-  readonly projectId: string;
-  readonly operationId: string;
-  readonly logicalBatchId: string;
-  readonly attempt: number;
-}) {
-  const digest = sha256(
-    [
-      "langfuse-doris-load-v1",
-      input.projectId,
-      input.operationId,
-      input.logicalBatchId,
-      String(input.attempt),
-    ].join("\0"),
-  );
-  return {
-    id: `alb_${digest.slice(0, 28)}`,
-    label: `lf_${digest}`,
-  };
-}
-
 export class AnalyticsWriter implements AnalyticsBatchSink {
   private readonly now: () => Date;
 
@@ -202,10 +177,12 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
 
     const artifact = await this.ensureCanonicalArtifact(batch);
     operation = await this.getOperation(batch);
+    if (operation.terminalAt) return this.terminalReceipt(operation);
 
     if (operation.manifestState === "CANDIDATE_PUBLISHED") {
       await this.claimHeadsAndFreeze(operation, artifact);
       operation = await this.getOperation(batch);
+      if (operation.terminalAt) return this.terminalReceipt(operation);
     }
     if (operation.manifestState !== "FROZEN") {
       throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
@@ -238,6 +215,94 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       operationId: batch.operationId,
       status: completion.status === "VISIBLE" ? "VISIBLE" : "PERSISTED",
     };
+  }
+
+  async reconcileUnresolvedOperation(input: {
+    readonly operationId: string;
+    readonly projectId: string;
+  }): Promise<boolean> {
+    const operation = await findAnalyticsIngestionOperationForProject({
+      client: this.dependencies.client,
+      operationId: input.operationId,
+      projectId: input.projectId,
+    });
+    if (!operation) {
+      throw new AnalyticsPersistenceError("ANALYTICS_NOT_FOUND", false);
+    }
+    if (operation.terminalAt) return true;
+    const unresolved = operation.loadBatches.filter(
+      ({ status }) => status === "UNKNOWN" || status === "LOADING",
+    );
+    if (unresolved.length === 0) return false;
+
+    let aborted = false;
+    let pending = false;
+    for (const ledger of unresolved) {
+      let reconciliation;
+      try {
+        reconciliation = await this.dependencies.doris.reconcile(ledger.label);
+      } catch {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: operation.id,
+            phase: "load_reconciliation",
+          },
+        });
+      }
+      if (!RECONCILIATION_STATES.has(reconciliation.status)) {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: operation.id,
+            phase: "load_reconciliation_status",
+          },
+        });
+      }
+      const candidateRows = operation.candidates.filter(
+        ({ loadBatchId }) => loadBatchId === ledger.id,
+      ).length;
+      const recorded = await recordAnalyticsLoadReconciliation({
+        client: this.dependencies.client,
+        loadBatchId: ledger.id,
+        projectId: operation.projectId,
+        fence: ledger.fenceGeneration,
+        status: reconciliation.status as
+          | "UNKNOWN"
+          | "PREPARE"
+          | "COMMITTED"
+          | "VISIBLE"
+          | "ABORTED",
+        transactionId: null,
+        totalRows: ledger.totalRows ?? candidateRows,
+        filteredRows: ledger.filteredRows ?? 0,
+        now: this.now(),
+      });
+      this.assertLoadOutcomeRecorded(recorded);
+      aborted ||= reconciliation.status === "ABORTED";
+      pending ||=
+        reconciliation.status !== "ABORTED" && !reconciliation.visible;
+    }
+    if (pending) {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: {
+          operationId: operation.id,
+          phase: "load_reconciliation_pending",
+        },
+      });
+    }
+    if (aborted) return false;
+
+    const completion = await completeAnalyticsIngestionOperation({
+      client: this.dependencies.client,
+      operationId: operation.id,
+      projectId: operation.projectId,
+      now: this.now(),
+    });
+    if (completion.outcome === "pending") {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: { operationId: operation.id, phase: "completion" },
+      });
+    }
+    return true;
   }
 
   private async getOperation(batch: CanonicalAnalyticsBatch) {
@@ -276,106 +341,135 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
   private async ensureCanonicalArtifact(
     sourceBatch: CanonicalAnalyticsBatch,
   ): Promise<CanonicalAnalyticsBatch> {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const operation = await this.getOperation(sourceBatch);
-      if (operation.canonicalObjectKey && operation.canonicalArtifactChecksum) {
-        const persisted = await this.dependencies.artifactStore.get(
-          operation.canonicalObjectKey,
-          operation.canonicalArtifactChecksum,
-        );
-        assertArtifactForOperation(operation, persisted);
-        return persisted;
-      }
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const operation = await this.getOperation(sourceBatch);
+        if (
+          operation.canonicalObjectKey &&
+          operation.canonicalArtifactChecksum
+        ) {
+          const persisted = await this.dependencies.artifactStore.get(
+            operation.canonicalObjectKey,
+            operation.canonicalArtifactChecksum,
+          );
+          assertArtifactForOperation(operation, persisted);
+          return persisted;
+        }
 
-      const existing = operation.reservedCanonicalObjectKey
-        ? await this.dependencies.artifactStore.getIfExists(
-            operation.reservedCanonicalObjectKey,
-          )
-        : null;
-      if (existing) {
-        assertArtifactForOperation(operation, existing.batch);
+        const existing = operation.reservedCanonicalObjectKey
+          ? await this.dependencies.artifactStore.getIfExists(
+              operation.reservedCanonicalObjectKey,
+            )
+          : null;
+        if (existing) {
+          assertArtifactForOperation(operation, existing.batch);
+          const published = await publishCanonicalArtifact({
+            client: this.dependencies.client,
+            operationId: operation.id,
+            projectId: operation.projectId,
+            fence: operation.canonicalizationFence,
+            leaseOwner:
+              operation.canonicalizationLeaseOwner ??
+              this.dependencies.workerId,
+            canonicalObjectKey: operation.reservedCanonicalObjectKey!,
+            artifactChecksum: existing.checksum,
+            candidates: candidatePublication(
+              describeCanonicalCandidates(existing.batch),
+            ),
+          });
+          if (
+            published.outcome === "published" ||
+            published.outcome === "already_published"
+          ) {
+            return existing.batch;
+          }
+          continue;
+        }
+
+        const nextFence = operation.canonicalizationFence + 1n;
+        const key = canonicalArtifactObjectKey({
+          prefix: this.dependencies.canonicalPrefix,
+          projectId: operation.projectId,
+          operationId: operation.id,
+          fenceGeneration: nextFence,
+        });
+        const now = this.now();
+        const reservation = await reserveCanonicalizationFence({
+          client: this.dependencies.client,
+          operationId: operation.id,
+          projectId: operation.projectId,
+          expectedFence: operation.canonicalizationFence,
+          nextFence,
+          leaseOwner: this.dependencies.workerId,
+          leaseUntil: new Date(now.getTime() + LEASE_MS),
+          now,
+          reservedObjectKey: key,
+          confirmedAbsentObjectKey: operation.reservedCanonicalObjectKey,
+        });
+        if (reservation.outcome === "leased") {
+          throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+            tags: { operationId: operation.id, phase: "canonicalization" },
+          });
+        }
+        if (reservation.outcome !== "reserved") continue;
+
+        const fencedBatch: CanonicalAnalyticsBatch = {
+          ...sourceBatch,
+          children: sourceBatch.children.map((claim) => ({
+            ...claim,
+            fenceGeneration: reservation.fence,
+          })),
+        };
+        const stored = await this.dependencies.artifactStore.putIfAbsent(
+          reservation.reservedObjectKey,
+          fencedBatch,
+        );
         const published = await publishCanonicalArtifact({
           client: this.dependencies.client,
           operationId: operation.id,
           projectId: operation.projectId,
-          fence: operation.canonicalizationFence,
-          leaseOwner:
-            operation.canonicalizationLeaseOwner ?? this.dependencies.workerId,
-          canonicalObjectKey: operation.reservedCanonicalObjectKey!,
-          artifactChecksum: existing.checksum,
+          fence: reservation.fence,
+          leaseOwner: this.dependencies.workerId,
+          canonicalObjectKey: reservation.reservedObjectKey,
+          artifactChecksum: stored.checksum,
           candidates: candidatePublication(
-            describeCanonicalCandidates(existing.batch),
+            describeCanonicalCandidates(fencedBatch),
           ),
         });
         if (
           published.outcome === "published" ||
           published.outcome === "already_published"
         ) {
-          return existing.batch;
+          return fencedBatch;
         }
-        continue;
       }
-
-      const nextFence = operation.canonicalizationFence + 1n;
-      const key = canonicalArtifactObjectKey({
-        prefix: this.dependencies.canonicalPrefix,
-        projectId: operation.projectId,
-        operationId: operation.id,
-        fenceGeneration: nextFence,
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: { operationId: sourceBatch.operationId, phase: "publication" },
       });
-      const now = this.now();
-      const reservation = await reserveCanonicalizationFence({
-        client: this.dependencies.client,
-        operationId: operation.id,
-        projectId: operation.projectId,
-        expectedFence: operation.canonicalizationFence,
-        nextFence,
-        leaseOwner: this.dependencies.workerId,
-        leaseUntil: new Date(now.getTime() + LEASE_MS),
-        now,
-        reservedObjectKey: key,
-        confirmedAbsentObjectKey: operation.reservedCanonicalObjectKey,
-      });
-      if (reservation.outcome === "leased") {
-        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
-          tags: { operationId: operation.id, phase: "canonicalization" },
-        });
+    } catch (error) {
+      if (error instanceof AnalyticsPersistenceError) throw error;
+      if (error instanceof CanonicalArtifactIntegrityError) {
+        throw new AnalyticsPersistenceError(
+          error.reasonCode === "ARTIFACT_UNAVAILABLE"
+            ? "ANALYTICS_UNRECOVERABLE"
+            : "ANALYTICS_QUARANTINED",
+          false,
+          {
+            tags: {
+              operationId: sourceBatch.operationId,
+              phase: "canonical_artifact",
+              reasonCode: error.reasonCode,
+            },
+          },
+        );
       }
-      if (reservation.outcome !== "reserved") continue;
-
-      const fencedBatch: CanonicalAnalyticsBatch = {
-        ...sourceBatch,
-        children: sourceBatch.children.map((claim) => ({
-          ...claim,
-          fenceGeneration: reservation.fence,
-        })),
-      };
-      const stored = await this.dependencies.artifactStore.putIfAbsent(
-        reservation.reservedObjectKey,
-        fencedBatch,
-      );
-      const published = await publishCanonicalArtifact({
-        client: this.dependencies.client,
-        operationId: operation.id,
-        projectId: operation.projectId,
-        fence: reservation.fence,
-        leaseOwner: this.dependencies.workerId,
-        canonicalObjectKey: reservation.reservedObjectKey,
-        artifactChecksum: stored.checksum,
-        candidates: candidatePublication(
-          describeCanonicalCandidates(fencedBatch),
-        ),
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: {
+          operationId: sourceBatch.operationId,
+          phase: "canonical_artifact_storage",
+        },
       });
-      if (
-        published.outcome === "published" ||
-        published.outcome === "already_published"
-      ) {
-        return fencedBatch;
-      }
     }
-    throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
-      tags: { operationId: sourceBatch.operationId, phase: "publication" },
-    });
   }
 
   private async claimHeadsAndFreeze(
@@ -398,10 +492,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
             traceId: descriptor.owningTraceId,
           })
         : 0n;
-      if (
-        projectGeneration > descriptor.claim.projectDeletionGeneration ||
-        traceGeneration > descriptor.claim.traceDeletionGeneration
-      ) {
+      if (projectGeneration !== 0n || traceGeneration !== 0n) {
         dispositionResults.push({
           candidateKey: descriptor.candidateKey,
           disposition: "CANCELLED_BY_DELETION" as const,
@@ -429,9 +520,10 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         traceDeletionGeneration: descriptor.claim.traceDeletionGeneration,
         projectDeletionGeneration: descriptor.claim.projectDeletionGeneration,
       });
-      const recoveredWinner =
-        claim.outcome === "noop" && claim.head.operationId === operation.id;
-      if (claim.outcome === "won" || recoveredWinner) {
+      // An identical head only proves that another operation won the CAS; it
+      // does not prove that winner's Doris load is already visible. Re-loading
+      // the identical canonical row is idempotent and closes that race.
+      if (claim.outcome === "won" || claim.outcome === "noop") {
         requiredKeys.add(descriptor.candidateKey);
         dispositionResults.push({
           candidateKey: descriptor.candidateKey,
@@ -440,7 +532,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
           reasonCode: null,
           quarantineExpiresAt: null,
         });
-      } else if (claim.outcome === "noop" || claim.outcome === "superseded") {
+      } else if (claim.outcome === "superseded") {
         dispositionResults.push({
           candidateKey: descriptor.candidateKey,
           disposition: "NOOP" as const,
@@ -489,10 +581,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
             })
           : 0n,
       ]);
-      if (
-        projectGeneration <= descriptor.claim.projectDeletionGeneration &&
-        traceGeneration <= descriptor.claim.traceDeletionGeneration
-      ) {
+      if (projectGeneration === 0n && traceGeneration === 0n) {
         continue;
       }
       requiredKeys.delete(descriptor.candidateKey);
@@ -532,7 +621,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
 
     const prepared = prepareDorisLoadBatches(batch, requiredKeys);
     const loadManifests = prepared.map((loadBatch) => {
-      const identity = loadBatchIdentity({
+      const identity = analyticsLoadBatchIdentity({
         projectId: operation.projectId,
         operationId: operation.id,
         logicalBatchId: loadBatch.logicalBatchId,

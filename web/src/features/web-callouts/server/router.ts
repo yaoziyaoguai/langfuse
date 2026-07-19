@@ -146,7 +146,6 @@ export const webCalloutsRouter = createTRPCRouter({
       return invokeWebCalloutEndpoint({
         prisma: ctx.prisma,
         input,
-        useEventsTable: ctx.session.user.v4BetaEnabled === true,
         invoker: {
           orgId: ctx.session.orgId,
           userId: ctx.session.user.id,

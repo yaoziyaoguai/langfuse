@@ -297,9 +297,14 @@ function stableRecord<T>(
 
 function stringifyIo(value: CanonicalJsonValue): string | null {
   if (value === null) return null;
-  return typeof value === "string"
-    ? value
-    : JSON.stringify(stableJsonValue(value));
+  return JSON.stringify(stableJsonValue(value));
+}
+
+function previewIo(value: CanonicalJsonValue): string | null {
+  if (value === null) return null;
+  return (
+    typeof value === "string" ? value : JSON.stringify(stableJsonValue(value))
+  ).slice(0, 200);
 }
 
 function floorDiv(dividend: bigint, divisor: bigint): bigint {
@@ -385,8 +390,8 @@ function eventRow(
     tool_call_names: [...entity.toolCallNames],
     input,
     output,
-    input_preview: input?.slice(0, 200) ?? null,
-    output_preview: output?.slice(0, 200) ?? null,
+    input_preview: previewIo(entity.input),
+    output_preview: previewIo(entity.output),
     source: entity.source,
     ingestion_sdk_name: entity.ingestionSdkName || "unknown",
     ingestion_sdk_version: entity.ingestionSdkVersion || "unknown",
@@ -459,7 +464,11 @@ function row(entity: CanonicalAnalyticsEntity) {
 export function prepareDorisLoadBatches(
   batch: CanonicalAnalyticsBatch,
   includedCandidateKeys?: ReadonlySet<string>,
+  maxBatchBytes = MAX_BATCH_BYTES,
 ): readonly PreparedDorisLoadBatch[] {
+  if (!Number.isSafeInteger(maxBatchBytes) || maxBatchBytes <= 0) {
+    throw new TypeError("Invalid Doris load batch byte limit");
+  }
   const candidates = describeCanonicalCandidates(batch).filter(
     ({ candidateKey }) =>
       includedCandidateKeys === undefined ||
@@ -480,7 +489,7 @@ export function prepareDorisLoadBatches(
 
   return [...groups.entries()]
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([, group]) => {
+    .flatMap(([, group]) => {
       const sorted = [...group].sort((left, right) =>
         left.candidateKey < right.candidateKey
           ? -1
@@ -489,20 +498,50 @@ export function prepareDorisLoadBatches(
             : 0,
       );
       const targetTable = TABLE_BY_KIND[sorted[0]!.claim.entity.kind];
-      const candidateKeys = sorted.map(({ candidateKey }) => candidateKey);
-      const ndjsonBody = `${sorted
-        .map(({ claim }) => JSON.stringify(row(claim.entity)))
-        .join("\n")}\n`;
-      const identityHash = sha256(candidateKeys.join("\0"));
-      return {
-        targetTable,
-        partitionDate: sorted[0]!.partitionDate,
-        logicalBatchId: `${targetTable}:${sorted[0]!.partitionDate}:${identityHash.slice(0, 16)}`,
-        candidateKeys,
-        ndjsonBody,
-        payloadHash: sha256(ndjsonBody),
-        rowCount: sorted.length,
-      };
+      const chunks: CanonicalCandidateDescriptor[][] = [];
+      let current: CanonicalCandidateDescriptor[] = [];
+      let currentBytes = 0;
+      for (const candidate of sorted) {
+        const encoded = `${JSON.stringify(row(candidate.claim.entity))}\n`;
+        const bytes = Buffer.byteLength(encoded, "utf8");
+        if (bytes > maxBatchBytes) {
+          throw new AnalyticsPersistenceError(
+            "ANALYTICS_RESOURCE_EXHAUSTED",
+            false,
+            {
+              tags: {
+                phase: "load_preparation",
+                reasonCode: "ROW_BYTES_EXCEEDED",
+              },
+            },
+          );
+        }
+        if (current.length > 0 && currentBytes + bytes > maxBatchBytes) {
+          chunks.push(current);
+          current = [];
+          currentBytes = 0;
+        }
+        current.push(candidate);
+        currentBytes += bytes;
+      }
+      if (current.length > 0) chunks.push(current);
+
+      return chunks.map((chunk) => {
+        const candidateKeys = chunk.map(({ candidateKey }) => candidateKey);
+        const ndjsonBody = chunk
+          .map(({ claim }) => `${JSON.stringify(row(claim.entity))}\n`)
+          .join("");
+        const identityHash = sha256(candidateKeys.join("\0"));
+        return {
+          targetTable,
+          partitionDate: chunk[0]!.partitionDate,
+          logicalBatchId: `${targetTable}:${chunk[0]!.partitionDate}:${identityHash.slice(0, 16)}`,
+          candidateKeys,
+          ndjsonBody,
+          payloadHash: sha256(ndjsonBody),
+          rowCount: chunk.length,
+        };
+      });
     });
 }
 

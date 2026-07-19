@@ -3,8 +3,8 @@ import {
   createTrace,
 } from "@langfuse/shared/src/server";
 import {
-  createObservationsCh as createObservationsInClickhouse,
-  createTracesCh,
+  createObservationsDoris as createObservationsInDoris,
+  createTracesDoris,
 } from "@langfuse/shared/src/server";
 import { v4 as uuidv4 } from "uuid";
 import { getUserMetrics } from "@langfuse/shared/src/server";
@@ -22,7 +22,7 @@ describe("getUserMetrics function", () => {
       user_id: userId,
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const observation1 = createObservationObject({
       id: uuidv4(),
@@ -50,7 +50,7 @@ describe("getUserMetrics function", () => {
       type: "GENERATION",
     });
 
-    await createObservationsInClickhouse([observation1, observation2]);
+    await createObservationsInDoris([observation1, observation2]);
 
     const userMetrics = await getUserMetrics(projectId, [userId], []);
 
@@ -76,7 +76,7 @@ describe("getUserMetrics function", () => {
       user_id: userId,
     });
 
-    await createTracesCh([trace]);
+    await createTracesDoris([trace]);
 
     const observation1 = createObservationObject({
       id: uuidv4(),
@@ -104,7 +104,7 @@ describe("getUserMetrics function", () => {
       type: "GENERATION",
     });
 
-    await createObservationsInClickhouse([observation1, observation2]);
+    await createObservationsInDoris([observation1, observation2]);
 
     const userMetrics = await getUserMetrics(
       projectId,

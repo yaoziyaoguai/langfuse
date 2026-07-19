@@ -4,6 +4,16 @@ import { z } from "zod";
 
 export type DorisNodeEnv = "development" | "test" | "production";
 
+/** The bundled single-node compose is intentionally non-TLS and must never be
+ * confused with a production Doris deployment. Production remains strict by
+ * default; this explicit escape hatch exists only for the local compose. */
+export function resolveDorisNodeEnv(
+  nodeEnv: DorisNodeEnv,
+  localDevMode: string | undefined,
+): DorisNodeEnv {
+  return localDevMode === "true" ? "development" : nodeEnv;
+}
+
 type DorisEnv = Readonly<Record<string, string | undefined>>;
 
 export interface DorisQueryConfig {
@@ -65,7 +75,7 @@ const streamLoadEnvSchema = z.object({
   DORIS_STREAM_LOAD_MAX_BODY_BYTES: z.coerce
     .number()
     .int()
-    .positive()
+    .min(100 * 1024 * 1024)
     .default(100 * 1024 * 1024),
   DORIS_QUERY_USER: z.string().optional(),
 });

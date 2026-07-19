@@ -16,6 +16,7 @@ import { logger } from "@langfuse/shared/src/server";
 import {
   COMMUNITY_CAPABILITIES,
   capabilityForMcpFeature,
+  capabilityForMcpTool,
 } from "@/src/features/capabilities/communityAvailability";
 import { UnsupportedFeatureError } from "../core/errors";
 import { wrapErrorHandling } from "../core/error-formatting";
@@ -166,7 +167,8 @@ export class ToolRegistry {
     const feature = this.getFeatureForTool(name);
     if (!feature) return undefined;
 
-    const capability = capabilityForMcpFeature(feature.name);
+    const capability =
+      capabilityForMcpTool(name) ?? capabilityForMcpFeature(feature.name);
     if (capability) {
       return {
         ...tool,

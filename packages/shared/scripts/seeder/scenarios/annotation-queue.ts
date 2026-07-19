@@ -1,18 +1,18 @@
 import { prisma } from "../../../src/db";
 import {
   createObservation,
-  createObservationsCh,
-  createScoresCh,
   createTrace,
   createTraceScore,
-  createTracesCh,
-  createEventsCh,
   EventRecordInsertType,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
   TraceRecordInsertType,
 } from "../../../src/server";
-import { observationToEvent, traceToEvent } from "./event-mirror";
+import { observationToEvent } from "./event-mirror";
+import {
+  seedEventFixtures,
+  seedScoreFixtures,
+} from "../utils/analytics-writer";
 import { jitter, utcDayStartMs } from "./rng";
 import {
   chunk,
@@ -180,7 +180,7 @@ const run = async (
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
   const coreItems = Math.max(1, Number(params["core-items"] ?? 12));
-  const withV4 = params.v4 !== false; // default true — local dev renders v4 events
+  const withV4 = true;
   const pfx = ctx.idPrefix && ctx.idPrefix.length > 0 ? ctx.idPrefix : "annoqa";
 
   // Deterministic time window (6h before today's UTC midnight); jitter() adds
@@ -198,7 +198,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "annotation-queue",
-      target: "clickhouse",
+      target: "doris",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -330,7 +330,6 @@ const run = async (
       event_ts: Date.now(),
     });
     traces.push(trace);
-    if (withV4) events.push(traceToEvent(trace));
     return { trace, timestamp };
   };
   const newObservation = (
@@ -355,7 +354,7 @@ const run = async (
     });
     observations.push(observation);
     const parent = traces.find((t) => t.id === traceId);
-    if (withV4 && parent) events.push(observationToEvent(observation, parent));
+    if (parent) events.push(observationToEvent(observation, parent));
     return observation;
   };
 
@@ -588,15 +587,12 @@ const run = async (
     });
   }
 
-  // --- 5. Persist ClickHouse rows -----------------------------------------
+  // --- 5. Persist analytics rows ------------------------------------------
   ctx.log(
     `writing ${CONFIG_DEFS.length} score configs, 2 queues, ${items.length} items, ${traces.length} traces, ${observations.length} observations, ${scores.length} scores${withV4 ? `, ${events.length} events` : ""}`,
   );
-  for (const batch of chunk(traces, 1000)) await createTracesCh(batch);
-  for (const batch of chunk(observations, 1000))
-    await createObservationsCh(batch);
-  for (const batch of chunk(scores, 1000)) await createScoresCh(batch);
-  for (const batch of chunk(events, 500)) await createEventsCh(batch);
+  for (const batch of chunk(scores, 1000)) await seedScoreFixtures(batch);
+  for (const batch of chunk(events, 500)) await seedEventFixtures(batch);
 
   // --- 6. Readback verification -------------------------------------------
   const traceIds = traces.map((t) => t.id);
@@ -640,7 +636,7 @@ const run = async (
 
   return {
     scenario: "annotation-queue",
-    target: "clickhouse",
+    target: "doris",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

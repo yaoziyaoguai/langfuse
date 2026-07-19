@@ -16,20 +16,10 @@
 //   perspective (LFE-10065, LFE-10148). They apply to newly chosen values
 //   only — a persisted legacy value on an old row is grandfathered, which is
 //   why the cutoffs key on creation dates rather than the write path.
-// - ENRICHED AVAILABILITY ("enriched-unavailable"): sources that include the
-//   enriched observations path (EVENTS, TRACES_OBSERVATIONS_EVENTS) need the
-//   enriched read path — available on Cloud, or on self-hosted via the V4
-//   preview opt-in. A persisted enriched value left behind by a preview
-//   rollback is rejected too, instead of silently driving exports against
-//   unpopulated tables (LFE-10296).
+// - ENRICHED AVAILABILITY ("enriched-unavailable"): the Doris R1A topology
+//   always provides the canonical events projection.
 // - LEGACY WRITE CAPABILITY ("legacy-writes-disabled"): legacy sources read
-//   the v3 traces/observations tables. Under
-//   LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only those tables are no longer
-//   written, so a legacy source would silently export stale/empty data —
-//   blocked by data capability, deployment-agnostic, on Cloud and self-hosted
-//   alike (LFE-10148). Unlike the date cutoffs this also applies to persisted
-//   values: keeping one would not grandfather anything, it would export
-//   nothing.
+//   v3 traces/observations, which do not exist in the Doris R1A topology.
 // - PERSISTED VALUES ARE NEVER SILENTLY REWRITTEN (LFE-10296): the UI keeps a
 //   persisted-but-blocked source visible as an unavailable option and blocks
 //   the save; forms and servers must not substitute a different source behind
@@ -38,9 +28,7 @@
 // Check order inside validateExportSource doubles as the user-facing reason
 // precedence: enriched-unavailable first (such a source cannot export at all),
 // then the Cloud cutoffs — so Cloud users are never shown messaging about
-// deployment configuration they do not control — then legacy-writes-disabled,
-// which in practice only surfaces on self-hosted (Cloud does not run
-// events_only), where naming the env var is operator-appropriate.
+// deployment configuration they do not control — then legacy-writes-disabled.
 
 import { AnalyticsIntegrationExportSource } from "@prisma/client";
 
@@ -126,23 +114,13 @@ export function isLegacyBlobExporter(
   return integrationCreatedAt < LEGACY_BLOB_EXPORTER_CUTOFF;
 }
 
-/** Enriched export path availability: Cloud, or self-hosted V4 preview opt-in. */
-export function isEnrichedBlobExportAvailable(
-  isCloud: boolean,
-  isV4PreviewEnabled?: boolean,
-): boolean {
-  return isCloud || isV4PreviewEnabled === true;
+/** The Doris R1A topology always exposes the canonical events projection. */
+export function isEnrichedBlobExportAvailable(): boolean {
+  return true;
 }
 
-/**
- * Mirrors the LANGFUSE_MIGRATION_V4_WRITE_MODE env enum; kept as a literal
- * union so this client-safe file has no dependency on server env parsing.
- */
-export type BlobExportWriteMode = "legacy" | "dual" | "events_only";
-
-/** Whether the deployment still writes the v3 traces/observations tables. */
-export function areLegacyWritesActive(writeMode: BlobExportWriteMode): boolean {
-  return writeMode !== "events_only";
+export function areLegacyWritesActive(): boolean {
+  return false;
 }
 
 /**
@@ -182,12 +160,11 @@ const PROJECT_CUTOFF_MESSAGE =
 const exporterCutoffMessage = () =>
   `Legacy export sources are not available for blob storage integrations created on or after ${LEGACY_BLOB_EXPORTER_CUTOFF.toISOString()} on Cloud. Use 'OBSERVATIONS_V2' instead.`;
 
-// Self-hosted-operator-facing: naming the env var is intentional. Worded
-// integration-neutrally since blob storage, PostHog, and Mixpanel all surface
-// it. (The Cloud-cutoff messages above keep their pre-existing
+// Worded integration-neutrally since blob storage, PostHog, and Mixpanel all
+// surface it. (The Cloud-cutoff messages above keep their pre-existing
 // 'OBSERVATIONS_V2' blob-REST wording; tracked under LFE-9688.)
 const LEGACY_WRITES_DISABLED_MESSAGE =
-  "Legacy export sources are not available while LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only, because the legacy traces/observations tables are no longer written. Switch to the enriched observations export source instead.";
+  "Legacy export sources are not available in the Doris R1A topology because legacy traces/observations tables are not written. Switch to the canonical events export source instead.";
 
 /** Whether a source may be selected/kept in the given context. */
 export function validateExportSource(

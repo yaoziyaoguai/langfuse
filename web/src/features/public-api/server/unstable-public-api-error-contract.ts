@@ -11,7 +11,7 @@ import {
   UnauthorizedError,
   type RateLimitResult,
 } from "@langfuse/shared";
-import { ClickHouseResourceError } from "@langfuse/shared/src/server";
+import { DorisError } from "@langfuse/shared/src/server";
 import type {
   UnstablePublicApiErrorCodeType,
   UnstablePublicApiErrorDetailsType,
@@ -227,14 +227,11 @@ export function toUnstablePublicApiError(
     });
   }
 
-  if (error instanceof ClickHouseResourceError) {
+  if (error instanceof DorisError) {
     return createUnstablePublicApiError({
-      httpCode: 422,
-      code: "unprocessable_content",
-      message: [
-        ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
-        "See https://langfuse.com/docs/api-and-data-platform/features/public-api for more details.",
-      ].join("\n"),
+      httpCode: error.retryable ? 503 : 500,
+      code: "internal_error",
+      message: error.message,
     });
   }
 

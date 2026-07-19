@@ -23,8 +23,9 @@ export class AnalyticsIngestionQueue {
           defaultJobOptions: {
             removeOnComplete: { age: 7 * 24 * 60 * 60, count: 100_000 },
             removeOnFail: { age: 30 * 24 * 60 * 60, count: 100_000 },
-            attempts: 10,
-            backoff: { type: "exponential", delay: 5_000 },
+            // Postgres outbox generations own retries. A BullMQ job executes
+            // once so Redis cannot become a second, divergent retry ledger.
+            attempts: 1,
           },
         })
       : null;

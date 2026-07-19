@@ -47,8 +47,11 @@ const RETIRED_QUEUES = [
   QueueName.DataRetentionProcessingQueue,
   QueueName.BatchActionQueue,
   QueueName.CreateEvalQueue,
-  QueueName.EventPropagationQueue,
   QueueName.MonitorQueue,
+  QueueName.PostHogIntegrationQueue,
+  QueueName.PostHogIntegrationProcessingQueue,
+  QueueName.MixpanelIntegrationQueue,
+  QueueName.MixpanelIntegrationProcessingQueue,
 ] as const;
 
 const isRetiredQueue = (queueName: string) =>

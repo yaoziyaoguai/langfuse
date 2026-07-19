@@ -16,7 +16,6 @@ import {
   redis,
   ProjectDeleteQueue,
   getEnvironmentsForProject,
-  isDorisAnalyticsBackend,
   scheduleProjectDeletionOperation,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
@@ -189,16 +188,14 @@ export const projectsRouter = createTRPCRouter({
         });
       }
 
-      const deletionOperation = isDorisAnalyticsBackend()
-        ? await scheduleProjectDeletionOperation({
-            projectId: input.projectId,
-            organizationId: ctx.session.orgId,
-            requester: {
-              principalType: "user",
-              principalId: ctx.session.user.id,
-            },
-          })
-        : null;
+      const deletionOperation = await scheduleProjectDeletionOperation({
+        projectId: input.projectId,
+        organizationId: ctx.session.orgId,
+        requester: {
+          principalType: "user",
+          principalId: ctx.session.user.id,
+        },
+      });
 
       // API keys need to be deleted from cache. Otherwise, they will still be valid.
       await new ApiAuthService(
@@ -238,29 +235,18 @@ export const projectsRouter = createTRPCRouter({
         payload: {
           projectId: input.projectId,
           orgId: ctx.session.orgId,
-          ...(deletionOperation
-            ? {
-                deletionOperationId: deletionOperation.id,
-                deletionGeneration: deletionOperation.generation.toString(),
-              }
-            : {}),
+          deletionOperationId: deletionOperation.id,
+          deletionGeneration: deletionOperation.generation.toString(),
         },
         name: QueueJobs.ProjectDelete,
       });
 
-      return deletionOperation
-        ? {
-            deletionOperationId: deletionOperation.id,
-            status: deletionOperation.status.toLowerCase(),
-            phase: deletionOperation.phase,
-            logicallyInvisible: deletionOperation.logicallyInvisible,
-          }
-        : {
-            deletionOperationId: null,
-            status: "scheduled",
-            phase: "legacy_cleanup",
-            logicallyInvisible: false,
-          };
+      return {
+        deletionOperationId: deletionOperation.id,
+        status: deletionOperation.status.toLowerCase(),
+        phase: deletionOperation.phase,
+        logicallyInvisible: deletionOperation.logicallyInvisible,
+      };
     }),
 
   transfer: protectedProjectProcedure

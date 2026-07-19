@@ -41,7 +41,7 @@ export default function Events() {
         title: "Tracing - Events Table (New)",
         help: {
           description:
-            "An observation captures a single function call in an application. This view uses the new ClickHouse events table.",
+            "An observation captures a single function call in an application. This view uses the new Doris events table.",
           href: "https://langfuse.com/docs/observability/data-model",
         },
         tabsProps: {

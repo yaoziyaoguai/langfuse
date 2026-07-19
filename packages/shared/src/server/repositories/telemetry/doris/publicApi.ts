@@ -11,6 +11,7 @@ import {
 import { projectDorisObservation } from "./adapters";
 import type { DorisObservation } from "./observations";
 import { getDorisTelemetryRepositories } from "./runtime";
+import { normalizeDorisEventFilters } from "../../../queries/logical/filterPlan";
 
 export type DorisPublicApiObservationsQuery = {
   readonly projectId: string;
@@ -33,6 +34,7 @@ export type DorisPublicApiObservationsQuery = {
     readonly lastId: string;
   };
   readonly fields?: readonly ObservationFieldGroupPublicApi[] | null;
+  readonly expandMetadataKeys?: readonly string[];
   readonly includeLookahead?: boolean;
 };
 
@@ -98,7 +100,7 @@ function optionalStringFilter(
 function buildFilters(
   input: DorisPublicApiObservationsQuery,
 ): EventsTableFilterState {
-  const filters: EventsTableFilterState = [...(input.advancedFilters ?? [])];
+  const filters = normalizeDorisEventFilters(input.advancedFilters ?? []);
   optionalStringFilter(filters, "traceId", input.traceId);
   optionalStringFilter(filters, "userId", input.userId);
   optionalStringFilter(filters, "name", input.name);
@@ -237,6 +239,7 @@ async function enrichModels(
 export async function getDorisObservationsForPublicApi(
   input: DorisPublicApiObservationsQuery,
   dependencies: DorisObservationReadDependencies = defaultDependencies(),
+  _options?: { readonly allowUnindexedIoFilters?: boolean },
 ): Promise<EventsObservationPublic[]> {
   const filters = buildFilters(input);
   const explicitRange = buildRange(input);

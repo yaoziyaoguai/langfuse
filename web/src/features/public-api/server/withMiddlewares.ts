@@ -13,7 +13,7 @@ import {
   logger,
   traceException,
   contextWithLangfuseProps,
-  ClickHouseResourceError,
+  DorisError,
 } from "@langfuse/shared/src/server";
 import * as opentelemetry from "@opentelemetry/api";
 import {
@@ -22,7 +22,7 @@ import {
   unstablePublicEvalsErrorContract,
   type PublicApiErrorContract,
 } from "@/src/features/public-api/server/unstable-public-api-error-contract";
-import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
+import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
 
 // Exported to silence @typescript-eslint/no-unused-vars v8 warning
 // (used for type extraction via typeof, which is a legitimate pattern)
@@ -39,29 +39,26 @@ const defaultHandler = () => {
   throw new MethodNotAllowedError();
 };
 
-const DEFAULT_CLICKHOUSE_RESOURCE_ERROR_MESSAGE = [
-  ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
+const DEFAULT_ANALYTICS_RESOURCE_ERROR_MESSAGE = [
+  "Analytics storage is temporarily unavailable. Please retry the request.",
   "See https://langfuse.com/docs/api-and-data-platform/features/public-api for more details.",
 ].join("\n");
 
-export const LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE =
-  [
-    ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
-    "This legacy endpoint can be slow. Please migrate to the high-performance Observations API v2 at /api/public/v2/observations.",
-    "This applies to Langfuse Cloud only until v4 is released in OSS.",
-    "Docs: https://langfuse.com/docs/api-and-data-platform/features/observations-api",
-  ].join("\n");
+export const LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE = [
+  "Analytics storage is temporarily unavailable. Please retry the request.",
+  "This legacy endpoint can be slow. Please migrate to the high-performance Observations API v2 at /api/public/v2/observations.",
+  "Docs: https://langfuse.com/docs/api-and-data-platform/features/observations-api",
+].join("\n");
 
-export const LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE = [
-  ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
+export const LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE = [
+  "Analytics storage is temporarily unavailable. Please retry the request.",
   "This legacy endpoint can be slow. Please migrate to the high-performance Metrics API v2 at /api/public/v2/metrics.",
-  "This applies to Langfuse Cloud only until v4 is released in OSS.",
   "Docs: https://langfuse.com/docs/metrics/features/metrics-api",
 ].join("\n");
 
 type MiddlewareOptions = {
   errorContract?: PublicApiErrorContract;
-  clickHouseResourceErrorMessage?: string;
+  analyticsResourceErrorMessage?: string;
 };
 
 const logBaseError = (error: BaseError) => {
@@ -88,9 +85,9 @@ export function withMiddlewares(
   return async (req: NextApiRequest, res: NextApiResponse) => {
     const ctx = contextWithLangfuseProps({
       headers: req.headers,
-      clickhouse: {
+      analytics: {
         surface: "publicapi",
-        route: clickHouseRouteForRequest(req),
+        route: analyticsRouteForRequest(req),
       },
     });
 
@@ -114,16 +111,15 @@ export function withMiddlewares(
 
         return await finalHandlers[method](req, res);
       } catch (error) {
-        if (error instanceof ClickHouseResourceError) {
+        if (error instanceof DorisError) {
           const errorMessage =
-            options?.clickHouseResourceErrorMessage ??
-            DEFAULT_CLICKHOUSE_RESOURCE_ERROR_MESSAGE;
+            options?.analyticsResourceErrorMessage ??
+            DEFAULT_ANALYTICS_RESOURCE_ERROR_MESSAGE;
 
-          logger.warn("ClickHouse resource limit exceeded", {
-            errorType: error.errorType,
-            message: error.message,
-            suggestion: errorMessage,
-            tags: error.tags,
+          logger.warn("Analytics storage request failed", {
+            code: error.code,
+            retryable: error.retryable,
+            correlationId: error.correlationId,
           });
 
           if (options?.errorContract === unstablePublicEvalsErrorContract) {
@@ -133,9 +129,9 @@ export function withMiddlewares(
             );
           }
 
-          return res.status(422).json({
+          return res.status(error.retryable ? 503 : 500).json({
             message: errorMessage,
-            error: "Request timed out",
+            error: error.code,
           });
         }
 

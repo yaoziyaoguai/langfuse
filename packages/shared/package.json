@@ -6,7 +6,6 @@
   "files": [
     "dist/**",
     "prisma/**",
-    "clickhouse/**",
     "scripts/cleanup.sql"
   ],
   "main": "./dist/src/index.js",
@@ -91,13 +90,6 @@
     "db:generate": "dotenv -e ../../.env -- npx prisma generate --no-hints",
     "db:seed:examples": "dotenv -e ../../.env -- npx prisma db seed -- --environment examples",
     "db:seed:load": "dotenv -e ../../.env -- npx prisma db seed -- --environment load",
-    "ch:up": "bash clickhouse/scripts/up.sh",
-    "ch:down": "bash clickhouse/scripts/down.sh",
-    "ch:drop": "bash clickhouse/scripts/drop.sh",
-    "ch:dev-tables": "bash clickhouse/scripts/dev-tables.sh",
-    "ch:reset": "pnpm run ch:down && pnpm run ch:up && pnpm run ch:seed && pnpm run ch:dev-tables",
-    "ch:seed": "dotenv -e ../../.env -- tsx scripts/seeder/seed-clickhouse.ts",
-    "load:setup": "dotenv -e ../../.env -- tsx scripts/seeder/load-seed-clickhouse.ts",
     "seed:scenario": "dotenv -e ../../.env -- tsx scripts/seeder/cli.ts"
   },
   "prisma": {
@@ -119,7 +111,6 @@
     "@aws-sdk/lib-storage": "catalog:",
     "@aws-sdk/s3-request-presigner": "catalog:",
     "@azure/storage-blob": "^12.26.0",
-    "@clickhouse/client": "1.23.1",
     "@google-cloud/storage": "^7.19.0",
     "@opentelemetry/api": ">=1.0.0 <1.10.0",
     "@opentelemetry/otlp-transformer": "^0.220.0",

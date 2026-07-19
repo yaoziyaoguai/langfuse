@@ -8,50 +8,50 @@ export const datasetRunItemsTableUiColumnDefinitions: UiColumnMappings = [
   {
     uiTableName: "Dataset Run ID",
     uiTableId: "datasetRunId",
-    clickhouseTableName: "dataset_run_items_rmt",
-    clickhouseSelect: 'dri."dataset_run_id"',
+    analyticsTableName: "dataset_run_items_rmt",
+    analyticsSelect: 'dri."dataset_run_id"',
   },
   {
     uiTableName: "Created At",
     uiTableId: "createdAt",
-    clickhouseTableName: "dataset_run_items_rmt",
-    clickhouseSelect: 'dri."created_at"',
+    analyticsTableName: "dataset_run_items_rmt",
+    analyticsSelect: 'dri."created_at"',
   },
   {
     uiTableName: "Event Timestamp",
     uiTableId: "eventTs",
-    clickhouseTableName: "dataset_run_items_rmt",
-    clickhouseSelect: 'dri."event_ts"',
+    analyticsTableName: "dataset_run_items_rmt",
+    analyticsSelect: 'dri."event_ts"',
   },
   {
     uiTableName: "Dataset Item ID",
     uiTableId: "datasetItemId",
-    clickhouseTableName: "dataset_run_items_rmt",
-    clickhouseSelect: 'dri."dataset_item_id"',
+    analyticsTableName: "dataset_run_items_rmt",
+    analyticsSelect: 'dri."dataset_item_id"',
   },
   {
     uiTableName: "Dataset",
     uiTableId: "datasetId",
-    clickhouseTableName: "dataset_run_items_rmt",
-    clickhouseSelect: 'dri."dataset_id"',
+    analyticsTableName: "dataset_run_items_rmt",
+    analyticsSelect: 'dri."dataset_id"',
   },
   {
     uiTableName: "Scores (numeric)",
     uiTableId: "agg_scores_avg",
-    clickhouseTableName: "scores",
-    clickhouseSelect: "sa.scores_avg",
+    analyticsTableName: "scores",
+    analyticsSelect: "sa.scores_avg",
   },
   {
     uiTableName: "Scores (categorical)",
     uiTableId: "agg_score_categories",
-    clickhouseTableName: "scores",
-    clickhouseSelect: "sa.score_categories",
+    analyticsTableName: "scores",
+    analyticsSelect: "sa.score_categories",
   },
   {
     uiTableName: "Scores (boolean)",
     uiTableId: "agg_score_booleans",
-    clickhouseTableName: "scores",
-    clickhouseSelect: "sa.score_booleans",
+    analyticsTableName: "scores",
+    analyticsSelect: "sa.score_booleans",
   },
 ];
 
@@ -61,7 +61,7 @@ export const mapDatasetRunItemFilterColumn = (
 ): unknown => {
   const columnDef = datasetRunItemsTableUiColumnDefinitions.find(
     (col) =>
-      matchesUiColumnMapping(col, column) || col.clickhouseSelect === column,
+      matchesUiColumnMapping(col, column) || col.analyticsSelect === column,
   );
   if (!columnDef) {
     throw new Error(`Unhandled column for dataset run items filter: ${column}`);

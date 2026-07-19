@@ -26,6 +26,7 @@ function poolOptions(config: DorisQueryConfig): PoolOptions {
     database: config.database,
     connectionLimit: config.maxConnections,
     connectTimeout: config.connectTimeoutMs,
+    timezone: "Z",
     enableKeepAlive: true,
     multipleStatements: false,
     ssl: config.tls

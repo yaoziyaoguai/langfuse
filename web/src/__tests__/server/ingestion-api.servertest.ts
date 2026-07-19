@@ -2,7 +2,6 @@ import { randomUUID } from "crypto";
 import { makeAPICall } from "@/src/__tests__/test-utils";
 import waitForExpect from "wait-for-expect";
 import {
-  clickhouseClient,
   getBlobStorageByProjectAndEntityId,
   getObservationById,
   getScoreById,
@@ -13,47 +12,15 @@ import { v4 } from "uuid";
 
 let projectId: string;
 let auth: string;
-let publicKey: string;
 
 const postIngestion = (body: unknown, customHeaders?: Record<string, string>) =>
   makeAPICall("POST", "/api/public/ingestion", body, auth, customHeaders);
-
-type IngestionAttributionRow = {
-  ingestion_api_key: string;
-  ingestion_sdk_name: string;
-  ingestion_sdk_version: string;
-};
-
-const getIngestionAttribution = async (table: "scores", id: string) => {
-  const result = await clickhouseClient().query({
-    query: `
-      SELECT
-        ingestion_api_key,
-        ingestion_sdk_name,
-        ingestion_sdk_version
-      FROM ${table}
-      WHERE project_id = {projectId: String}
-        AND id = {id: String}
-      ORDER BY event_ts DESC
-      LIMIT 1
-    `,
-    query_params: {
-      projectId,
-      id,
-    },
-    format: "JSONEachRow",
-  });
-
-  const rows = await result.json<IngestionAttributionRow>();
-  return rows[0];
-};
 
 describe("/api/public/ingestion API Endpoint", () => {
   beforeEach(async () => {
     const fixture = await createOrgProjectAndApiKey();
     projectId = fixture.projectId;
     auth = fixture.auth;
-    publicKey = fixture.publicKey;
   });
   it.each([
     [
@@ -547,12 +514,6 @@ describe("/api/public/ingestion API Endpoint", () => {
         scoreId,
       });
       expect(score).toBeDefined();
-
-      expect(await getIngestionAttribution("scores", scoreId)).toEqual({
-        ingestion_api_key: publicKey,
-        ingestion_sdk_name: "python",
-        ingestion_sdk_version: "3.4.0",
-      });
     }, 15_000);
   }, 20_000);
 

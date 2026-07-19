@@ -77,8 +77,8 @@ export type ObservationForEval = z.infer<typeof observationForEvalSchema>;
 
 /**
  * Self-contained tool call shape handed to evaluators. Rebuilt from the
- * ClickHouse storage layout, which keeps names in a parallel array
- * (`tool_call_names`) so ClickHouse can filter without JSON parsing.
+ * Doris storage layout, which keeps names in a parallel array
+ * (`tool_call_names`) so Doris can filter without JSON parsing.
  */
 export const toolCallForEvalSchema = z.object({
   id: z.string(),

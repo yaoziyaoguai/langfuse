@@ -80,6 +80,7 @@ export const OtelIngestionEvent = z.object({
 export const AnalyticsIngestionQueueEventSchema = z.object({
   operationId: z.string().min(1),
   projectId: z.string().min(1),
+  generation: z.number().int().positive(),
 });
 
 export const BatchExportJobSchema = z.object({
@@ -409,7 +410,9 @@ export enum QueueName {
   OtelIngestionSecondaryQueue = "secondary-otel-ingestion-queue", // Separates high priority + high throughput projects from other projects.
   IngestionQueue = "ingestion-queue", // Process single events with S3-merge
   IngestionSecondaryQueue = "secondary-ingestion-queue", // Separates high priority + high throughput projects from other projects.
-  AnalyticsIngestionQueue = "analytics-ingestion-queue",
+  // V2 is paired with analytics_ingestion_outbox_v2. During rollout, legacy
+  // workers drain the old queue while new workers cannot consume its jobs.
+  AnalyticsIngestionQueue = "analytics-ingestion-v2-queue",
   CloudUsageMeteringQueue = "cloud-usage-metering-queue",
   CloudSpendAlertQueue = "cloud-spend-alert-queue",
   CloudFreeTierUsageThresholdQueue = "cloud-free-tier-usage-threshold-queue",
@@ -431,7 +434,6 @@ export enum QueueName {
   DeadLetterRetryQueue = "dead-letter-retry-queue",
   WebhookQueue = "webhook-queue",
   EntityChangeQueue = "entity-change-queue",
-  EventPropagationQueue = "event-propagation-queue",
   NotificationQueue = "notification-queue",
   MonitorQueue = "monitor-queue",
 }
@@ -469,7 +471,6 @@ export enum QueueJobs {
   DeadLetterRetryJob = "dead-letter-retry-job",
   WebhookJob = "webhook-job",
   EntityChangeJob = "entity-change-job",
-  EventPropagationJob = "event-propagation-job",
   NotificationJob = "notification-job",
   MonitorJob = "monitor-job",
 }
@@ -647,11 +648,6 @@ export type TQueueJobTypes = {
     timestamp: Date;
     id: string;
     name: QueueJobs.CloudFreeTierUsageThresholdJob;
-  };
-  [QueueName.EventPropagationQueue]: {
-    timestamp: Date;
-    id: string;
-    name: QueueJobs.EventPropagationJob;
   };
   [QueueName.NotificationQueue]: {
     timestamp: Date;

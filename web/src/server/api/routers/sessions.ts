@@ -49,7 +49,6 @@ import {
   getEventsGroupedByUserId,
   getEventsGroupedByTraceTags,
   hasAnySessionFromEventsTable,
-  parseClickhouseUTCDateTimeFormat,
 } from "@langfuse/shared/src/server";
 import chunk from "lodash/chunk";
 import { aggregateScores } from "@/src/features/scores/lib/aggregateScores";
@@ -112,13 +111,12 @@ const handleGetSessionById = async (input: {
     });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-deprecated
-  const clickhouseTraces = await getTracesIdentifierForSession(
+  const analyticsTraces = await getTracesIdentifierForSession(
     input.projectId,
     input.sessionId,
   );
 
-  const chunks = chunk(clickhouseTraces, 500);
+  const chunks = chunk(analyticsTraces, 500);
 
   // in the below queries, take the lowest timestamp as a filter condition
   // to improve performance
@@ -157,7 +155,7 @@ const handleGetSessionById = async (input: {
 
   return {
     ...postgresSession,
-    traces: clickhouseTraces.map((t) => ({
+    traces: analyticsTraces.map((t) => ({
       ...t,
       scores: toDomainArrayWithStringifiedMetadata(
         validatedScores.filter((s) => s.traceId === t.id),
@@ -166,7 +164,7 @@ const handleGetSessionById = async (input: {
     totalCost: costData ?? 0,
     users: [
       ...new Set(
-        clickhouseTraces.map((t) => t.userId).filter((t) => t !== null),
+        analyticsTraces.map((t) => t.userId).filter((t) => t !== null),
       ),
     ],
   };
@@ -542,8 +540,8 @@ export const sessionRouter = createTRPCRouter({
         {
           uiTableName: "Created At",
           uiTableId: "createdAt",
-          clickhouseTableName: "traces",
-          clickhouseSelect: "timestamp",
+          analyticsTableName: "traces",
+          analyticsSelect: "timestamp",
         },
       ];
       const filter: FilterState = [
@@ -759,12 +757,8 @@ export const sessionRouter = createTRPCRouter({
         totalCost: sessionMetrics
           ? Number(sessionMetrics.session_total_cost)
           : 0,
-        minTimestamp: parseClickhouseUTCDateTimeFormat(
-          sessionMetrics.min_timestamp,
-        ),
-        maxTimestamp: parseClickhouseUTCDateTimeFormat(
-          sessionMetrics.max_timestamp,
-        ),
+        minTimestamp: new Date(sessionMetrics.min_timestamp),
+        maxTimestamp: new Date(sessionMetrics.max_timestamp),
         environment: sessionMetrics?.environment,
         scores: toDomainArrayWithStringifiedMetadata(validatedScores),
       };

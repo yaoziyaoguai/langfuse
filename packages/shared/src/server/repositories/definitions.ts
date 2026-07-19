@@ -3,15 +3,14 @@ import type { IngestionAttribution } from "../ingestion/ingestionAttribution";
 import { UNKNOWN_INGESTION_SDK_VALUE } from "../ingestion/ingestionAttribution";
 import { DEFAULT_TRACE_ENVIRONMENT } from "../ingestion/types";
 
-export const clickhouseStringDateSchema = z
+export const analyticsStringDateSchema = z
   .string()
-  // clickhouse stores UTC like '2024-05-23 18:33:41.602000'
+  // Doris may return UTC as '2024-05-23 18:33:41.602000'.
   // we need to convert it to '2024-05-23T18:33:41.602000Z'
   .transform((str) => str.replace(" ", "T") + "Z")
   .pipe(z.iso.datetime());
 
-//https://clickhouse.com/docs/en/integrations/javascript#integral-types-int64-int128-int256-uint64-uint128-uint256
-// clickhouse returns int64 as string
+// Analytics drivers may return 64-bit integers as strings.
 export const UsageCostSchema = z
   .record(z.string(), z.coerce.string().nullable())
   .transform((val, ctx) => {
@@ -63,12 +62,12 @@ export const observationRecordBaseSchema = z.object({
 });
 
 export const observationRecordReadSchema = observationRecordBaseSchema.extend({
-  created_at: clickhouseStringDateSchema,
-  updated_at: clickhouseStringDateSchema,
-  start_time: clickhouseStringDateSchema,
-  end_time: clickhouseStringDateSchema.nullish(),
-  completion_start_time: clickhouseStringDateSchema.nullish(),
-  event_ts: clickhouseStringDateSchema,
+  created_at: analyticsStringDateSchema,
+  updated_at: analyticsStringDateSchema,
+  start_time: analyticsStringDateSchema,
+  end_time: analyticsStringDateSchema.nullish(),
+  completion_start_time: analyticsStringDateSchema.nullish(),
+  event_ts: analyticsStringDateSchema,
   provided_usage_details: UsageCostSchema,
   provided_cost_details: UsageCostSchema,
   usage_details: UsageCostSchema,
@@ -158,10 +157,10 @@ export const traceRecordExtraFields = z.object({
 export type TraceRecordExtraFieldsType = z.infer<typeof traceRecordExtraFields>;
 
 export const traceRecordReadSchema = traceRecordBaseSchema.extend({
-  timestamp: clickhouseStringDateSchema,
-  created_at: clickhouseStringDateSchema,
-  updated_at: clickhouseStringDateSchema,
-  event_ts: clickhouseStringDateSchema,
+  timestamp: analyticsStringDateSchema,
+  created_at: analyticsStringDateSchema,
+  updated_at: analyticsStringDateSchema,
+  event_ts: analyticsStringDateSchema,
 });
 export type TraceRecordReadType = z.infer<typeof traceRecordReadSchema>;
 
@@ -239,10 +238,10 @@ export const scoreRecordBaseSchema = z.object({
 });
 
 export const scoreRecordReadSchema = scoreRecordBaseSchema.extend({
-  created_at: clickhouseStringDateSchema,
-  updated_at: clickhouseStringDateSchema,
-  timestamp: clickhouseStringDateSchema,
-  event_ts: clickhouseStringDateSchema,
+  created_at: analyticsStringDateSchema,
+  updated_at: analyticsStringDateSchema,
+  timestamp: analyticsStringDateSchema,
+  event_ts: analyticsStringDateSchema,
 });
 export type ScoreRecordReadType = z.infer<typeof scoreRecordReadSchema>;
 
@@ -273,11 +272,11 @@ const datasetRunItemRecordBaseSchema = z.object({
 });
 
 const _datasetRunItemRecordReadSchema = datasetRunItemRecordBaseSchema.extend({
-  dataset_run_created_at: clickhouseStringDateSchema,
-  dataset_item_version: clickhouseStringDateSchema.nullish(),
-  created_at: clickhouseStringDateSchema,
-  updated_at: clickhouseStringDateSchema,
-  event_ts: clickhouseStringDateSchema,
+  dataset_run_created_at: analyticsStringDateSchema,
+  dataset_item_version: analyticsStringDateSchema.nullish(),
+  created_at: analyticsStringDateSchema,
+  updated_at: analyticsStringDateSchema,
+  event_ts: analyticsStringDateSchema,
 });
 export type DatasetRunItemRecordReadType = z.infer<
   typeof _datasetRunItemRecordReadSchema
@@ -314,15 +313,15 @@ export const blobStorageFileLogRecordBaseSchema = z.object({
   // event_id is nullable to be compatible with legacy queue events.
   // It still allows us to delete things by prefix, but requires an additional list call.
   event_id: z.string().nullable(),
-  bucket_name: z.string(),
-  bucket_path: z.string(),
+  bucket_name: z.string().nullable(),
+  bucket_path: z.string().nullable(),
   is_deleted: z.number(),
 });
 export const blobStorageFileRefRecordReadSchema =
   blobStorageFileLogRecordBaseSchema.extend({
-    created_at: clickhouseStringDateSchema,
-    updated_at: clickhouseStringDateSchema,
-    event_ts: clickhouseStringDateSchema,
+    created_at: z.string(),
+    updated_at: z.string(),
+    event_ts: z.string(),
   });
 export type BlobStorageFileRefRecordReadType = z.infer<
   typeof blobStorageFileRefRecordReadSchema
@@ -686,8 +685,8 @@ export const eventRecordBaseSchema = z.object({
   // Model
   model_id: z.string().nullish(),
   provided_model_name: z.string().nullish(),
-  // Direct event conversion keeps structured parameters until JSONEachRow;
-  // persisted reads return the ClickHouse String representation.
+  // Direct conversion keeps structured parameters until serialization;
+  // persisted reads may return their string representation.
   model_parameters: z
     .union([z.string(), z.record(z.string(), z.unknown())])
     .nullish(),
@@ -722,7 +721,7 @@ export const eventRecordBaseSchema = z.object({
   experiment_description: z.string().nullish(),
   experiment_dataset_id: z.string().nullish(),
   experiment_item_id: z.string().nullish(),
-  experiment_item_version: clickhouseStringDateSchema.nullish(),
+  experiment_item_version: analyticsStringDateSchema.nullish(),
   experiment_item_expected_output: z.string().nullish(),
   experiment_item_metadata_names: z.array(z.string()).default([]),
   experiment_item_metadata_values: z.array(z.string().nullish()).default([]),
@@ -754,12 +753,12 @@ export const eventRecordReadSchema = eventRecordBaseSchema.extend({
   model_parameters: z.string().nullish(),
   total_cost: z.number().nullish(),
 
-  start_time: clickhouseStringDateSchema,
-  end_time: clickhouseStringDateSchema.nullish(),
-  completion_start_time: clickhouseStringDateSchema.nullish(),
-  created_at: clickhouseStringDateSchema,
-  updated_at: clickhouseStringDateSchema,
-  event_ts: clickhouseStringDateSchema,
+  start_time: analyticsStringDateSchema,
+  end_time: analyticsStringDateSchema.nullish(),
+  completion_start_time: analyticsStringDateSchema.nullish(),
+  created_at: analyticsStringDateSchema,
+  updated_at: analyticsStringDateSchema,
+  event_ts: analyticsStringDateSchema,
 });
 export type EventRecordReadType = z.infer<typeof eventRecordReadSchema>;
 

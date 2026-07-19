@@ -48,7 +48,6 @@ describe("annotationQueueItems trpc", () => {
         ],
         featureFlags: {
           templateFlag: true,
-          excludeClickhouseRead: false,
           experimentsV4Enabled: false,
           observationEvals: false,
           searchBar: false,

@@ -49,7 +49,6 @@ describe("organization API keys trpc", () => {
         } as SessionOrg,
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
       } as SessionFeatureFlags,
       admin: true,
@@ -75,7 +74,6 @@ describe("organization API keys trpc", () => {
         } as SessionOrg,
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
       } as SessionFeatureFlags,
       admin: false,
@@ -101,7 +99,6 @@ describe("organization API keys trpc", () => {
         } as SessionOrg,
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
       } as SessionFeatureFlags,
       admin: false,

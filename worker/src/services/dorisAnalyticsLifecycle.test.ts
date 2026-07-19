@@ -111,4 +111,73 @@ describe("DorisMaterializedDeletionWriter", () => {
       ]),
     ).rejects.toThrow("Analytics entity head project mismatch");
   });
+
+  it("accepts a deterministic delete label already proven visible", async () => {
+    const reconcile = vi.fn().mockResolvedValue({
+      status: "VISIBLE",
+      visible: true,
+    });
+    const writer = new DorisMaterializedDeletionWriter({
+      load: vi.fn().mockResolvedValue({
+        status: "Label Already Exists",
+        committed: false,
+        requiresReconciliation: true,
+        numberTotalRows: 0,
+        numberFilteredRows: 0,
+      }),
+      reconcile,
+    });
+
+    await expect(
+      writer.deleteHeads("deletion-1", [
+        head(
+          "SCORE",
+          encodeScoreIdentity({ projectId: "project-1", scoreId: "score-1" }),
+        ),
+      ]),
+    ).resolves.toBeUndefined();
+    expect(reconcile).toHaveBeenCalledOnce();
+  });
+
+  it("uses stable delete batches and labels regardless of database row order", async () => {
+    const requests: unknown[] = [];
+    const load = vi.fn().mockImplementation(async (request) => {
+      requests.push(request);
+      return {
+        committed: true,
+        requiresReconciliation: false,
+        numberTotalRows: request.ndjsonBody.trim().split("\n").length,
+        numberFilteredRows: 0,
+      };
+    });
+    const writer = new DorisMaterializedDeletionWriter({
+      load,
+      reconcile: vi.fn(),
+    });
+    const heads = [
+      head(
+        "SCORE",
+        encodeScoreIdentity({ projectId: "project-1", scoreId: "score-2" }),
+      ),
+      head(
+        "EVENT",
+        encodeEventIdentity({
+          projectId: "project-1",
+          traceId: "trace-1",
+          spanId: "span-1",
+        }),
+      ),
+      head(
+        "SCORE",
+        encodeScoreIdentity({ projectId: "project-1", scoreId: "score-1" }),
+      ),
+    ];
+
+    await writer.deleteHeads("deletion-1", heads);
+    const firstRun = structuredClone(requests);
+    requests.length = 0;
+    await writer.deleteHeads("deletion-1", [...heads].reverse());
+
+    expect(requests).toEqual(firstRun);
+  });
 });

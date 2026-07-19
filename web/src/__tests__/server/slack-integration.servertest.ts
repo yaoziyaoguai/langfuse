@@ -57,7 +57,6 @@ const prepare = async () => {
       featureFlags: {
         searchBar: false,
         templateFlag: true,
-        excludeClickhouseRead: false,
         observationEvals: false,
         v4BetaToggleVisible: false,
         experimentsV4Enabled: false,

@@ -91,7 +91,6 @@ function createSession(
         },
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
       } as SessionFeatureFlags,
       admin: false, // Not admin to test actual limits

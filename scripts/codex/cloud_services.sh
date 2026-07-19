@@ -9,8 +9,6 @@ CODEX_SERVICES_ROOT="${CODEX_SERVICES_ROOT:-$PWD/.codex/services}"
 # `initdb` to recreate the cluster with the new settings.
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 REDIS_PORT="${REDIS_PORT:-6379}"
-CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
-CLICKHOUSE_NATIVE_PORT="${CLICKHOUSE_NATIVE_PORT:-9000}"
 MINIO_API_PORT="${MINIO_API_PORT:-9090}"
 MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9091}"
 
@@ -18,8 +16,6 @@ POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-postgres}"
 REDIS_AUTH="${REDIS_AUTH:-myredissecret}"
-CLICKHOUSE_USER="${CLICKHOUSE_USER:-clickhouse}"
-CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-clickhouse}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minio}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-miniosecret}"
 
@@ -29,9 +25,6 @@ MINIO_SHA256_AMD64="${MINIO_SHA256_AMD64:-7c5bd8512c6e966455b1d198209358b2d191c7
 MINIO_SHA256_ARM64="${MINIO_SHA256_ARM64:-5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d}"
 MC_SHA256_AMD64="${MC_SHA256_AMD64:-01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891}"
 MC_SHA256_ARM64="${MC_SHA256_ARM64:-14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c}"
-MIGRATE_RELEASE_TAG="${MIGRATE_RELEASE_TAG:-v4.19.1}"
-MIGRATE_SHA256_AMD64="${MIGRATE_SHA256_AMD64:-2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18}"
-MIGRATE_SHA256_ARM64="${MIGRATE_SHA256_ARM64:-2fea2455c0f3f07cc3f4b98471c951ad1a716059574b20b6416bd1e9058751c5}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -74,27 +67,6 @@ stop_system_postgres_clusters() {
   stop_service_if_running postgresql
 }
 
-ensure_clickhouse_repo() {
-  ensure_apt_package ca-certificates
-  ensure_apt_package curl
-  ensure_apt_package gnupg
-
-  local keyring="/etc/apt/keyrings/clickhouse.gpg"
-  local source_file="/etc/apt/sources.list.d/clickhouse.list"
-
-  mkdir -p /etc/apt/keyrings
-
-  if [ ! -f "$keyring" ]; then
-    curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key \
-      | gpg --dearmor -o "$keyring"
-  fi
-
-  if [ ! -f "$source_file" ]; then
-    echo "deb [signed-by=$keyring] https://packages.clickhouse.com/deb stable main" > "$source_file"
-    apt-get update
-  fi
-}
-
 ensure_postgres_binaries() {
   ensure_apt_package postgresql
   ensure_apt_package postgresql-client
@@ -104,66 +76,6 @@ ensure_postgres_binaries() {
 ensure_redis_binary() {
   ensure_apt_package redis-server
   stop_service_if_running redis-server
-}
-
-ensure_clickhouse_binaries() {
-  if command -v clickhouse-server >/dev/null 2>&1 && command -v clickhouse-client >/dev/null 2>&1; then
-    stop_service_if_running clickhouse-server
-    return 0
-  fi
-
-  ensure_clickhouse_repo
-  apt-get install -y clickhouse-server clickhouse-client
-  stop_service_if_running clickhouse-server
-}
-
-detect_migrate_arch() {
-  local machine_arch
-  machine_arch="$(uname -m)"
-
-  case "$machine_arch" in
-    x86_64|amd64)
-      echo "amd64"
-      ;;
-    aarch64|arm64)
-      echo "arm64"
-      ;;
-    *)
-      echo "Unsupported architecture for golang-migrate binary: $machine_arch" >&2
-      exit 1
-      ;;
-  esac
-}
-
-ensure_migrate_binary() {
-  if command -v migrate >/dev/null 2>&1; then
-    return 0
-  fi
-
-  ensure_apt_package ca-certificates
-  ensure_apt_package curl
-
-  local migrate_arch
-  local migrate_sha256
-  local tmp_dir
-  migrate_arch="$(detect_migrate_arch)"
-  case "$migrate_arch" in
-    amd64)
-      migrate_sha256="$MIGRATE_SHA256_AMD64"
-      ;;
-    arm64)
-      migrate_sha256="$MIGRATE_SHA256_ARM64"
-      ;;
-  esac
-  tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "${tmp_dir:-}"' RETURN
-
-  download_and_verify_sha256 \
-    "https://github.com/golang-migrate/migrate/releases/download/${MIGRATE_RELEASE_TAG}/migrate.linux-${migrate_arch}.tar.gz" \
-    "$tmp_dir/migrate.tar.gz" \
-    "$migrate_sha256"
-  tar -xzf "$tmp_dir/migrate.tar.gz" -C "$tmp_dir" migrate
-  install -m 0755 "$tmp_dir/migrate" /usr/local/bin/migrate
 }
 
 detect_minio_arch() {
@@ -291,11 +203,6 @@ escape_sql_literal() {
   printf "%s" "${value//\'/\'\'}"
 }
 
-escape_clickhouse_identifier() {
-  local value="$1"
-  printf '`%s`' "${value//\`/\`\`}"
-}
-
 escape_redis_config_string() {
   local value="$1"
   # Redis treats backslashes and double-quotes as escape delimiters inside
@@ -403,53 +310,6 @@ CONF
   fi
 }
 
-ensure_clickhouse_running() {
-  ensure_clickhouse_binaries
-
-  local clickhouse_root="$CODEX_SERVICES_ROOT/clickhouse"
-  local clickhouse_data="$clickhouse_root/data"
-  local clickhouse_log="$clickhouse_root/clickhouse.log"
-  local clickhouse_err="$clickhouse_root/clickhouse.err.log"
-  local clickhouse_pid="$clickhouse_root/clickhouse.pid"
-  local -a clickhouse_runner
-
-  mkdir -p "$clickhouse_data"
-  if [ "${EUID:-$(id -u)}" -eq 0 ] && id -u clickhouse >/dev/null 2>&1; then
-    chown -R clickhouse:clickhouse "$clickhouse_root"
-    clickhouse_runner=(runuser -u clickhouse --)
-  else
-    clickhouse_runner=()
-  fi
-
-  if ! wait_for_http "http://127.0.0.1:$CLICKHOUSE_HTTP_PORT/ping" 1; then
-    "${clickhouse_runner[@]}" clickhouse-server \
-      --daemon \
-      --config-file=/etc/clickhouse-server/config.xml \
-      --pid-file="$clickhouse_pid" \
-      --log-file="$clickhouse_log" \
-      --errorlog-file="$clickhouse_err" \
-      -- \
-      --path="$clickhouse_data" \
-      --http_port="$CLICKHOUSE_HTTP_PORT" \
-      --tcp_port="$CLICKHOUSE_NATIVE_PORT"
-  fi
-
-  if ! wait_for_http "http://127.0.0.1:$CLICKHOUSE_HTTP_PORT/ping" 45; then
-    echo "ClickHouse did not start on 127.0.0.1:$CLICKHOUSE_HTTP_PORT"
-    exit 1
-  fi
-
-  local clickhouse_password_sql
-  local clickhouse_user_identifier
-  clickhouse_password_sql="$(escape_sql_literal "$CLICKHOUSE_PASSWORD")"
-  clickhouse_user_identifier="$(escape_clickhouse_identifier "$CLICKHOUSE_USER")"
-
-  clickhouse-client --host 127.0.0.1 --port "$CLICKHOUSE_NATIVE_PORT" -q "CREATE USER IF NOT EXISTS $clickhouse_user_identifier IDENTIFIED WITH plaintext_password BY '$clickhouse_password_sql'"
-  if ! clickhouse-client --host 127.0.0.1 --port "$CLICKHOUSE_NATIVE_PORT" -q "GRANT CURRENT GRANTS ON *.* TO $clickhouse_user_identifier" >/dev/null 2>&1; then
-    clickhouse-client --host 127.0.0.1 --port "$CLICKHOUSE_NATIVE_PORT" -q "GRANT ALL ON *.* TO $clickhouse_user_identifier WITH GRANT OPTION"
-  fi
-}
-
 ensure_minio_running() {
   ensure_minio_binaries
 
@@ -506,15 +366,12 @@ ensure_minio_running() {
 ensure_cloud_dependencies() {
   mkdir -p "$CODEX_SERVICES_ROOT"
 
-  ensure_migrate_binary
   ensure_postgres_running
   ensure_redis_running
-  ensure_clickhouse_running
   ensure_minio_running
 
   echo "Cloud dependencies are installed and running:"
   echo "- PostgreSQL on 127.0.0.1:$POSTGRES_PORT"
   echo "- Redis on 127.0.0.1:$REDIS_PORT"
-  echo "- ClickHouse HTTP on 127.0.0.1:$CLICKHOUSE_HTTP_PORT, native on 127.0.0.1:$CLICKHOUSE_NATIVE_PORT"
   echo "- MinIO API on 127.0.0.1:$MINIO_API_PORT, console on 127.0.0.1:$MINIO_CONSOLE_PORT"
 }

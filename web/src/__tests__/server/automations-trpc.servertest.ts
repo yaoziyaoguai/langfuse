@@ -52,7 +52,6 @@ async function prepare() {
         },
       ],
       featureFlags: {
-        excludeClickhouseRead: false,
         templateFlag: true,
         searchBar: false,
         v4BetaToggleVisible: false,

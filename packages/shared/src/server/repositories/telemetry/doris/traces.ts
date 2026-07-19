@@ -565,4 +565,102 @@ LIMIT ?${offsetSql}`,
     );
     return rows[0] ? decodeTrace(rows[0]) : null;
   }
+
+  async countByProjectCreatedAt(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly { readonly projectId: string; readonly count: number }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly count: unknown;
+    }>(
+      `SELECT project_id, COUNT(*) AS count
+FROM (
+  SELECT e.project_id, e.trace_id, MIN(e.created_at) AS created_at
+  FROM events_current e
+  LEFT JOIN trace_tombstones trace_deletion
+    ON trace_deletion.project_id = e.project_id
+   AND trace_deletion.trace_id = e.trace_id
+  LEFT JOIN project_tombstones project_deletion
+    ON project_deletion.project_id = e.project_id
+  WHERE trace_deletion.trace_id IS NULL
+    AND project_deletion.project_id IS NULL
+  GROUP BY e.project_id, e.trace_id
+) traces
+WHERE created_at >= ? AND created_at < ?
+GROUP BY project_id`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      count: numberValue(row.count),
+    }));
+  }
+
+  async countProjectsSince(input: {
+    readonly projectIds: readonly string[];
+    readonly start: Date;
+  }): Promise<number> {
+    if (input.projectIds.length === 0) return 0;
+    const rows = await this.dependencies.query<{ readonly count: unknown }>(
+      `SELECT COUNT(*) AS count
+FROM (
+  SELECT e.project_id, e.trace_id, MIN(e.created_at) AS created_at
+  FROM events_current e
+  LEFT JOIN trace_tombstones trace_deletion
+    ON trace_deletion.project_id = e.project_id
+   AND trace_deletion.trace_id = e.trace_id
+  LEFT JOIN project_tombstones project_deletion
+    ON project_deletion.project_id = e.project_id
+  WHERE e.project_id IN (?)
+    AND trace_deletion.trace_id IS NULL
+    AND project_deletion.project_id IS NULL
+  GROUP BY e.project_id, e.trace_id
+) traces
+WHERE created_at >= ?`,
+      [[...input.projectIds], input.start],
+    );
+    return rows[0] ? numberValue(rows[0].count) : 0;
+  }
+
+  async countByProjectAndDay(input: {
+    readonly start: Date;
+    readonly end: Date;
+  }): Promise<
+    readonly {
+      readonly projectId: string;
+      readonly date: string;
+      readonly count: number;
+    }[]
+  > {
+    const rows = await this.dependencies.query<{
+      readonly project_id: string;
+      readonly date: string;
+      readonly count: unknown;
+    }>(
+      `SELECT project_id, CAST(DATE(trace_timestamp) AS STRING) AS date, COUNT(*) AS count
+FROM (
+  SELECT e.project_id, e.trace_id, MIN(e.start_time) AS trace_timestamp
+  FROM events_current e
+  LEFT JOIN trace_tombstones trace_deletion
+    ON trace_deletion.project_id = e.project_id
+   AND trace_deletion.trace_id = e.trace_id
+  LEFT JOIN project_tombstones project_deletion
+    ON project_deletion.project_id = e.project_id
+  WHERE trace_deletion.trace_id IS NULL
+    AND project_deletion.project_id IS NULL
+  GROUP BY e.project_id, e.trace_id
+) traces
+WHERE trace_timestamp >= ? AND trace_timestamp < ?
+GROUP BY project_id, DATE(trace_timestamp)`,
+      [input.start, input.end],
+    );
+    return rows.map((row) => ({
+      projectId: row.project_id,
+      date: row.date,
+      count: numberValue(row.count),
+    }));
+  }
 }

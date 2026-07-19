@@ -72,7 +72,7 @@ export function transformFiltersForBackend(
   _columnDefinitions?: ColumnDefinition[],
 ): FilterState {
   return filters.map((filter) => {
-    // Apply backend column remapping (e.g., "tags" → "traceTags" for ClickHouse)
+    // Apply backend column remapping (e.g., "tags" → "traceTags" for Doris)
     const backendColumnId = columnMap[filter.column];
     if (backendColumnId && backendColumnId !== filter.column) {
       return {

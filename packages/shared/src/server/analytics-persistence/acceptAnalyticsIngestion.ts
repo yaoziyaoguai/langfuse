@@ -16,7 +16,7 @@ const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type RawAnalyticsIngestionEnvelope = {
   readonly formatVersion: typeof RAW_FORMAT_VERSION;
-  readonly source: "otlp" | "score" | "internal-event";
+  readonly source: "otlp" | "score" | "annotation-score" | "internal-event";
   readonly payload: unknown;
   readonly isLangfuseInternal?: boolean;
   readonly attribution: {
@@ -51,7 +51,9 @@ export function encodeRawAnalyticsIngestionEnvelope(
 ): string {
   if (
     envelope.formatVersion !== RAW_FORMAT_VERSION ||
-    !["otlp", "score", "internal-event"].includes(envelope.source) ||
+    !["otlp", "score", "annotation-score", "internal-event"].includes(
+      envelope.source,
+    ) ||
     !("payload" in envelope) ||
     (envelope.isLangfuseInternal !== undefined &&
       typeof envelope.isLangfuseInternal !== "boolean") ||
@@ -114,6 +116,7 @@ export function decodeRawAnalyticsIngestionEnvelope(
       envelope.formatVersion !== RAW_FORMAT_VERSION ||
       (envelope.source !== "otlp" &&
         envelope.source !== "score" &&
+        envelope.source !== "annotation-score" &&
         envelope.source !== "internal-event") ||
       (envelope.isLangfuseInternal !== undefined &&
         typeof envelope.isLangfuseInternal !== "boolean") ||

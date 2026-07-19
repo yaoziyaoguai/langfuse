@@ -84,12 +84,11 @@ import superjson from "superjson";
 import { ZodError } from "zod";
 import { setUpSuperjson } from "@/src/utils/superjson";
 import {
-  getTraceById,
   getTraceByIdFromEventsTable,
   logger,
   addUserToSpan,
   contextWithLangfuseProps,
-  ClickHouseResourceError,
+  DorisError,
 } from "@langfuse/shared/src/server";
 
 import { AdminApiAuthService } from "@/src/ee/features/admin-api/server/adminApiAuth";
@@ -115,13 +114,15 @@ const t = initTRPC.context<typeof createTRPCContext>().create({
         ...shape.data,
         zodError:
           error.cause instanceof ZodError ? z.flattenError(error.cause) : null,
-        errorName:
-          error.cause instanceof ClickHouseResourceError
-            ? "ClickHouseResourceError"
+        errorName: error.cause instanceof DorisError ? "DorisError" : null,
+        unsupportedFeature:
+          error.cause instanceof CommunityCapabilityUnavailableError
+            ? error.cause.body
             : null,
-        // do not expose stack traces for CH errors as they may contain sensitive info
+        // Storage and capability causes do not need to expose internal stacks.
         stack:
-          error.cause instanceof ClickHouseResourceError
+          error.cause instanceof DorisError ||
+          error.cause instanceof CommunityCapabilityUnavailableError
             ? null
             : shape.data.stack,
       },
@@ -182,18 +183,17 @@ const withErrorHandling = t.middleware(async ({ ctx, next }) => {
   const res = await next({ ctx }); // pass the context to the next middleware
 
   if (!res.ok) {
-    if (res.error.cause instanceof ClickHouseResourceError) {
-      // Surface ClickHouse errors using an advice message
-      // which is supposed to provide a bit of guidance to the user.
-      logger.warn("ClickHouse resource limit exceeded", {
-        errorType: res.error.cause.errorType,
-        message: res.error.cause.message,
-        tags: res.error.cause.tags,
+    if (res.error.cause instanceof DorisError) {
+      logger.warn("Analytics storage request failed", {
+        code: res.error.cause.code,
+        retryable: res.error.cause.retryable,
+        correlationId: res.error.cause.correlationId,
       });
       res.error = new TRPCError({
-        code: "UNPROCESSABLE_CONTENT",
-        message: ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
-        // Keep the original error, it will be removed by `errorFormatter`
+        code: res.error.cause.retryable
+          ? "SERVICE_UNAVAILABLE"
+          : "INTERNAL_SERVER_ERROR",
+        message: res.error.cause.message,
         cause: res.error.cause,
       });
     } else {
@@ -229,7 +229,7 @@ const withOtelInstrumentation = t.middleware(async (opts) => {
     headers: opts.ctx.headers,
     userId: opts.ctx.session?.user?.id,
     projectId: (actualInput as Record<string, string>)?.projectId,
-    clickhouse: {
+    analytics: {
       surface: "trpc",
       route: opts.path,
     },
@@ -245,7 +245,8 @@ const withCommunityCapabilityGate = t.middleware(({ path, next }) => {
     const unavailable = new CommunityCapabilityUnavailableError(capability);
     throw new TRPCError({
       code: "NOT_IMPLEMENTED",
-      message: JSON.stringify(unavailable.body),
+      message: unavailable.body.message,
+      cause: unavailable,
     });
   }
   return next();
@@ -424,14 +425,6 @@ export const requireLangfuseCloud = t.middleware(({ next }) => {
   return next();
 });
 
-/** requireV4Writes rejects calls from deployments without v4 event tables */
-export const requireV4Writes = t.middleware(({ next }) => {
-  if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "legacy") {
-    throw new TRPCError({ code: "NOT_FOUND", message: "Not found" });
-  }
-  return next();
-});
-
 export const protectedProjectProcedureWithoutTracing = t.procedure
   .use(withErrorHandling)
   .use(enforceUserIsAuthedAndProjectMember);
@@ -526,16 +519,11 @@ const enforceTraceAccess = t.middleware(async (opts) => {
   const timestamp = result.data.timestamp;
   const fromTimestamp = result.data.fromTimestamp;
   const verbosity = result.data.verbosity;
-  const isEventsOnly = env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "events_only";
-
-  let clickhouseTrace = traceId
-    ? // eslint-disable-next-line @typescript-eslint/no-deprecated
-      await getTraceById({
+  const analyticsTrace = traceId
+    ? await getTraceByIdFromEventsTable({
         traceId,
         projectId,
-        timestamp: isEventsOnly ? undefined : (timestamp ?? undefined),
-        fromTimestamp:
-          fromTimestamp ?? (isEventsOnly ? timestamp : undefined) ?? undefined,
+        fromTimestamp: fromTimestamp ?? timestamp ?? undefined,
         renderingProps: {
           truncated: verbosity === "truncated",
           shouldJsonParse: false, // we do not want to parse the input/output for tRPC
@@ -543,29 +531,7 @@ const enforceTraceAccess = t.middleware(async (opts) => {
       })
     : null;
 
-  // In dual write mode the lookup above reads the legacy traces table, but
-  // internally produced traces (e.g. code-eval execution traces) were written
-  // to the events tables only — fall back so trace-level auth does not 404 on
-  // a trace the events-backed views can render (LFE-10884). The timestamp can
-  // identify a clicked observation, so use it as a bounded lookup anchor rather
-  // than as the synthesized trace timestamp (LFE-10947).
-  if (
-    traceId &&
-    !clickhouseTrace &&
-    env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "dual"
-  ) {
-    clickhouseTrace = await getTraceByIdFromEventsTable({
-      traceId,
-      projectId,
-      fromTimestamp: fromTimestamp ?? timestamp ?? undefined,
-      renderingProps: {
-        truncated: verbosity === "truncated",
-        shouldJsonParse: false,
-      },
-    });
-  }
-
-  if (traceId && !clickhouseTrace) {
+  if (traceId && !analyticsTrace) {
     logger.error(`Trace with id ${traceId} not found for project ${projectId}`);
     throw new TRPCError({
       code: "NOT_FOUND",
@@ -573,11 +539,11 @@ const enforceTraceAccess = t.middleware(async (opts) => {
     });
   }
 
-  const trace = clickhouseTrace
+  const trace = analyticsTrace
     ? {
-        ...clickhouseTrace,
-        input: parseIO(clickhouseTrace.input, verbosity),
-        output: parseIO(clickhouseTrace.output, verbosity),
+        ...analyticsTrace,
+        input: parseIO(analyticsTrace.input, verbosity),
+        output: parseIO(analyticsTrace.output, verbosity),
       }
     : null;
 
@@ -591,7 +557,7 @@ const enforceTraceAccess = t.middleware(async (opts) => {
     trace,
     isProjectMember: Boolean(sessionProject),
     isAdmin: ctx.session?.user?.admin === true,
-    useTraceControlState: env.LANGFUSE_ANALYTICS_BACKEND === "doris",
+    useTraceControlState: true,
   });
 
   if (!traceAccess.allowed) {

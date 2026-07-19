@@ -7,6 +7,7 @@ import {
 import { env } from "../../env";
 import { PeriodicExclusiveRunner } from "../../utils/PeriodicExclusiveRunner";
 import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
+import { markPendingTraceDeletionsCompleted } from "../traces/markPendingTraceDeletionsCompleted";
 
 const METRIC_PREFIX = "langfuse.batch_trace_deletion_cleaner";
 
@@ -17,12 +18,6 @@ interface ProjectWorkload {
   projectId: string;
   pendingCount: number;
 }
-
-type TraceDeletionBackend = "doris";
-type TraceDeletionFailure = {
-  backend: TraceDeletionBackend;
-  errorName: string;
-};
 
 const getErrorName = (error: unknown) =>
   error instanceof Error ? error.name : typeof error;
@@ -161,66 +156,27 @@ export class BatchTraceDeletionCleaner extends PeriodicExclusiveRunner {
       count: traceIdsToDelete.length,
     });
 
-    const deletionTasks: Array<{
-      backend: TraceDeletionBackend;
-      promise: Promise<void>;
-    }> = [
-      {
-        backend: "doris",
-        promise: processAnalyticsTraceDeletionBatch({
-          projectId,
-          traceIds: traceIdsToDelete,
-        }),
-      },
-    ];
-    const settled = await Promise.allSettled(
-      deletionTasks.map(({ promise }) => promise),
-    );
-    const deletionResults = deletionTasks.map(({ backend }, index) => ({
-      backend,
-      result: settled[index]!,
-    }));
-
-    const failures: TraceDeletionFailure[] = deletionResults.flatMap(
-      ({ backend, result }) => {
-        if (result.status === "rejected") {
-          traceException(result.reason);
-          return [
-            {
-              backend,
-              errorName: getErrorName(result.reason),
-            },
-          ];
-        }
-
-        return [];
-      },
-    );
-
-    if (failures.length > 0) {
+    try {
+      await processAnalyticsTraceDeletionBatch({
+        projectId,
+        traceIds: traceIdsToDelete,
+      });
+    } catch (error) {
+      traceException(error);
       recordIncrement(`${METRIC_PREFIX}.deletion_failures`, 1);
       logger.warn(`${this.name}: Trace deletion failed, will retry later`, {
         projectId,
         count: traceIdsToDelete.length,
         retryDelayMs: env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_INTERVAL_MS,
-        failures,
+        failures: [{ backend: "doris", errorName: getErrorName(error) }],
       });
       return false;
     }
 
     // Mark traces as deleted
-    await prisma.pendingDeletion.updateMany({
-      where: {
-        projectId,
-        object: "trace",
-        objectId: {
-          in: traceIdsToDelete,
-        },
-        isDeleted: false,
-      },
-      data: {
-        isDeleted: true,
-      },
+    await markPendingTraceDeletionsCompleted({
+      projectId,
+      traceIds: traceIdsToDelete,
     });
 
     recordIncrement(

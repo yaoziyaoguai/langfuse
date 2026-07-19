@@ -9,12 +9,12 @@ import { WorkerManager } from "../queues/workerManager";
 import { prisma } from "@langfuse/shared/src/db";
 import { BackgroundMigrationManager } from "../backgroundMigrations/backgroundMigrationManager";
 import {
-  mediaRetentionCleaner,
   batchProjectMediaCleaner,
   batchTraceDeletionCleaner,
   traceDeleteBatchActionRunner,
   queueMetricsRunner,
   analyticsIngestionOutboxRunner,
+  analyticsDeletionRecoveryRunner,
 } from "../app";
 
 export const onShutdown: NodeJS.SignalsListener = async (signal) => {
@@ -24,9 +24,6 @@ export const onShutdown: NodeJS.SignalsListener = async (signal) => {
   // Stop accepting new connections
   server?.close();
   logger.info("Server has been closed.");
-
-  // Stop media retention cleaner
-  mediaRetentionCleaner?.stop();
 
   // Stop batch project media cleaner
   batchProjectMediaCleaner?.stop();
@@ -41,6 +38,8 @@ export const onShutdown: NodeJS.SignalsListener = async (signal) => {
   queueMetricsRunner?.stop();
 
   analyticsIngestionOutboxRunner?.stop();
+
+  analyticsDeletionRecoveryRunner?.stop();
 
   // Shutdown workers (https://docs.bullmq.io/guide/going-to-production#gracefully-shut-down-workers)
   await WorkerManager.closeWorkers();

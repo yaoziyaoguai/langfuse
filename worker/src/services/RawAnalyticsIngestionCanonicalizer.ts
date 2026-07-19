@@ -124,9 +124,28 @@ export class RawAnalyticsIngestionCanonicalizer {
   async canonicalize(
     operation: RawAnalyticsOperation,
   ): Promise<CanonicalAnalyticsBatch> {
-    const body = await this.dependencies.storageService.download(
-      operation.rawObjectKey,
-    );
+    let body: string | null;
+    try {
+      body = await this.dependencies.storageService.downloadIfExists(
+        operation.rawObjectKey,
+      );
+    } catch {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: {
+          operationId: operation.id,
+          phase: "raw_artifact_storage",
+        },
+      });
+    }
+    if (body === null) {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNRECOVERABLE", false, {
+        tags: {
+          operationId: operation.id,
+          phase: "raw_artifact",
+          reasonCode: "RAW_ARTIFACT_UNAVAILABLE",
+        },
+      });
+    }
     if (sha256(body) !== operation.sourceChecksum) {
       throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
         tags: { operationId: operation.id, phase: "raw_checksum" },
@@ -167,6 +186,15 @@ export class RawAnalyticsIngestionCanonicalizer {
         children = await this.canonicalizeScores({
           operation,
           payload: envelope.payload,
+          projectDeletionGeneration,
+          traceDeletionGeneration,
+        });
+        break;
+      case "annotation-score":
+        children = await this.canonicalizeScores({
+          operation,
+          payload: envelope.payload,
+          trustedAnnotation: true,
           projectDeletionGeneration,
           traceDeletionGeneration,
         });
@@ -259,12 +287,29 @@ export class RawAnalyticsIngestionCanonicalizer {
   private async canonicalizeScores(input: {
     operation: RawAnalyticsOperation;
     payload: unknown;
+    trustedAnnotation?: boolean;
     projectDeletionGeneration: bigint;
     traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
   }): Promise<CanonicalAnalyticsEntityClaim[]> {
     const ingestionSchema = createIngestionEventSchema(false);
     const claims: CanonicalAnalyticsEntityClaim[] = [];
-    for (const value of asArray(input.payload, "score")) {
+    for (const rawValue of asArray(
+      input.payload,
+      input.trustedAnnotation ? "annotation-score" : "score",
+    )) {
+      const annotation = input.trustedAnnotation
+        ? (rawValue as { event?: unknown; authorUserId?: string })
+        : null;
+      if (
+        input.trustedAnnotation &&
+        (typeof rawValue !== "object" ||
+          rawValue === null ||
+          typeof annotation?.authorUserId !== "string" ||
+          !annotation.authorUserId)
+      ) {
+        throw validationError("annotation-score");
+      }
+      const value = annotation?.event ?? rawValue;
       const parsed = ingestionSchema.safeParse(value);
       if (!parsed.success || parsed.data.type !== "score-create") {
         throw new AnalyticsPersistenceError(
@@ -305,7 +350,7 @@ export class RawAnalyticsIngestionCanonicalizer {
         longStringValue: validated.longStringValue || null,
         booleanValue: dataType === "BOOLEAN" ? validated.value === 1 : null,
         comment: validated.comment ?? null,
-        authorUserId: null,
+        authorUserId: annotation?.authorUserId ?? null,
         configId: validated.configId ?? null,
         queueId: validated.queueId ?? null,
         environment: validated.environment,

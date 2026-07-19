@@ -4,12 +4,7 @@
 // NEVER call process.exit() in this process. Kubernetes should kill the container: https://kostasbariotis.com/why-you-should-not-use-process-exit/
 // We wait for 110 seconds to allow the app to finish processing requests. There is no native way to do this in Next.js.
 
-import {
-  ClickHouseClientManager,
-  DorisClientManager,
-  logger,
-  redis,
-} from "@langfuse/shared/src/server";
+import { DorisClientManager, logger, redis } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 
@@ -39,9 +34,6 @@ export const shutdown = async (signal: PrexitSignal) => {
     return await new Promise<void>((resolve) => {
       setTimeout(async () => {
         RateLimitService.shutdown();
-
-        // Shutdown clickhouse connections
-        await ClickHouseClientManager.getInstance().closeAllConnections();
 
         // Shutdown Doris query pools created by readiness or Doris-backed services.
         await DorisClientManager.getInstance().closeAllConnections();

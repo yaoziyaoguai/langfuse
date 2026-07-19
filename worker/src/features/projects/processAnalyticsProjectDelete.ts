@@ -4,6 +4,7 @@ import { prisma } from "@langfuse/shared/src/db";
 import {
   acquireAnalyticsMutationPermit,
   completeDeletionOperation,
+  completeTraceDeletionsSupersededByProject,
   claimDeletionOperation,
   deleteMediaFiles,
   deleteMediaLinkRowsByProjectId,
@@ -163,6 +164,17 @@ export async function processAnalyticsProjectDelete(
     });
     await lifecycle.materializedDeletion.deleteHeads(operation.id, heads);
     await deleteProjectMedia(input.projectId);
+
+    const traceDeletionsCompleted =
+      await completeTraceDeletionsSupersededByProject({
+        projectOperationId: operation.id,
+        projectId: input.projectId,
+        projectGeneration: input.reference.generation,
+        lease,
+      });
+    if (!traceDeletionsCompleted) {
+      throw new Error("Project deletion lost its trace-deletion fence");
+    }
 
     await prisma.project.deleteMany({
       where: {

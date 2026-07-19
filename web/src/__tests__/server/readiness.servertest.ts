@@ -2,15 +2,11 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { createMocks } from "node-mocks-http";
 
 const mocks = vi.hoisted(() => ({
-  analyticsBackend: "doris" as "clickhouse" | "doris",
   checkAnalyticsReadiness: vi.fn(),
 }));
 
 vi.mock("@/src/env.mjs", () => ({
   env: {
-    get LANGFUSE_ANALYTICS_BACKEND() {
-      return mocks.analyticsBackend;
-    },
     NODE_ENV: "test",
   },
 }));
@@ -26,14 +22,15 @@ vi.mock("@langfuse/shared/src/db", () => ({ prisma: {} }));
 vi.mock("@langfuse/shared/src/server", () => ({
   checkAnalyticsReadiness: mocks.checkAnalyticsReadiness,
   DorisClientManager: {
-    getInstance: () => ({ getClient: () => ({ query: vi.fn() }) }),
-  },
-  ClickHouseClientManager: {
-    getInstance: () => ({ closeAllConnections: vi.fn() }),
+    getInstance: () => ({
+      getClient: () => ({ query: vi.fn() }),
+      closeAllConnections: vi.fn(),
+    }),
   },
   redis: null,
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
   parseDorisQueryConfig: vi.fn(() => ({})),
+  resolveDorisNodeEnv: vi.fn(() => "test"),
   PrismaAnalyticsCompatibilityControlState: class {},
   SUPPORTED_DORIS_CANONICALIZER_VERSIONS: ["1"],
   SUPPORTED_DORIS_SCHEMA_VERSIONS: [2],
@@ -52,7 +49,6 @@ async function callHandler() {
 
 describe("public readiness", () => {
   beforeEach(() => {
-    mocks.analyticsBackend = "doris";
     mocks.checkAnalyticsReadiness.mockReset();
   });
 
@@ -68,17 +64,8 @@ describe("public readiness", () => {
     expect(res._getStatusCode()).toBe(503);
     expect(res._getJSONData()).toMatchObject({
       status: "Analytics readiness check failed",
-      analytics: "SCHEMA_MISMATCH",
-      schemaVersion: 1,
     });
-  });
-
-  it("does not probe Doris before the composition-root switch", async () => {
-    mocks.analyticsBackend = "clickhouse";
-
-    const res = await callHandler();
-
-    expect(res._getStatusCode()).toBe(200);
-    expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
+    expect(res._getJSONData()).not.toHaveProperty("analytics");
+    expect(res._getJSONData()).not.toHaveProperty("schemaVersion");
   });
 });

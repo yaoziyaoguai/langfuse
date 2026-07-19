@@ -37,6 +37,13 @@ export type ScheduledTraceDeletion = {
   readonly generation: bigint;
 };
 
+export class AnalyticsProjectDeletionInProgressError extends Error {
+  constructor() {
+    super("Trace deletion is superseded by project deletion");
+    this.name = "AnalyticsProjectDeletionInProgressError";
+  }
+}
+
 export async function claimDeletionOperation(input: {
   readonly client?: PrismaClient;
   readonly operationId: string;
@@ -159,6 +166,14 @@ export async function scheduleTraceDeletionOperations(input: {
   return serializable(client, async (transaction) => {
     const checkpointGeneration =
       await getActiveCheckpointGenerationForAcceptance({ transaction, now });
+    const projectDeletion =
+      await transaction.analyticsProjectDeletionGeneration.findUnique({
+        where: { projectId: input.projectId },
+        select: { generation: true },
+      });
+    if (projectDeletion) {
+      throw new AnalyticsProjectDeletionInProgressError();
+    }
     await transaction.project.findFirstOrThrow({
       where: {
         id: input.projectId,
@@ -477,6 +492,67 @@ export async function completeDeletionOperation(input: {
   });
 }
 
+export async function completeTraceDeletionsSupersededByProject(input: {
+  readonly client?: PrismaClient;
+  readonly projectOperationId: string;
+  readonly projectId: string;
+  readonly projectGeneration: bigint;
+  readonly lease: AnalyticsDeletionLease;
+  readonly now?: Date;
+}): Promise<boolean> {
+  const client = input.client ?? prisma;
+  const now = input.now ?? new Date();
+  if (
+    !input.projectOperationId ||
+    !input.projectId ||
+    input.projectGeneration <= 0n ||
+    !input.lease.owner ||
+    input.lease.fence <= 0n ||
+    !Number.isFinite(now.getTime())
+  ) {
+    throw new TypeError("Invalid project deletion supersession");
+  }
+  return client.$transaction(async (transaction) => {
+    const projectOperation =
+      await transaction.analyticsDeletionOperation.findFirst({
+        where: {
+          id: input.projectOperationId,
+          projectId: input.projectId,
+          scope: "PROJECT",
+          generation: input.projectGeneration,
+          workerFence: input.lease.fence,
+          leaseOwner: input.lease.owner,
+          logicallyInvisible: true,
+          status: { not: "COMPLETED" },
+        },
+        select: { id: true },
+      });
+    if (!projectOperation) return false;
+
+    await transaction.analyticsDeletionOperation.updateMany({
+      where: {
+        projectId: input.projectId,
+        scope: "TRACE",
+        status: { not: "COMPLETED" },
+      },
+      data: {
+        status: "COMPLETED",
+        phase: "completed_by_project_deletion",
+        logicallyInvisible: true,
+        cancellationReasonCode: "SUPERSEDED_BY_PROJECT_DELETION",
+        completedAt: now,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    await transaction.analyticsDeletionTombstone.updateMany({
+      where: { projectId: input.projectId, status: { not: "COMPLETED" } },
+      data: { status: "COMPLETED", completedAt: now },
+    });
+    return true;
+  });
+}
+
 export async function hasPreBarrierIngestionWork(input: {
   readonly client?: AnalyticsControlClient;
   readonly projectId: string;
@@ -517,6 +593,41 @@ export function findLatestProjectDeletionOperation(input: {
       scope: "PROJECT",
     },
     orderBy: [{ generation: "desc" }, { createdAt: "desc" }],
+  });
+}
+
+export function findRecoverableDeletionOperations(input: {
+  readonly client?: AnalyticsControlClient;
+  readonly scopes: readonly AnalyticsDeletionScope[];
+  readonly updatedBefore: Date;
+  readonly leaseExpiredBefore: Date;
+  readonly limit: number;
+}): Promise<readonly AnalyticsDeletionOperation[]> {
+  if (
+    input.scopes.length === 0 ||
+    Number.isNaN(input.updatedBefore.getTime()) ||
+    Number.isNaN(input.leaseExpiredBefore.getTime()) ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 1_000
+  ) {
+    throw new TypeError("Invalid deletion recovery query");
+  }
+  const client = input.client ?? prisma;
+  return client.analyticsDeletionOperation.findMany({
+    where: {
+      scope: { in: [...input.scopes] },
+      status: { in: ["RETRYING", "SCHEDULED"] },
+      completedAt: null,
+      updatedAt: { lte: input.updatedBefore },
+      OR: [
+        { leaseOwner: null },
+        { leaseExpiresAt: null },
+        { leaseExpiresAt: { lte: input.leaseExpiredBefore } },
+      ],
+    },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: input.limit,
   });
 }
 

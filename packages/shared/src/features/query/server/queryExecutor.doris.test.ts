@@ -1,12 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { executeDoris, queryClickhouse, executor } = vi.hoisted(() => ({
+const { executeDoris, executor } = vi.hoisted(() => ({
   executeDoris: vi.fn(),
-  queryClickhouse: vi.fn(),
   executor: { query: vi.fn() },
 }));
-
-vi.mock("../../../server/repositories/clickhouse", () => ({ queryClickhouse }));
 
 vi.mock("../../../env", () => ({ env: {} }));
 
@@ -39,7 +36,7 @@ describe("executeQuery Doris composition", () => {
     executeDoris.mockResolvedValue([{ sum_totalCost: 1.5 }]);
   });
 
-  it("routes the shared dashboard/API/MCP engine without compiling ClickHouse", async () => {
+  it("routes the shared dashboard/API/MCP engine through Doris", async () => {
     await expect(executeQuery("project-1", query, "v2", true)).resolves.toEqual(
       [{ sum_totalCost: 1.5 }],
     );
@@ -50,6 +47,5 @@ describe("executeQuery Doris composition", () => {
       query,
       version: "v2",
     });
-    expect(queryClickhouse).not.toHaveBeenCalled();
   });
 });
