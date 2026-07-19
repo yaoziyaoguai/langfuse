@@ -18,6 +18,7 @@ export const validateCommentReferenceObject = async ({
   let commentTarget;
   switch (objectType) {
     case CommentObjectType.OBSERVATION: {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
       commentTarget = await getObservationById({
         id: objectId,
         projectId,
@@ -25,6 +26,7 @@ export const validateCommentReferenceObject = async ({
       break;
     }
     case CommentObjectType.TRACE: {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
       commentTarget = await getTraceById({
         traceId: objectId,
         projectId,
@@ -32,9 +34,9 @@ export const validateCommentReferenceObject = async ({
       break;
     }
     case CommentObjectType.SESSION: {
-      commentTarget = (
-        await getTracesIdentifierForSession(projectId, objectId)
-      ).shift();
+      commentTarget =
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        (await getTracesIdentifierForSession(projectId, objectId)).shift();
       break;
     }
     case CommentObjectType.PROMPT: {

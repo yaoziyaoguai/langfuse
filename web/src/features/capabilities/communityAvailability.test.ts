@@ -4,12 +4,12 @@ import {
   COMMUNITY_CAPABILITIES,
   capabilityForMcpFeature,
   capabilityForMcpTool,
+  capabilityForPagePath,
+  capabilityForPublicApiPath,
   capabilityForTrpcPath,
   createUnsupportedFeatureApiHandler,
   isCommunityCapabilityAvailable,
 } from "./communityAvailability";
-import blobStorageCollectionHandler from "../../pages/api/public/integrations/blob-storage";
-import blobStorageItemHandler from "../../pages/api/public/integrations/blob-storage/[id]";
 
 describe("Doris R1A community capability contract", () => {
   it.each([
@@ -20,6 +20,7 @@ describe("Doris R1A community capability contract", () => {
     ["customDashboards", "R2_CUSTOM_DASHBOARDS_UNAVAILABLE"],
   ] as const)("keeps %s inactive with stable code", (capability, code) => {
     expect(isCommunityCapabilityAvailable(capability)).toBe(false);
+    expect(isCommunityCapabilityAvailable(capability, "clickhouse")).toBe(true);
     expect(COMMUNITY_CAPABILITIES[capability]).toMatchObject({
       error: "UnsupportedFeature",
       code,
@@ -52,6 +53,19 @@ describe("Doris R1A community capability contract", () => {
     expect(capabilityForMcpTool("createDatasetRunItem")).toBe("experiments");
     expect(capabilityForMcpTool("listDatasetRuns")).toBe("experiments");
     expect(capabilityForMcpTool("listDatasetItems")).toBeNull();
+    expect(capabilityForPublicApiPath("/api/public/experiments")).toBe(
+      "experiments",
+    );
+    expect(
+      capabilityForPublicApiPath(
+        "/api/public/unstable/evaluation-rules/rule-1",
+      ),
+    ).toBe("evaluations");
+    expect(capabilityForPublicApiPath("/api/public/traces")).toBeNull();
+    expect(capabilityForPagePath("/project/[projectId]/evals")).toBe(
+      "evaluations",
+    );
+    expect(capabilityForPagePath("/project/[projectId]/traces")).toBeNull();
   });
 
   it("returns structured HTTP 501 without running a route implementation", () => {
@@ -67,15 +81,9 @@ describe("Doris R1A community capability contract", () => {
   });
 
   it.each([
-    ["collection", blobStorageCollectionHandler],
-    ["item", blobStorageItemHandler],
-  ])("gates every blob-storage %s route", (_route, handler) => {
-    const json = vi.fn();
-    const status = vi.fn(() => ({ json }));
-
-    handler({} as never, { status } as never);
-
-    expect(status).toHaveBeenCalledWith(501);
-    expect(json).toHaveBeenCalledWith(COMMUNITY_CAPABILITIES.batchExports);
+    "/api/public/integrations/blob-storage",
+    "/api/public/integrations/blob-storage/config-1",
+  ])("gates blob-storage route %s", (path) => {
+    expect(capabilityForPublicApiPath(path)).toBe("batchExports");
   });
 });

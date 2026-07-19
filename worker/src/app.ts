@@ -6,41 +6,105 @@ import MessageResponse from "./interfaces/MessageResponse";
 
 require("dotenv").config();
 
+import {
+  evalJobCreatorQueueProcessor,
+  evalJobDatasetCreatorQueueProcessor,
+  evalJobExecutorQueueProcessorBuilder,
+  evalJobTraceCreatorQueueProcessor,
+  llmAsJudgeExecutionQueueProcessorBuilder,
+} from "./queues/evalQueue";
+import { codeEvalExecutionQueueProcessorBuilder } from "./queues/codeEvalQueue";
+import { batchExportQueueProcessor } from "./queues/batchExportQueue";
 import { onShutdown } from "./utils/shutdown";
 import helmet from "helmet";
 import { cloudUsageMeteringQueueProcessor } from "./queues/cloudUsageMeteringQueue";
 import { cloudSpendAlertQueueProcessor } from "./queues/cloudSpendAlertQueue";
 import { cloudFreeTierUsageThresholdQueueProcessor } from "./queues/cloudFreeTierUsageThresholdQueue";
+import { monitorQueueProcessor } from "./queues/monitorQueue";
 import { WorkerManager } from "./queues/workerManager";
 import {
+  CoreDataS3ExportQueue,
+  DataRetentionQueue,
+  MeteringDataPostgresExportQueue,
+  PostHogIntegrationQueue,
+  MixpanelIntegrationQueue,
   QueueName,
   logger,
+  BlobStorageIntegrationQueue,
   DeadLetterRetryQueue,
+  IngestionQueue,
   AnalyticsIngestionQueue,
+  SecondaryIngestionQueue,
+  OtelIngestionQueue,
+  SecondaryOtelIngestionQueue,
+  TraceUpsertQueue,
   CloudFreeTierUsageThresholdQueue,
   CloudUsageMeteringQueue,
+  EventPropagationQueue,
+  EvalExecutionQueue,
+  SecondaryEvalExecutionQueue,
+  LLMAsJudgeExecutionQueue,
+  CodeEvalExecutionQueue,
   BatchActionQueue,
   findRecoverableDeletionOperations,
   handoffLegacyAnalyticsIngestionOutbox,
 } from "@langfuse/shared/src/server";
 import type { AnalyticsDeletionScope } from "@prisma/client";
-import { env } from "./env";
+import { monitorProcessorTtl } from "@langfuse/shared/monitors/server";
+import { env, v4WritesToEventsTable } from "./env";
+import { ingestionQueueProcessorBuilder } from "./queues/ingestionQueue";
 import { BackgroundMigrationManager } from "./backgroundMigrations/backgroundMigrationManager";
+import { prisma } from "@langfuse/shared/src/db";
+import { ClickhouseReadSkipCache } from "./utils/clickhouseReadSkipCache";
+import { experimentCreateQueueProcessor } from "./queues/experimentQueue";
 import { traceDeleteProcessor } from "./queues/traceDelete";
 import { projectDeleteProcessor } from "./queues/projectDelete";
+import {
+  postHogIntegrationProcessingProcessor,
+  postHogIntegrationProcessor,
+} from "./queues/postHogIntegrationQueue";
+import {
+  mixpanelIntegrationProcessingProcessor,
+  mixpanelIntegrationProcessor,
+} from "./queues/mixpanelIntegrationQueue";
+import {
+  blobStorageIntegrationProcessingProcessor,
+  blobStorageIntegrationProcessor,
+} from "./queues/blobStorageIntegrationQueue";
+import { coreDataS3ExportProcessor } from "./queues/coreDataS3ExportQueue";
+import { meteringDataPostgresExportProcessor } from "./ee/meteringDataPostgresExport/handleMeteringDataPostgresExportJob";
+import {
+  dataRetentionProcessingProcessor,
+  dataRetentionProcessor,
+} from "./queues/dataRetentionQueue";
+import { batchActionQueueProcessor } from "./queues/batchActionQueue";
 import { scoreDeleteProcessor } from "./queues/scoreDelete";
 import { DlqRetryService } from "./services/dlq/dlqRetryService";
 import { entityChangeQueueProcessor } from "./queues/entityChangeQueue";
 import { webhookProcessor } from "./queues/webhooks";
 import { datasetDeleteProcessor } from "./queues/datasetDelete";
+import { otelIngestionQueueProcessorBuilder } from "./queues/otelIngestionQueue";
+import { eventPropagationProcessor } from "./queues/eventPropagationQueue";
 import { notificationQueueProcessor } from "./queues/notificationQueue";
+import {
+  BatchProjectCleaner,
+  BATCH_DELETION_TABLES,
+} from "./features/batch-project-cleaner";
+import {
+  BatchDataRetentionCleaner,
+  BATCH_DATA_RETENTION_TABLES,
+} from "./features/batch-data-retention-cleaner";
+import { MediaRetentionCleaner } from "./features/media-retention-cleaner";
 import { BatchTraceDeletionCleaner } from "./features/batch-trace-deletion-cleaner";
 import { BatchProjectMediaCleaner } from "./features/batch-project-media-cleaner";
+import { BatchProjectBlobCleaner } from "./features/batch-project-blob-cleaner";
 import { QueueMetricsRunner } from "./features/queue-metrics-runner";
+import { MonitorRunner } from "./features/monitor-runner";
+import { DeletedMaskCleaner } from "./features/deleted-mask-cleaner";
 import { TraceDeleteBatchActionRunner } from "./features/trace-delete-batch-action-runner";
 import { createDorisAnalyticsPersistence } from "./services/dorisAnalyticsPersistence";
 import { AnalyticsIngestionOutboxRunner } from "./features/analytics-ingestion-outbox-runner";
-import { batchActionQueueProcessor } from "./queues/batchActionQueue";
+import { resolveAnalyticsWorkerTopology } from "./analyticsBackendTopology";
 import { assertDorisAnalyticsReady } from "./services/dorisAnalyticsReadiness";
 import { AnalyticsDeletionRecoveryRunner } from "./features/analytics-deletion-recovery-runner";
 import { processAnalyticsDeletionRecoveryOperation } from "./features/analytics-deletion-recovery-runner/processOperation";
@@ -61,11 +125,89 @@ app.use("/api", api);
 app.use(middlewares.notFound);
 app.use(middlewares.errorHandler);
 
-if (env.LANGFUSE_ENABLE_BACKGROUND_MIGRATIONS === "true") {
+const { clickhouseAnalyticsEnabled, dorisAnalyticsEnabled } =
+  resolveAnalyticsWorkerTopology(env.LANGFUSE_ANALYTICS_BACKEND);
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_ENABLE_BACKGROUND_MIGRATIONS === "true"
+) {
   // Will start background migrations without blocking the queue workers
   BackgroundMigrationManager.run().catch((err) => {
     logger.error("Error running background migrations", err);
   });
+}
+
+// Initialize ClickhouseReadSkipCache on container start
+if (clickhouseAnalyticsEnabled) {
+  ClickhouseReadSkipCache.getInstance(prisma)
+    .initialize()
+    .catch((err) => {
+      logger.error("Error initializing ClickhouseReadSkipCache", err);
+    });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED === "true"
+) {
+  // Register workers for all trace upsert queue shards
+  const traceUpsertShardNames = TraceUpsertQueue.getShardNames();
+  traceUpsertShardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      evalJobTraceCreatorQueueProcessor,
+      {
+        concurrency: env.LANGFUSE_TRACE_UPSERT_WORKER_CONCURRENCY,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED === "true"
+) {
+  WorkerManager.register(
+    QueueName.CreateEvalQueue,
+    evalJobCreatorQueueProcessor,
+    {
+      concurrency: env.LANGFUSE_EVAL_CREATOR_WORKER_CONCURRENCY,
+      limiter: {
+        // Process at most `max` jobs per `duration` milliseconds globally
+        max: env.LANGFUSE_EVAL_CREATOR_WORKER_CONCURRENCY,
+        duration: env.LANGFUSE_EVAL_CREATOR_LIMITER_DURATION,
+      },
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_S3_CORE_DATA_EXPORT_IS_ENABLED === "true"
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  CoreDataS3ExportQueue.getInstance();
+  WorkerManager.register(
+    QueueName.CoreDataS3ExportQueue,
+    coreDataS3ExportProcessor,
+  );
+}
+
+if (env.LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED === "true") {
+  // Instantiate the queue to trigger scheduled jobs
+  MeteringDataPostgresExportQueue.getInstance();
+  WorkerManager.register(
+    QueueName.MeteringDataPostgresExportQueue,
+    meteringDataPostgresExportProcessor,
+    {
+      limiter: {
+        // Process at most `max` jobs per 30 seconds
+        max: 1,
+        duration: 30_000,
+      },
+    },
+  );
 }
 
 if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
@@ -79,7 +221,7 @@ if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
     limiter: {
       // Process at most `max` delete jobs per 2 min
       max: env.LANGFUSE_TRACE_DELETE_CONCURRENCY,
-      duration: env.LANGFUSE_ANALYTICS_TRACE_DELETION_RATE_LIMIT_WINDOW_MS,
+      duration: env.LANGFUSE_CLICKHOUSE_TRACE_DELETION_CONCURRENCY_DURATION_MS,
     },
   });
 }
@@ -90,7 +232,7 @@ if (env.QUEUE_CONSUMER_SCORE_DELETE_QUEUE_IS_ENABLED === "true") {
     limiter: {
       // Process at most `max` delete jobs per 15 seconds
       max: env.LANGFUSE_SCORE_DELETE_CONCURRENCY,
-      duration: env.LANGFUSE_ANALYTICS_TRACE_DELETION_RATE_LIMIT_WINDOW_MS,
+      duration: env.LANGFUSE_CLICKHOUSE_TRACE_DELETION_CONCURRENCY_DURATION_MS,
     },
   });
 }
@@ -100,7 +242,8 @@ if (env.QUEUE_CONSUMER_DATASET_DELETE_QUEUE_IS_ENABLED === "true") {
     concurrency: env.LANGFUSE_DATASET_DELETE_CONCURRENCY,
     limiter: {
       max: env.LANGFUSE_DATASET_DELETE_CONCURRENCY,
-      duration: env.LANGFUSE_ANALYTICS_DATASET_DELETION_RATE_LIMIT_WINDOW_MS,
+      duration:
+        env.LANGFUSE_CLICKHOUSE_DATASET_DELETION_CONCURRENCY_DURATION_MS,
     },
   });
 }
@@ -109,71 +252,263 @@ if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
   WorkerManager.register(QueueName.ProjectDelete, projectDeleteProcessor, {
     concurrency: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
     limiter: {
-      // Process at most `max` delete jobs per configured rate-limit window.
+      // Process at most `max` delete jobs per LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS (default 10 min)
       max: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
-      duration: env.LANGFUSE_ANALYTICS_PROJECT_DELETION_RATE_LIMIT_WINDOW_MS,
+      duration:
+        env.LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS,
     },
   });
 }
 
-const dorisAnalyticsPersistence = createDorisAnalyticsPersistence({});
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED === "true"
+) {
+  WorkerManager.register(
+    QueueName.DatasetRunItemUpsert,
+    evalJobDatasetCreatorQueueProcessor,
+    {
+      concurrency: env.LANGFUSE_EVAL_CREATOR_WORKER_CONCURRENCY,
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true"
+) {
+  const shardNames = EvalExecutionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      evalJobExecutorQueueProcessorBuilder(true, shardName),
+      {
+        concurrency: env.LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY,
+        // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
+        // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
+        // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
+        // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
+        lockDuration: 60000, // 60 seconds
+        stalledInterval: 120000, // 120 seconds
+        maxStalledCount: 3,
+      },
+    );
+  });
+
+  const llmAsJudgeShardNames = LLMAsJudgeExecutionQueue.getShardNames();
+  llmAsJudgeShardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      llmAsJudgeExecutionQueueProcessorBuilder(shardName),
+      {
+        concurrency: env.LANGFUSE_LLM_AS_JUDGE_EXECUTION_WORKER_CONCURRENCY,
+        lockDuration: 60000,
+        stalledInterval: 120000,
+        maxStalledCount: 3,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_CODE_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true"
+) {
+  const codeEvalShardNames = CodeEvalExecutionQueue.getShardNames();
+  codeEvalShardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      codeEvalExecutionQueueProcessorBuilder(shardName),
+      {
+        concurrency: env.LANGFUSE_CODE_EVAL_EXECUTION_WORKER_CONCURRENCY,
+        lockDuration: 60000,
+        stalledInterval: 120000,
+        maxStalledCount: 3,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_EVAL_EXECUTION_SECONDARY_QUEUE_IS_ENABLED === "true"
+) {
+  const shardNames = SecondaryEvalExecutionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      evalJobExecutorQueueProcessorBuilder(false, shardName),
+      {
+        concurrency:
+          env.LANGFUSE_EVAL_EXECUTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
+        lockDuration: 60000, // 60 seconds
+        stalledInterval: 120000, // 120 seconds
+        maxStalledCount: 3,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true"
+) {
+  WorkerManager.register(QueueName.BatchExport, batchExportQueueProcessor, {
+    concurrency: 1, // only 1 job at a time
+    limiter: {
+      // execute 1 batch export in 5 seconds to avoid overloading the DB
+      max: 1,
+      duration: 5_000,
+    },
+  });
+}
+
+if (
+  dorisAnalyticsEnabled ||
+  env.QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED === "true"
+) {
+  BatchActionQueue.getInstance();
+  WorkerManager.register(
+    QueueName.BatchActionQueue,
+    batchActionQueueProcessor,
+    {
+      concurrency: 1, // only 1 job at a time
+      limiter: {
+        max: 1,
+        duration: 5_000,
+      },
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED === "true"
+) {
+  // Register workers for all ingestion queue shards
+  const shardNames = OtelIngestionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      otelIngestionQueueProcessorBuilder(true), // this might redirect to secondary queue
+      {
+        concurrency: env.LANGFUSE_OTEL_INGESTION_QUEUE_PROCESSING_CONCURRENCY,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_OTEL_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true"
+) {
+  const shardNames = SecondaryOtelIngestionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      otelIngestionQueueProcessorBuilder(false),
+      {
+        concurrency:
+          env.LANGFUSE_OTEL_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED === "true"
+) {
+  // Register workers for all ingestion queue shards
+  const shardNames = IngestionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      ingestionQueueProcessorBuilder(true), // this might redirect to secondary queue
+      {
+        concurrency: env.LANGFUSE_INGESTION_QUEUE_PROCESSING_CONCURRENCY,
+      },
+    );
+  });
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true"
+) {
+  const shardNames = SecondaryIngestionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      ingestionQueueProcessorBuilder(false),
+      {
+        concurrency:
+          env.LANGFUSE_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
+      },
+    );
+  });
+}
+
+const dorisAnalyticsPersistence = dorisAnalyticsEnabled
+  ? createDorisAnalyticsPersistence({})
+  : null;
 const legacyIngestionHandoffEnabled =
   env.LANGFUSE_ANALYTICS_INGESTION_LEGACY_HANDOFF_ENABLED === "true";
 
 export let analyticsIngestionOutboxRunner: AnalyticsIngestionOutboxRunner | null =
   null;
 
-AnalyticsIngestionQueue.getInstance();
-WorkerManager.register(
-  QueueName.AnalyticsIngestionQueue,
-  dorisAnalyticsPersistence.processor,
-  {
-    concurrency: env.LANGFUSE_ANALYTICS_INGESTION_WORKER_CONCURRENCY,
-  },
-);
-analyticsIngestionOutboxRunner = new AnalyticsIngestionOutboxRunner({
-  workerId: dorisAnalyticsPersistence.workerId,
-  intervalMs: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_INTERVAL_MS,
-  batchSize: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE,
-  // Enable only after every legacy ingestion producer and consumer has stopped.
-  handoffLegacy: legacyIngestionHandoffEnabled
-    ? handoffLegacyAnalyticsIngestionOutbox
-    : undefined,
-  assertReady: assertDorisAnalyticsReady,
-});
-analyticsIngestionOutboxRunner.start();
+if (dorisAnalyticsPersistence) {
+  AnalyticsIngestionQueue.getInstance();
+  WorkerManager.register(
+    QueueName.AnalyticsIngestionQueue,
+    dorisAnalyticsPersistence.processor,
+    {
+      concurrency: env.LANGFUSE_ANALYTICS_INGESTION_WORKER_CONCURRENCY,
+    },
+  );
+  analyticsIngestionOutboxRunner = new AnalyticsIngestionOutboxRunner({
+    workerId: dorisAnalyticsPersistence.workerId,
+    intervalMs: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_INTERVAL_MS,
+    batchSize: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE,
+    // Enable only after every legacy ingestion producer and consumer has stopped.
+    handoffLegacy: legacyIngestionHandoffEnabled
+      ? handoffLegacyAnalyticsIngestionOutbox
+      : undefined,
+    assertReady: assertDorisAnalyticsReady,
+  });
+  analyticsIngestionOutboxRunner.start();
+}
 
 export let analyticsDeletionRecoveryRunner: AnalyticsDeletionRecoveryRunner | null =
   null;
 
-const deletionRecoveryScopes: AnalyticsDeletionScope[] = [];
-if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
-  deletionRecoveryScopes.push("TRACE");
+if (dorisAnalyticsEnabled) {
+  const deletionRecoveryScopes: AnalyticsDeletionScope[] = [];
+  if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
+    deletionRecoveryScopes.push("TRACE");
+  }
+  if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
+    deletionRecoveryScopes.push("PROJECT");
+  }
+  if (deletionRecoveryScopes.length > 0) {
+    analyticsDeletionRecoveryRunner = new AnalyticsDeletionRecoveryRunner({
+      intervalMs: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_INTERVAL_MS,
+      batchSize: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_BATCH_SIZE,
+      assertReady: assertDorisAnalyticsReady,
+      findRecoverableOperations: (input) =>
+        findRecoverableDeletionOperations({
+          ...input,
+          scopes: deletionRecoveryScopes,
+        }),
+      processOperation: processAnalyticsDeletionRecoveryOperation,
+    });
+    analyticsDeletionRecoveryRunner.start();
+  }
 }
-if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
-  deletionRecoveryScopes.push("PROJECT");
-}
-if (deletionRecoveryScopes.length > 0) {
-  analyticsDeletionRecoveryRunner = new AnalyticsDeletionRecoveryRunner({
-    intervalMs: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_INTERVAL_MS,
-    batchSize: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_BATCH_SIZE,
-    assertReady: assertDorisAnalyticsReady,
-    findRecoverableOperations: (input) =>
-      findRecoverableDeletionOperations({
-        ...input,
-        scopes: deletionRecoveryScopes,
-      }),
-    processOperation: processAnalyticsDeletionRecoveryOperation,
-  });
-  analyticsDeletionRecoveryRunner.start();
-}
-
-BatchActionQueue.getInstance();
-WorkerManager.register(QueueName.BatchActionQueue, batchActionQueueProcessor, {
-  concurrency: 1,
-});
 
 if (
+  clickhouseAnalyticsEnabled &&
   env.QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED === "true" &&
   env.STRIPE_SECRET_KEY
 ) {
@@ -194,8 +529,22 @@ if (
   );
 }
 
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_MONITOR_QUEUE_IS_ENABLED === "true"
+) {
+  WorkerManager.register(QueueName.MonitorQueue, monitorQueueProcessor, {
+    concurrency: env.LANGFUSE_MONITOR_QUEUE_PROCESSING_CONCURRENCY,
+    // Scheduler is the only source of redelivery; disable BullMQ's stalled
+    // recovery so the unified TTL pacing is uncontested.
+    lockDuration: monitorProcessorTtl + 60_000,
+    maxStalledCount: 0,
+  });
+}
+
 // Cloud Spend Alert Queue: Only enable in cloud environment with Stripe
 if (
+  clickhouseAnalyticsEnabled &&
   env.QUEUE_CONSUMER_CLOUD_SPEND_ALERT_QUEUE_IS_ENABLED === "true" &&
   env.STRIPE_SECRET_KEY
 ) {
@@ -217,6 +566,7 @@ if (
 
 // Free Tier Usage Threshold Queue: Only enable in cloud environment
 if (
+  clickhouseAnalyticsEnabled &&
   env.QUEUE_CONSUMER_FREE_TIER_USAGE_THRESHOLD_QUEUE_IS_ENABLED === "true" &&
   env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION && // Only in cloud deployments
   env.STRIPE_SECRET_KEY
@@ -232,6 +582,148 @@ if (
         // Process at most `max` jobs per 30 seconds
         max: 1,
         duration: 30_000,
+      },
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true"
+) {
+  WorkerManager.register(
+    QueueName.ExperimentCreate,
+    experimentCreateQueueProcessor,
+    {
+      concurrency: env.LANGFUSE_EXPERIMENT_CREATOR_WORKER_CONCURRENCY,
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  PostHogIntegrationQueue.getInstance();
+
+  WorkerManager.register(
+    QueueName.PostHogIntegrationQueue,
+    postHogIntegrationProcessor,
+    {
+      concurrency: 1,
+    },
+  );
+
+  WorkerManager.register(
+    QueueName.PostHogIntegrationProcessingQueue,
+    postHogIntegrationProcessingProcessor,
+    {
+      concurrency: 1,
+      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
+      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
+      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
+      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
+      lockDuration: 60000, // 60 seconds
+      stalledInterval: 120000, // 120 seconds
+      maxStalledCount: 3,
+      limiter: {
+        // Process at most one PostHog job globally per 10s.
+        max: 1,
+        duration: 10_000,
+      },
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  MixpanelIntegrationQueue.getInstance();
+
+  WorkerManager.register(
+    QueueName.MixpanelIntegrationQueue,
+    mixpanelIntegrationProcessor,
+    {
+      concurrency: 1,
+    },
+  );
+
+  WorkerManager.register(
+    QueueName.MixpanelIntegrationProcessingQueue,
+    mixpanelIntegrationProcessingProcessor,
+    {
+      concurrency: 1,
+      limiter: {
+        // Process at most one Mixpanel job globally per 10s.
+        max: 1,
+        duration: 10_000,
+      },
+      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
+      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
+      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
+      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
+      lockDuration: 60000, // 60 seconds
+      stalledInterval: 120000, // 120 seconds
+      maxStalledCount: 3,
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  BlobStorageIntegrationQueue.getInstance();
+
+  WorkerManager.register(
+    QueueName.BlobStorageIntegrationQueue,
+    blobStorageIntegrationProcessor,
+    {
+      concurrency: 1,
+    },
+  );
+
+  WorkerManager.register(
+    QueueName.BlobStorageIntegrationProcessingQueue,
+    blobStorageIntegrationProcessingProcessor,
+    {
+      concurrency: 1,
+      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
+      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
+      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
+      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
+      lockDuration: 60000, // 60 seconds
+      stalledInterval: 120000, // 120 seconds
+      maxStalledCount: 3,
+    },
+  );
+}
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED === "true"
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  DataRetentionQueue.getInstance();
+
+  WorkerManager.register(QueueName.DataRetentionQueue, dataRetentionProcessor, {
+    concurrency: 1,
+  });
+
+  WorkerManager.register(
+    QueueName.DataRetentionProcessingQueue,
+    dataRetentionProcessingProcessor,
+    {
+      concurrency: 1,
+      limiter: {
+        // Process at most `max` delete jobs per LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS (default 10 min)
+        max: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
+        duration:
+          env.LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS,
       },
     },
   );
@@ -266,6 +758,25 @@ if (env.QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED === "true") {
   );
 }
 
+// The event-propagation queue is required whenever we write to events_full
+// (V4 WRITE_MODE in {dual, events_only}).
+if (
+  env.QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED === "true" &&
+  clickhouseAnalyticsEnabled &&
+  v4WritesToEventsTable(env)
+) {
+  // Instantiate the queue to trigger scheduled jobs
+  EventPropagationQueue.getInstance();
+
+  WorkerManager.register(
+    QueueName.EventPropagationQueue,
+    eventPropagationProcessor,
+    {
+      concurrency: 1,
+    },
+  );
+}
+
 if (env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true") {
   WorkerManager.register(
     QueueName.NotificationQueue,
@@ -274,6 +785,57 @@ if (env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true") {
       concurrency: 5, // Process up to 5 notification jobs concurrently
     },
   );
+}
+
+// Batch project cleaners for bulk deletion of ClickHouse data
+export const batchProjectCleaners: BatchProjectCleaner[] = [];
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true"
+) {
+  for (const table of BATCH_DELETION_TABLES) {
+    // Only start the events table cleaners when V4 write mode targets events_full.
+    if (
+      (table !== "events_full" && table !== "events_core") ||
+      v4WritesToEventsTable(env)
+    ) {
+      const cleaner = new BatchProjectCleaner(table);
+      batchProjectCleaners.push(cleaner);
+      cleaner.start();
+    }
+  }
+}
+
+// Batch data retention cleaners for bulk deletion of expired ClickHouse data
+export const batchDataRetentionCleaners: BatchDataRetentionCleaner[] = [];
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true"
+) {
+  for (const table of BATCH_DATA_RETENTION_TABLES) {
+    // Only start the events table cleaners when V4 write mode targets events_full.
+    if (
+      (table !== "events_full" && table !== "events_core") ||
+      v4WritesToEventsTable(env)
+    ) {
+      const cleaner = new BatchDataRetentionCleaner(table);
+      batchDataRetentionCleaners.push(cleaner);
+      cleaner.start();
+    }
+  }
+}
+
+// Media retention cleaner for media files and blob storage
+export let mediaRetentionCleaner: MediaRetentionCleaner | null = null;
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true"
+) {
+  mediaRetentionCleaner = new MediaRetentionCleaner();
+  mediaRetentionCleaner.start();
 }
 
 // Batch project media cleaner for S3 media cleanup of soft-deleted projects
@@ -285,6 +847,18 @@ if (
 ) {
   batchProjectMediaCleaner = new BatchProjectMediaCleaner();
   batchProjectMediaCleaner.start();
+}
+
+// Batch project blob cleaner for ingestion event S3/ClickHouse cleanup of soft-deleted projects
+export let batchProjectBlobCleaner: BatchProjectBlobCleaner | null = null;
+
+if (
+  env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true" &&
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true"
+) {
+  batchProjectBlobCleaner = new BatchProjectBlobCleaner();
+  batchProjectBlobCleaner.start();
 }
 
 // Batch trace deletion cleaner for supplementary trace deletion
@@ -304,12 +878,37 @@ if (env.LANGFUSE_TRACE_DELETE_BATCH_ACTION_RUNNER_ENABLED === "true") {
   traceDeleteBatchActionRunner.start();
 }
 
+// ClickHouse deleted-mask cleaner for physically applying lightweight delete masks
+export let deletedMaskCleaner: DeletedMaskCleaner | null = null;
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_ENABLED === "true"
+) {
+  deletedMaskCleaner = new DeletedMaskCleaner();
+  deletedMaskCleaner.start();
+}
+
 // Queue metrics background reporter
 export let queueMetricsRunner: QueueMetricsRunner | null = null;
 
 if (env.LANGFUSE_QUEUE_METRICS_ENABLED === "true") {
   queueMetricsRunner = new QueueMetricsRunner();
   queueMetricsRunner.start();
+}
+
+// Monitor runners — one per shard
+export const monitorRunners: MonitorRunner[] = [];
+
+if (
+  clickhouseAnalyticsEnabled &&
+  env.LANGFUSE_MONITOR_SCHEDULER_ENABLED === "true"
+) {
+  for (let i = 0; i < env.LANGFUSE_MONITOR_SCHEDULERS; i++) {
+    const runner = new MonitorRunner(i, env.LANGFUSE_MONITOR_SCHEDULERS);
+    monitorRunners.push(runner);
+    runner.start();
+  }
 }
 
 process.on("SIGINT", () => onShutdown("SIGINT"));

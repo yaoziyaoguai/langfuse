@@ -250,7 +250,7 @@ export const observationsTableCols: ColumnDefinition[] = [
     name: "Available Tool Names",
     id: "toolNames",
     type: "arrayOptions",
-    internal: "", // Computed by the Doris repository.
+    internal: "", // ClickHouse only - uses mapKeys(tool_definitions)
     options: [], // to be added at runtime
     nullable: true,
   },
@@ -258,7 +258,7 @@ export const observationsTableCols: ColumnDefinition[] = [
     name: "Called Tool Names",
     id: "calledToolNames",
     type: "arrayOptions",
-    internal: "", // Computed by the Doris repository.
+    internal: "", // ClickHouse only - uses tool_call_names
     options: [], // to be added at runtime
     nullable: true,
   },
@@ -266,14 +266,14 @@ export const observationsTableCols: ColumnDefinition[] = [
     name: "Available Tools",
     id: "toolDefinitions",
     type: "number",
-    internal: "", // Computed by the Doris repository.
+    internal: "", // ClickHouse only
     nullable: true,
   },
   {
     name: "Tool Calls",
     id: "toolCalls",
     type: "number",
-    internal: "", // Computed by the Doris repository.
+    internal: "", // ClickHouse only
     nullable: true,
   },
 ];

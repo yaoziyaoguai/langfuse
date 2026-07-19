@@ -1,19 +1,20 @@
+import { logger, traceException } from "@langfuse/shared/src/server";
+import { prisma } from "@langfuse/shared/src/db";
+import { createManyDatasetItems } from "@langfuse/shared/src/server";
 import {
   applyFullMapping,
   BatchActionStatus,
-  type MappingError,
   type ObservationAddToDatasetConfig,
+  type MappingError,
 } from "@langfuse/shared";
-import { prisma } from "@langfuse/shared/src/db";
-import {
-  createManyDatasetItems,
-  logger,
-  traceException,
-} from "@langfuse/shared/src/server";
 
+// Chunk size for batch processing. Smaller than the default 1000 because:
+// 1. Each observation requires JSON path evaluation and mapping transformation
+// 2. Dataset item validation with schema checking is CPU-intensive
+// 3. Smaller chunks provide more frequent progress updates to the UI
 const CHUNK_SIZE = 100;
 
-export type ObservationForDatasetMapping = {
+type ObservationForMapping = {
   id: string;
   traceId: string;
   input: unknown;
@@ -25,15 +26,18 @@ function formatMappingErrors(
   observationId: string,
   errors: MappingError[],
 ): string {
-  return `Observation ${observationId}: Mapping failed - ${errors.map(({ message }) => message).join("; ")}`;
+  const details = errors.map((e) => e.message).join("; ");
+  return `Observation ${observationId}: Mapping failed - ${details}`;
 }
 
 async function processChunk(params: {
   projectId: string;
   datasetId: string;
   mapping: ObservationAddToDatasetConfig["mapping"];
-  observations: ObservationForDatasetMapping[];
+  observations: ObservationForMapping[];
 }): Promise<{ processed: number; failed: number; errors: string[] }> {
+  const { projectId, datasetId, mapping, observations } = params;
+
   const items: Array<{
     datasetId: string;
     input: unknown;
@@ -42,77 +46,87 @@ async function processChunk(params: {
     sourceTraceId: string;
     sourceObservationId: string;
   }> = [];
+  let mappingFailedCount = 0;
   const mappingErrors: string[] = [];
 
-  for (const observation of params.observations) {
+  for (const obs of observations) {
     const mapped = applyFullMapping({
       observation: {
-        input: observation.input,
-        output: observation.output,
-        metadata: observation.metadata,
+        input: obs.input,
+        output: obs.output,
+        metadata: obs.metadata,
       },
-      mapping: params.mapping,
+      mapping,
     });
+
     if (mapped.errors.length > 0) {
-      mappingErrors.push(formatMappingErrors(observation.id, mapped.errors));
+      mappingFailedCount++;
+      mappingErrors.push(formatMappingErrors(obs.id, mapped.errors));
       continue;
     }
+
     items.push({
-      datasetId: params.datasetId,
+      datasetId,
       input: mapped.input,
       expectedOutput: mapped.expectedOutput ?? undefined,
       metadata: mapped.metadata ?? undefined,
-      sourceTraceId: observation.traceId,
-      sourceObservationId: observation.id,
+      sourceTraceId: obs.traceId,
+      sourceObservationId: obs.id,
     });
   }
 
+  // If all observations failed mapping, return early
   if (items.length === 0) {
     return {
       processed: 0,
-      failed: mappingErrors.length,
+      failed: mappingFailedCount,
       errors: mappingErrors,
     };
   }
 
   try {
     const result = await createManyDatasetItems({
-      projectId: params.projectId,
+      projectId,
       items,
       normalizeOpts: { sanitizeControlChars: true },
       validateOpts: { normalizeUndefinedToNull: true },
-      allowPartialSuccess: true,
+      allowPartialSuccess: true, // Allow partial success for bulk operations
     });
+
     if (!result.success) {
+      // All items failed
       return {
         processed: 0,
-        failed: items.length + mappingErrors.length,
+        failed: items.length + mappingFailedCount,
         errors: [
           ...mappingErrors,
-          ...(result.validationErrors ?? []).map(
-            (error) =>
-              `Item ${error.itemIndex}: ${error.field} - ${error.errors.map(({ message }) => message).join(", ")}`,
+          ...result.validationErrors.map(
+            (e) =>
+              `Item ${e.itemIndex}: ${e.field} - ${e.errors.map((err) => err.message).join(", ")}`,
           ),
         ],
       };
     }
+
+    // Success (possibly partial)
+    const validationErrors = result.validationErrors
+      ? result.validationErrors.map(
+          (e) =>
+            `Item ${e.itemIndex}: ${e.field} - ${e.errors.map((err) => err.message).join(", ")}`,
+        )
+      : [];
+
     return {
       processed: result.successCount,
-      failed: result.failedCount + mappingErrors.length,
-      errors: [
-        ...mappingErrors,
-        ...(result.validationErrors ?? []).map(
-          (error) =>
-            `Item ${error.itemIndex}: ${error.field} - ${error.errors.map(({ message }) => message).join(", ")}`,
-        ),
-      ],
+      failed: result.failedCount + mappingFailedCount,
+      errors: [...mappingErrors, ...validationErrors],
     };
   } catch (error) {
-    logger.error("Failed to create dataset items in batch action", error);
+    logger.error("Failed to create dataset items in chunk", error);
     traceException(error);
     return {
       processed: 0,
-      failed: items.length + mappingErrors.length,
+      failed: items.length + mappingFailedCount,
       errors: [
         ...mappingErrors,
         `Failed to create chunk: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -125,56 +139,81 @@ export async function processAddObservationsToDataset(params: {
   projectId: string;
   batchActionId: string;
   config: ObservationAddToDatasetConfig;
-  observations: ObservationForDatasetMapping[];
+  observations: ObservationForMapping[];
 }): Promise<void> {
+  const { projectId, batchActionId, config, observations } = params;
+  const { datasetId, mapping } = config;
+
+  // Update status to PROCESSING
   await prisma.batchAction.update({
-    where: { id: params.batchActionId },
+    where: { id: batchActionId },
     data: {
       status: BatchActionStatus.Processing,
-      totalCount: params.observations.length,
+      totalCount: observations.length,
     },
   });
 
   let processed = 0;
   let failed = 0;
-  const errors: string[] = [];
-  for (
-    let offset = 0;
-    offset < params.observations.length;
-    offset += CHUNK_SIZE
-  ) {
+  const allErrors: string[] = [];
+
+  // Process in chunks
+  for (let i = 0; i < observations.length; i += CHUNK_SIZE) {
+    const chunk = observations.slice(i, i + CHUNK_SIZE);
+
     const result = await processChunk({
-      projectId: params.projectId,
-      datasetId: params.config.datasetId,
-      mapping: params.config.mapping,
-      observations: params.observations.slice(offset, offset + CHUNK_SIZE),
+      projectId,
+      datasetId,
+      mapping,
+      observations: chunk,
     });
+
     processed += result.processed;
     failed += result.failed;
-    errors.push(...result.errors.slice(0, Math.max(0, 20 - errors.length)));
-    await prisma.batchAction.update({
-      where: { id: params.batchActionId },
-      data: { processedCount: processed, failedCount: failed },
-    });
+
+    if (result.errors.length > 0) {
+      // Limit error accumulation to prevent massive log strings
+      allErrors.push(...result.errors.slice(0, 10));
+    }
+
+    // Update progress periodically (every 5 chunks or at the end)
+    if (i % (CHUNK_SIZE * 5) === 0 || i + CHUNK_SIZE >= observations.length) {
+      await prisma.batchAction.update({
+        where: { id: batchActionId },
+        data: { processedCount: processed, failedCount: failed },
+      });
+    }
   }
 
-  const status =
+  // Determine final status
+  const finalStatus =
     failed === 0
       ? BatchActionStatus.Completed
       : processed === 0
         ? BatchActionStatus.Failed
         : BatchActionStatus.Partial;
+
+  // Aggregate error summary
+  const errorSummary =
+    allErrors.length > 0
+      ? `${failed} items failed validation. Sample errors:\n${allErrors.slice(0, 20).join("\n")}`
+      : null;
+
+  // Update final status
   await prisma.batchAction.update({
-    where: { id: params.batchActionId },
+    where: { id: batchActionId },
     data: {
-      status,
+      status: finalStatus,
       finishedAt: new Date(),
       processedCount: processed,
       failedCount: failed,
-      log:
-        errors.length > 0
-          ? `${failed} items failed validation. Sample errors:\n${errors.join("\n")}`
-          : null,
+      log: errorSummary,
     },
+  });
+
+  logger.info(`Completed observation-add-to-dataset action ${batchActionId}`, {
+    processed,
+    failed,
+    finalStatus,
   });
 }

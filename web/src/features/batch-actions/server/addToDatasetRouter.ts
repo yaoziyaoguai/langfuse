@@ -9,6 +9,7 @@ import {
   logger,
   QueueJobs,
   getObservationsCountFromEventsTable,
+  getObservationsTableCount,
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
 import {
@@ -17,7 +18,9 @@ import {
   BatchActionStatus,
   ActionId,
 } from "@langfuse/shared";
+import { env } from "@/src/env.mjs";
 import { CreateObservationAddToDatasetActionSchema } from "../validation";
+import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
 
 const MAX_BATCH_ADD_TO_DATASET_ITEMS = 1000;
 
@@ -35,7 +38,17 @@ export const addToDatasetRouter = createTRPCRouter({
 
         const { projectId, query, config } = input;
 
-        const tableName = BatchTableNames.Events;
+        const useEventsTable =
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+        const tableName = useEventsTable
+          ? BatchTableNames.Events
+          : BatchTableNames.Observations;
+
+        assertLegacyTracingIoSearchCanCreateBatchJob({
+          searchQuery: query.searchQuery,
+          searchType: query.searchType,
+          tableName,
+        });
 
         // Check observation count doesn't exceed maximum
         const queryOpts = {
@@ -46,8 +59,9 @@ export const addToDatasetRouter = createTRPCRouter({
           limit: 1,
           offset: 0,
         };
-        const observationCount =
-          await getObservationsCountFromEventsTable(queryOpts);
+        const observationCount = useEventsTable
+          ? await getObservationsCountFromEventsTable(queryOpts)
+          : await getObservationsTableCount(queryOpts);
 
         if (observationCount > MAX_BATCH_ADD_TO_DATASET_ITEMS) {
           throw new TRPCError({

@@ -90,6 +90,10 @@ export class WorkerManager {
           surface: "worker",
           route: baseMetric,
         },
+        clickhouse: {
+          surface: "worker",
+          route: baseMetric,
+        },
       });
       const result = await otelContext.with(analyticsCtx, () => processor(job));
 

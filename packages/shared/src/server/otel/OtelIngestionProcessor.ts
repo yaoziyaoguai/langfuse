@@ -15,6 +15,7 @@ import {
   recordIncrement,
   traceException,
   getS3EventStorageClient,
+  QueueJobs,
   instrumentSync,
   recordDistribution,
   UsageDetails,
@@ -30,11 +31,11 @@ import {
   CURRENT_ANALYTICS_CANONICALIZER_VERSION,
   CURRENT_ANALYTICS_SCHEMA_VERSION,
 } from "../analytics-persistence";
+import type { AnalyticsBackend } from "../analytics-persistence";
 import type { StorageService } from "../services/StorageService";
+import { OtelIngestionQueue } from "../redis/otelIngestionQueue";
 import { isValidDateString, flattenJsonToPathArrays } from "./utils";
-
-const formatAnalyticsDateTime = (value: Date): string =>
-  value.toISOString().replace("T", " ").replace("Z", "");
+import { convertDateToClickhouseDateTime } from "../clickhouse/client";
 
 // Type definitions for internal processor state
 interface TraceState {
@@ -204,6 +205,50 @@ export class OtelIngestionProcessor {
   }
 
   /**
+   * Uploads a batch of resourceSpans to blob storage and adds a job to the
+   * existing ClickHouse ingestion pipeline.
+   */
+  async publishToOtelIngestionQueue(resourceSpans: ResourceSpan[]) {
+    const now = new Date();
+    const timePath = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}/${String(now.getHours()).padStart(2, "0")}/${String(now.getMinutes()).padStart(2, "0")}`;
+    const fileKey = `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}otel/${this.projectId}/${timePath}/${randomUUID()}.json`;
+
+    await getS3EventStorageClient(
+      env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+    ).uploadJson(fileKey, resourceSpans as Record<string, unknown>[]);
+
+    const queue = OtelIngestionQueue.getInstance({
+      shardingKey: `${this.projectId}-${fileKey}`,
+    });
+    return queue
+      ? queue.add(QueueJobs.OtelIngestionJob, {
+          id: randomUUID(),
+          timestamp: new Date(),
+          name: QueueJobs.OtelIngestionJob as const,
+          payload: {
+            data: {
+              fileKey,
+              publicKey: this.publicKey,
+            },
+            authCheck: {
+              validKey: true,
+              scope: {
+                projectId: this.projectId,
+                accessLevel: "project" as const,
+                orgId: this.orgId,
+              },
+            },
+            propagatedHeaders: this.propagatedHeaders,
+            sdkName: this.sdkName,
+            sdkVersion: this.sdkVersion,
+            ingestionVersion: this.ingestionVersion,
+            ...(this.isLangfuseInternal ? { isLangfuseInternal: true } : {}),
+          },
+        })
+      : Promise.reject(new Error("Failed to instantiate otel ingestion queue"));
+  }
+
+  /**
    * Durably accepts a raw OTLP batch. The Postgres outbox publishes the queue
    * job independently, so a Redis outage cannot turn an accepted response into
    * silent data loss.
@@ -229,6 +274,29 @@ export class OtelIngestionProcessor {
         getS3EventStorageClient(env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET),
       rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
     });
+  }
+
+  publishToAnalyticsBackend(
+    resourceSpans: ResourceSpan[],
+    backend: "doris",
+  ): ReturnType<OtelIngestionProcessor["publishToAnalyticsIngestion"]>;
+  publishToAnalyticsBackend(
+    resourceSpans: ResourceSpan[],
+    backend: "clickhouse",
+  ): ReturnType<OtelIngestionProcessor["publishToOtelIngestionQueue"]>;
+  publishToAnalyticsBackend(
+    resourceSpans: ResourceSpan[],
+    backend: AnalyticsBackend,
+  ):
+    | ReturnType<OtelIngestionProcessor["publishToAnalyticsIngestion"]>
+    | ReturnType<OtelIngestionProcessor["publishToOtelIngestionQueue"]>;
+  publishToAnalyticsBackend(
+    resourceSpans: ResourceSpan[],
+    backend: AnalyticsBackend,
+  ) {
+    return backend === "doris"
+      ? this.publishToAnalyticsIngestion(resourceSpans)
+      : this.publishToOtelIngestionQueue(resourceSpans);
   }
 
   /**
@@ -2964,7 +3032,7 @@ export class OtelIngestionProcessor {
     if (value == null || value === "") return undefined;
     const stringValue = String(value);
     if (isValidDateString(stringValue)) {
-      return formatAnalyticsDateTime(new Date(stringValue));
+      return convertDateToClickhouseDateTime(new Date(stringValue));
     }
     logger.warn(
       "OTEL invalid experiment item version, dropping. Expected timestamp.",

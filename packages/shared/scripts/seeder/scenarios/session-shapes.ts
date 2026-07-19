@@ -3,16 +3,16 @@ import {
   createTrace,
   createObservation,
   createSessionScore,
+  createTracesCh,
+  createObservationsCh,
+  createScoresCh,
+  createEventsCh,
   EventRecordInsertType,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
   TraceRecordInsertType,
 } from "../../../src/server";
-import { observationToEvent } from "./event-mirror";
-import {
-  seedEventFixtures,
-  seedScoreFixtures,
-} from "../utils/analytics-writer";
+import { observationToEvent, traceToEvent } from "./event-mirror";
 import { jitter, Rng, utcDayStartMs } from "./rng";
 import {
   chunk,
@@ -483,7 +483,7 @@ const run = async (
   const startedAt = Date.now();
   const shapeParam = String(params["shape"]);
   const turns = params["turns"] as number;
-  const withV4 = true;
+  const withV4 = params["v4"] as boolean;
 
   if (shapeParam !== "all" && !SHAPES.includes(shapeParam as Shape)) {
     throw new SeedError(
@@ -506,7 +506,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "session-shapes",
-      target: "doris",
+      target: "clickhouse",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -573,12 +573,15 @@ const run = async (
     });
   }
 
-  const tracesById = new Map(allTraces.map((trace) => [trace.id, trace]));
-  for (const observation of allObservations) {
-    const trace = observation.trace_id
-      ? tracesById.get(observation.trace_id)
-      : undefined;
-    if (trace) allEvents.push(observationToEvent(observation, trace));
+  if (withV4) {
+    const tracesById = new Map(allTraces.map((tr) => [tr.id, tr]));
+    for (const trace of allTraces) {
+      allEvents.push(traceToEvent(trace));
+    }
+    for (const obs of allObservations) {
+      const trace = obs.trace_id ? tracesById.get(obs.trace_id) : undefined;
+      if (trace) allEvents.push(observationToEvent(obs, trace));
+    }
   }
 
   ctx.log(
@@ -586,9 +589,15 @@ const run = async (
       withV4 ? `, ${allEvents.length} events` : ""
     }`,
   );
-  await seedScoreFixtures(allScores);
+  for (const batch of chunk(allTraces, 1000)) {
+    await createTracesCh(batch);
+  }
+  for (const batch of chunk(allObservations, 1000)) {
+    await createObservationsCh(batch);
+  }
+  await createScoresCh(allScores);
   for (const batch of chunk(allEvents, 500)) {
-    await seedEventFixtures(batch);
+    await createEventsCh(batch);
   }
 
   const traceIds = allTraces.map((tr) => tr.id);
@@ -633,7 +642,7 @@ const run = async (
 
   return {
     scenario: "session-shapes",
-    target: "doris",
+    target: "clickhouse",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

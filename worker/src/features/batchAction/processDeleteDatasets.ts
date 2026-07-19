@@ -6,24 +6,26 @@ import {
 
 export async function processDeleteDatasets(
   projectId: string,
-  datasetIds: readonly string[],
-): Promise<void> {
-  const datasets = await findDatasetIdsByIds({
+  datasetIds: string[],
+) {
+  const datasetsToDelete = await findDatasetIdsByIds({
     projectId,
-    datasetIds: [...datasetIds],
+    datasetIds,
   });
-  if (datasets.length === 0) return;
+
+  if (datasetsToDelete.length === 0) return;
 
   await deleteDatasetsByIds({
     projectId,
-    datasetIds: datasets.map(({ id }) => id),
+    datasetIds: datasetsToDelete.map((dataset) => dataset.id),
   });
+
   await Promise.all(
-    datasets.map(({ id }) =>
+    datasetsToDelete.map((dataset) =>
       addToDeleteDatasetQueue({
         deletionType: "dataset",
         projectId,
-        datasetId: id,
+        datasetId: dataset.id,
       }),
     ),
   );

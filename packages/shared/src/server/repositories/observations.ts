@@ -1,29 +1,582 @@
-import type { ObservationType } from "../../domain";
-import { env } from "../../env";
-import { InvalidRequestError, PayloadTooLargeError } from "../../errors";
-import type { OrderByState } from "../../interfaces/orderBy";
-import type { TracingSearchType } from "../../interfaces/search";
-import type { EventsTableFilterState, FilterState } from "../../types";
-import type { FullObservations } from "../queries/createGenerationsQuery";
-import type { RenderingProps } from "../utils/rendering";
 import {
-  getObservationByIdFromEventsTable,
-  getObservationsCountFromEventsTable,
-  getObservationsFromEventsTableForPublicApi,
-  getObservationsCountFromEventsTableForPublicApi,
-  getObservationsWithModelDataFromEventsTable,
-  type PublicApiObservationsQuery,
-} from "./events";
+  commandClickhouse,
+  parseClickhouseUTCDateTimeFormat,
+  queryClickhouse,
+  queryClickhouseStream,
+  queryClickhouseStreamRawText,
+  queryClickhouseExecRaw,
+  BLOB_EXPORT_PARQUET_CLICKHOUSE_SETTINGS,
+  upsertClickhouse,
+} from "./clickhouse";
+import { logger } from "../logger";
+import { scoreBooleansAggregation } from "../queries/clickhouse-sql/query-fragments";
+import {
+  InternalServerError,
+  InvalidRequestError,
+  LangfuseNotFoundError,
+  PayloadTooLargeError,
+} from "../../errors";
+import { prisma } from "../../db";
+import { ObservationRecordReadType } from "./definitions";
+import { FilterState } from "../../types";
+import {
+  DateTimeFilter,
+  FilterList,
+  StringFilter,
+  FullObservations,
+  orderByToClickhouseSql,
+} from "../queries";
+import { createFilterFromFilterState } from "../queries/clickhouse-sql/factory";
+import {
+  observationsTableTraceUiColumnDefinitions,
+  observationsTableUiColumnDefinitions,
+} from "../tableMappings";
+import { OrderByState } from "../../interfaces/orderBy";
+import { matchesUiColumnMapping } from "../../tableDefinitions";
+import { getTracesByIds } from "./traces";
+import { measureAndReturn } from "../clickhouse/measureAndReturn";
+import {
+  convertDateToClickhouseDateTime,
+  PreferredClickhouseService,
+} from "../clickhouse/client";
+import {
+  convertObservation,
+  enrichObservationWithModelData,
+} from "./observations_converters";
+import { clickhouseSearchCondition } from "../queries/clickhouse-sql/search";
+import {
+  OBSERVATIONS_TO_TRACE_INTERVAL,
+  TRACE_TO_OBSERVATIONS_INTERVAL,
+} from "./constants";
+import { env } from "../../env";
+import { TracingSearchType } from "../../interfaces/search";
+import { observationsTableCols } from "../../observationsTable";
+import { ClickHouseClientConfigOptions } from "@clickhouse/client";
+import type { AnalyticsGenerationEvent } from "../analytics-integrations/types";
+import { ObservationType } from "../../domain";
+import {
+  LEGACY_OBSERVATION_EXPORT_FIELDS,
+  OBSERVATION_FIELD_GROUPS_FULL,
+  type ObservationFieldGroupFull,
+} from "../../domain/observation-field-groups";
+import { recordDistribution } from "../instrumentation";
+import { DEFAULT_RENDERING_PROPS, RenderingProps } from "../utils/rendering";
+import { shouldSkipObservationsFinal } from "../queries/clickhouse-sql/query-options";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
 import { toDorisEventsObservation } from "./telemetry/doris/adapters";
+import type { DorisEventOrderBy } from "../queries/doris-sql/eventQueryCompiler";
+import type { EventsTableFilterState } from "../../types";
 import type { DorisObservation } from "./telemetry/doris/observations";
-import { getDorisTelemetryRepositories } from "./telemetry/doris/runtime";
-import type { ObservationRecordReadType } from "./definitions";
+
+/**
+ * Checks if observation exists in clickhouse.
+ *
+ * @param {string} projectId - Project ID for the observation
+ * @param {string} id - ID of the observation
+ * @param {Date} startTime - Timestamp for time-based filtering, uses event payload or job timestamp
+ * @returns {Promise<boolean>} - True if observation exists
+ *
+ * Notes:
+ * • Filters with two days lookback window subject to startTime
+ * • Used for validating observation references before eval job creation
+ */
+export const checkObservationExists = async (
+  projectId: string,
+  id: string,
+  startTime: Date | undefined,
+): Promise<boolean> => {
+  const query = `
+    SELECT id, project_id
+    FROM observations o
+    WHERE project_id = {projectId: String}
+    AND id = {id: String}
+    ${startTime ? `AND start_time >= {startTime: DateTime64(3)} - ${OBSERVATIONS_TO_TRACE_INTERVAL}` : ""}
+    ORDER BY event_ts DESC
+    LIMIT 1 BY id, project_id
+  `;
+
+  const rows = await queryClickhouse<{ id: string; project_id: string }>({
+    query,
+    params: {
+      id,
+      projectId,
+      ...(startTime
+        ? { startTime: convertDateToClickhouseDateTime(startTime) }
+        : {}),
+    },
+    tags: { projectId },
+  });
+
+  return rows.length > 0;
+};
+
+/**
+ * Accepts a trace in a Clickhouse-ready format.
+ * id, project_id, and timestamp must always be provided.
+ */
+export const upsertObservation = async (
+  observation: Partial<ObservationRecordReadType>,
+) => {
+  if (
+    !["id", "project_id", "start_time", "type"].every(
+      (key) => key in observation,
+    )
+  ) {
+    throw new Error(
+      "Identifier fields must be provided to upsert Observation.",
+    );
+  }
+  await upsertClickhouse({
+    table: "observations",
+    records: [observation as ObservationRecordReadType],
+    eventBodyMapper: convertObservation,
+    tags: { projectId: observation.project_id ?? "" },
+  });
+};
 
 export type GetObservationsForTraceOpts<IncludeIO extends boolean> = {
   traceId: string;
   projectId: string;
   timestamp?: Date;
   includeIO?: IncludeIO;
+  preferredClickhouseService?: PreferredClickhouseService;
+};
+
+export const getObservationsForTrace = async <IncludeIO extends boolean>(
+  opts: GetObservationsForTraceOpts<IncludeIO>,
+) => {
+  const {
+    traceId,
+    projectId,
+    timestamp,
+    includeIO = false,
+    preferredClickhouseService,
+  } = opts;
+
+  if (isDorisAnalyticsBackend()) {
+    const observations: DorisObservation[] = [];
+    let cursor: string | undefined;
+    do {
+      const page =
+        await getDorisTelemetryRepositories().observations.listForTrace({
+          projectId,
+          traceId,
+          filters: timestamp
+            ? [
+                {
+                  type: "datetime",
+                  column: "startTime",
+                  operator: ">=",
+                  value: new Date(timestamp.getTime() - 60 * 60 * 1_000),
+                },
+              ]
+            : [],
+          cursor,
+          limit: 999,
+          includeFullContent: includeIO,
+        });
+      observations.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+
+    let payloadSize = 0;
+    const result = observations.map(toDorisEventsObservation);
+    if (includeIO) {
+      for (const observation of result) {
+        for (const value of [observation.input, observation.output]) {
+          const rendered =
+            typeof value === "string"
+              ? value
+              : value === null || value === undefined
+                ? ""
+                : (JSON.stringify(value) ?? "");
+          payloadSize += rendered.length;
+        }
+        for (const value of Object.values(observation.metadata ?? {})) {
+          const rendered =
+            typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+          payloadSize += rendered.length;
+        }
+      }
+      if (payloadSize >= env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES) {
+        throw new PayloadTooLargeError(
+          `Observations in trace are too large: ${(payloadSize / 1e6).toFixed(2)}MB exceeds limit of ${(env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES / 1e6).toFixed(2)}MB`,
+        );
+      }
+    }
+    return result;
+  }
+
+  // OTel projects use immutable spans - no need for deduplication
+  const skipDedup = await shouldSkipObservationsFinal(projectId);
+
+  const query = `
+  SELECT
+    id,
+    trace_id,
+    project_id,
+    type,
+    parent_observation_id,
+    environment,
+    start_time,
+    end_time,
+    name,
+    level,
+    status_message,
+    version,
+    ${includeIO === true ? "input, output, metadata," : ""}
+    provided_model_name,
+    internal_model_id,
+    model_parameters,
+    provided_usage_details,
+    usage_details,
+    provided_cost_details,
+    cost_details,
+    total_cost,
+    usage_pricing_tier_id,
+    usage_pricing_tier_name,
+    completion_start_time,
+    prompt_id,
+    prompt_name,
+    prompt_version,
+    ${includeIO === true ? "tool_definitions, tool_calls, tool_call_names," : ""}
+    created_at,
+    updated_at,
+    event_ts
+  FROM observations
+  WHERE trace_id = {traceId: String}
+  AND project_id = {projectId: String}
+   ${timestamp ? `AND start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}` : ""}
+  ${skipDedup ? "" : "ORDER BY event_ts DESC"}
+  ${skipDedup ? "" : "LIMIT 1 BY id, project_id"}`;
+  const records = await queryClickhouse<ObservationRecordReadType>({
+    query,
+    params: {
+      traceId,
+      projectId,
+      ...(timestamp
+        ? { traceTimestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: { projectId },
+    preferredClickhouseService,
+  });
+
+  // Large number of observations in trace with large input / output / metadata will lead to
+  // high CPU and memory consumption in the convertObservation step, where parsing occurs
+  // Thus, limit the size of the payload to 5MB, follows NextJS response size limitation:
+  // https://nextjs.org/docs/messages/api-routes-response-size-limit
+  // See also LFE-4882 for more details
+  let payloadSize = 0;
+
+  for (const observation of records) {
+    for (const key of ["input", "output"] as const) {
+      const value = observation[key];
+
+      if (value && typeof value === "string") {
+        payloadSize += value.length;
+      }
+    }
+
+    const metadataValues = Object.values(observation["metadata"] ?? {});
+
+    metadataValues.forEach((value) => {
+      if (value && typeof value === "string") {
+        payloadSize += value.length;
+      }
+    });
+
+    if (payloadSize >= env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES) {
+      const errorMessage = `Observations in trace are too large: ${(payloadSize / 1e6).toFixed(2)}MB exceeds limit of ${(env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES / 1e6).toFixed(2)}MB`;
+
+      throw new PayloadTooLargeError(errorMessage);
+    }
+  }
+
+  return records.map((r) => {
+    const observation = convertObservation({
+      ...r,
+      metadata: r.metadata ?? {},
+    });
+    recordDistribution(
+      "langfuse.query_by_id_age",
+      new Date().getTime() - observation.startTime.getTime(),
+      {
+        table: "observations",
+      },
+    );
+    return observation;
+  });
+};
+
+export const getObservationForTraceIdByName = async ({
+  traceId,
+  projectId,
+  name,
+  timestamp,
+  fetchWithInputOutput = false,
+}: {
+  traceId: string;
+  projectId: string;
+  name: string;
+  timestamp?: Date;
+  fetchWithInputOutput?: boolean;
+}) => {
+  const query = `
+  SELECT
+    id,
+    trace_id,
+    project_id,
+    type,
+    parent_observation_id,
+    environment,
+    start_time,
+    end_time,
+    name,
+    metadata,
+    level,
+    status_message,
+    version,
+    ${fetchWithInputOutput ? "input, output," : ""}
+    provided_model_name,
+    internal_model_id,
+    model_parameters,
+    provided_usage_details,
+    usage_details,
+    provided_cost_details,
+    cost_details,
+    total_cost,
+    usage_pricing_tier_id,
+    usage_pricing_tier_name,
+    completion_start_time,
+    prompt_id,
+    prompt_name,
+    prompt_version,
+    tool_definitions,
+    tool_calls,
+    tool_call_names,
+    created_at,
+    updated_at,
+    event_ts
+  FROM observations
+  WHERE trace_id = {traceId: String}
+  AND project_id = {projectId: String}
+  AND name = {name: String}
+   ${timestamp ? `AND start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}` : ""}
+  ORDER BY event_ts DESC
+  LIMIT 1 BY id, project_id`;
+  const records = await queryClickhouse<ObservationRecordReadType>({
+    query,
+    params: {
+      traceId,
+      projectId,
+      name,
+      ...(timestamp
+        ? { traceTimestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: { projectId },
+  });
+
+  return records.map((record) => convertObservation(record));
+};
+
+/**
+ * Retrieves an observation by its ID from the legacy `observations` table.
+ *
+ * Prefer the routing wrapper `getObservationById` (in repositories/events.ts)
+ * for application reads: it dispatches between this legacy reader and the events
+ * table based on the V4 migration flags. Call this directly only when you
+ * specifically need the legacy table (e.g. backfills, migration tooling).
+ */
+export const getObservationByIdFromObservationsTable = async ({
+  id,
+  projectId,
+  fetchWithInputOutput = false,
+  startTime,
+  type,
+  traceId,
+  renderingProps = DEFAULT_RENDERING_PROPS,
+  preferredClickhouseService,
+}: {
+  id: string;
+  projectId: string;
+  fetchWithInputOutput?: boolean;
+  startTime?: Date;
+  type?: ObservationType;
+  traceId?: string;
+  renderingProps?: RenderingProps;
+  preferredClickhouseService?: PreferredClickhouseService;
+}) => {
+  const records = await getObservationByIdInternal({
+    id,
+    projectId,
+    fetchWithInputOutput,
+    startTime,
+    type,
+    traceId,
+    renderingProps,
+    preferredClickhouseService,
+  });
+  const mapped = records.map((record) =>
+    convertObservation(record, renderingProps),
+  );
+
+  mapped.forEach((observation) => {
+    recordDistribution(
+      "langfuse.query_by_id_age",
+      new Date().getTime() - observation.startTime.getTime(),
+      {
+        table: "observations",
+      },
+    );
+  });
+  if (mapped.length === 0) {
+    throw new LangfuseNotFoundError(`Observation with id ${id} not found`);
+  }
+
+  if (mapped.length > 1) {
+    logger.error(
+      `Multiple observations found for id ${id} and project ${projectId}`,
+    );
+    throw new InternalServerError(
+      `Multiple observations found for id ${id} and project ${projectId}`,
+    );
+  }
+  return mapped.shift();
+};
+
+export const getObservationsById = async (
+  ids: string[],
+  projectId: string,
+  fetchWithInputOutput = false,
+) => {
+  const query = `
+  SELECT
+    id,
+    trace_id,
+    project_id,
+    type,
+    parent_observation_id,
+    start_time,
+    end_time,
+    name,
+    metadata,
+    level,
+    status_message,
+    version,
+    ${fetchWithInputOutput ? "input, output," : ""}
+    provided_model_name,
+    internal_model_id,
+    model_parameters,
+    provided_usage_details,
+    usage_details,
+    provided_cost_details,
+    cost_details,
+    total_cost,
+    usage_pricing_tier_id,
+    usage_pricing_tier_name,
+    completion_start_time,
+    prompt_id,
+    prompt_name,
+    prompt_version,
+    tool_definitions,
+    tool_calls,
+    tool_call_names,
+    created_at,
+    updated_at,
+    event_ts
+  FROM observations
+  WHERE id IN ({ids: Array(String)})
+  AND project_id = {projectId: String}
+  ORDER BY event_ts desc
+  LIMIT 1 by id, project_id`;
+  const records = await queryClickhouse<ObservationRecordReadType>({
+    query,
+    params: { ids, projectId },
+  });
+  return records.map((record) => convertObservation(record));
+};
+
+const getObservationByIdInternal = async ({
+  id,
+  projectId,
+  fetchWithInputOutput = false,
+  startTime,
+  type,
+  traceId,
+  renderingProps = DEFAULT_RENDERING_PROPS,
+  preferredClickhouseService,
+}: {
+  id: string;
+  projectId: string;
+  fetchWithInputOutput?: boolean;
+  startTime?: Date;
+  type?: ObservationType;
+  traceId?: string;
+  renderingProps?: RenderingProps;
+  preferredClickhouseService?: PreferredClickhouseService;
+}) => {
+  const query = `
+  SELECT
+    id,
+    trace_id,
+    project_id,
+    environment,
+    type,
+    parent_observation_id,
+    start_time,
+    end_time,
+    name,
+    metadata,
+    level,
+    status_message,
+    version,
+    ${fetchWithInputOutput ? (renderingProps.truncated ? `leftUTF8(input, ${env.LANGFUSE_SERVER_SIDE_IO_CHAR_LIMIT}) as input, leftUTF8(output, ${env.LANGFUSE_SERVER_SIDE_IO_CHAR_LIMIT}) as output,` : "input, output,") : ""}
+    provided_model_name,
+    internal_model_id,
+    model_parameters,
+    provided_usage_details,
+    usage_details,
+    provided_cost_details,
+    cost_details,
+    total_cost,
+    usage_pricing_tier_id,
+    usage_pricing_tier_name,
+    completion_start_time,
+    prompt_id,
+    prompt_name,
+    prompt_version,
+    tool_definitions,
+    tool_calls,
+    tool_call_names,
+    created_at,
+    updated_at,
+    event_ts
+  FROM observations
+  WHERE id = {id: String}
+  AND project_id = {projectId: String}
+  ${startTime ? `AND toDate(start_time) = toDate({startTime: DateTime64(3)})` : ""}
+  ${type ? `AND type = {type: String}` : ""}
+  ${traceId ? `AND trace_id = {traceId: String}` : ""}
+  ORDER BY event_ts desc
+  LIMIT 1 by id, project_id`;
+  return await queryClickhouse<ObservationRecordReadType>({
+    query,
+    params: {
+      id,
+      projectId,
+      ...(startTime
+        ? { startTime: convertDateToClickhouseDateTime(startTime) }
+        : {}),
+      ...(traceId ? { traceId } : {}),
+    },
+    tags: { projectId },
+    preferredClickhouseService,
+  });
 };
 
 export type ObservationTableQuery = {
@@ -36,8 +589,21 @@ export type ObservationTableQuery = {
   offset?: number;
   selectIOAndMetadata?: boolean;
   renderingProps?: RenderingProps;
+  /**
+   * Per-field I/O size cap (events table only): fields whose full length is
+   * within `inlineChars` come back whole, larger fields come back as a
+   * `previewChars` head plus true lengths and truncation flags. Takes
+   * precedence over `renderingProps.truncated` for the I/O select.
+   */
   ioSizeCap?: { inlineChars: number; previewChars: number };
+  /**
+   * Events table only: collapse un-merged ReplacingMergeTree row versions to
+   * one row per span (`ORDER BY ..., event_ts DESC` + `LIMIT 1 BY span_id`),
+   * so row counts equal distinct observations and the newest version wins.
+   * Required by callers whose limits/paging count observations.
+   */
   dedupeBySpanId?: boolean;
+  clickhouseConfigs?: ClickHouseClientConfigOptions | undefined;
 };
 
 export type ObservationsTableQueryResult = ObservationRecordReadType & {
@@ -46,14 +612,19 @@ export type ObservationsTableQueryResult = ObservationRecordReadType & {
   trace_tags?: string[];
   trace_name?: string;
   trace_user_id?: string;
+  // Tool counts for list view performance (ClickHouse numbers as strings)
   tool_definitions_count?: string;
   tool_calls_count?: string;
 };
 
-function mapLegacyColumns(filter: FilterState): EventsTableFilterState {
-  return filter.map((item) => ({
-    ...item,
-    column:
+function buildDorisLegacyObservationQuery(filter: FilterState): {
+  readonly range: { readonly from: Date; readonly to: Date } | null;
+  readonly filters: EventsTableFilterState;
+} {
+  const lowerBounds: Date[] = [];
+  const upperBounds: Date[] = [];
+  const mapped = filter.map((item) => {
+    const column =
       item.column === "Start Time"
         ? "startTime"
         : item.column === "End Time"
@@ -66,183 +637,526 @@ function mapLegacyColumns(filter: FilterState): EventsTableFilterState {
                 ? "traceTags"
                 : item.column === "traceEnvironment"
                   ? "environment"
-                  : item.column,
-  })) as EventsTableFilterState;
+                  : item.column;
+    const mappedItem = { ...item, column };
+    if (mappedItem.type === "datetime" && column === "startTime") {
+      if (mappedItem.operator === ">" || mappedItem.operator === ">=") {
+        lowerBounds.push(mappedItem.value);
+      } else {
+        upperBounds.push(
+          mappedItem.operator === "<="
+            ? new Date(mappedItem.value.getTime() + 1)
+            : mappedItem.value,
+        );
+      }
+    }
+    return mappedItem;
+  });
+  return {
+    range:
+      lowerBounds.length > 0 || !exactDorisLegacyFilterValue(filter, "traceId")
+        ? {
+            from:
+              lowerBounds.length > 0
+                ? new Date(
+                    Math.max(...lowerBounds.map((value) => value.getTime())),
+                  )
+                : new Date(0),
+            to:
+              upperBounds.length > 0
+                ? new Date(
+                    Math.min(...upperBounds.map((value) => value.getTime())),
+                  )
+                : new Date(),
+          }
+        : null,
+    filters: mapped as EventsTableFilterState,
+  };
 }
 
-export const checkObservationExists = async (
-  projectId: string,
-  id: string,
-  startTime?: Date,
-): Promise<boolean> => {
-  const observation = await getDorisTelemetryRepositories().observations.get({
-    projectId,
-    observationId: id,
-  });
-  return Boolean(
-    observation && (!startTime || observation.startTime >= startTime),
-  );
-};
-
-export const getObservationsForTrace = async <IncludeIO extends boolean>(
-  opts: GetObservationsForTraceOpts<IncludeIO>,
-) => {
-  const observations: DorisObservation[] = [];
-  let cursor: string | undefined;
-  do {
-    const timestampFilters: EventsTableFilterState = opts.timestamp
-      ? [
-          {
-            type: "datetime",
-            column: "startTime",
-            operator: ">=",
-            value: new Date(opts.timestamp.getTime() - 60 * 60 * 1_000),
-          },
-        ]
-      : [];
-    const page =
-      await getDorisTelemetryRepositories().observations.listForTrace({
-        projectId: opts.projectId,
-        traceId: opts.traceId,
-        filters: timestampFilters,
-        cursor,
-        limit: 999,
-        includeFullContent: Boolean(opts.includeIO),
-      });
-    observations.push(...page.items);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  const result = observations.map(toDorisEventsObservation);
-  if (opts.includeIO) {
-    const payloadSize = result.reduce((total, observation) => {
-      const values = [
-        observation.input,
-        observation.output,
-        ...Object.values(observation.metadata ?? {}),
-      ];
-      return (
-        total +
-        values.reduce<number>(
-          (sum, value) =>
-            sum +
-            (typeof value === "string"
-              ? value.length
-              : (JSON.stringify(value)?.length ?? 0)),
-          0,
-        )
-      );
-    }, 0);
-    if (payloadSize >= env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES) {
-      throw new PayloadTooLargeError(
-        `Observations in trace are too large: ${(payloadSize / 1e6).toFixed(2)}MB exceeds limit of ${(env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES / 1e6).toFixed(2)}MB`,
-      );
-    }
+function exactDorisLegacyFilterValue(
+  filters: FilterState,
+  column: string,
+): string | undefined {
+  const filter = filters.find((item) => item.column === column);
+  if (filter?.type === "string" && filter.operator === "=") {
+    return filter.value;
   }
-  return result;
-};
+  if (
+    filter?.type === "stringOptions" &&
+    filter.operator === "any of" &&
+    filter.value.length === 1
+  ) {
+    return filter.value[0];
+  }
+  return undefined;
+}
 
-export const getObservationForTraceIdByName = async (params: {
-  traceId: string;
-  projectId: string;
-  name: string;
-  timestamp?: Date;
-  fetchWithInputOutput?: boolean;
-}) => {
-  const page = await getDorisTelemetryRepositories().observations.listForTrace({
-    projectId: params.projectId,
-    traceId: params.traceId,
-    filters: [
-      { type: "string", column: "name", operator: "=", value: params.name },
-      ...(params.timestamp
-        ? [
-            {
-              type: "datetime" as const,
-              column: "startTime",
-              operator: ">=" as const,
-              value: new Date(params.timestamp.getTime() - 60 * 60 * 1_000),
-            },
-          ]
-        : []),
-    ],
-    limit: 1,
-    includeFullContent: Boolean(params.fetchWithInputOutput),
-  });
-  return page.items.map(toDorisEventsObservation);
-};
+function toDorisLegacyObservationOrderBy(
+  orderBy: OrderByState | undefined,
+): DorisEventOrderBy | undefined {
+  if (!orderBy) return undefined;
+  const aliases: Readonly<Record<string, DorisEventOrderBy["column"]>> = {
+    model: "providedModelName",
+    tokens: "totalTokens",
+  };
+  const column = aliases[orderBy.column] ?? orderBy.column;
+  const supported = new Set<DorisEventOrderBy["column"]>([
+    "startTime",
+    "endTime",
+    "completionStartTime",
+    "id",
+    "traceId",
+    "parentObservationId",
+    "name",
+    "type",
+    "environment",
+    "version",
+    "level",
+    "statusMessage",
+    "providedModelName",
+    "modelId",
+    "promptName",
+    "promptVersion",
+    "totalCost",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "inputCost",
+    "outputCost",
+    "latency",
+    "timeToFirstToken",
+    "tokensPerSecond",
+    "toolDefinitions",
+    "toolCalls",
+  ]);
+  if (!supported.has(column as DorisEventOrderBy["column"])) {
+    throw new InvalidRequestError(
+      `Unsupported Doris observation order column: ${orderBy.column}`,
+    );
+  }
+  return {
+    column: column as DorisEventOrderBy["column"],
+    order: orderBy.order,
+  };
+}
 
-export const getObservationByIdFromObservationsTable =
-  getObservationByIdFromEventsTable;
-
-export const getObservationsById = async (
-  ids: string[],
-  projectId: string,
-  fetchWithInputOutput = false,
+export const getObservationsTableCount = async (
+  opts: ObservationTableQuery,
 ) => {
-  const observations = await Promise.all(
-    ids.map((observationId) =>
-      getDorisTelemetryRepositories().observations.get({
-        projectId,
-        observationId,
-      }),
-    ),
-  );
-  return observations.flatMap((observation) =>
-    observation
-      ? [
-          toDorisEventsObservation({
-            ...observation,
-            input: fetchWithInputOutput ? observation.input : null,
-            output: fetchWithInputOutput ? observation.output : null,
-          }),
-        ]
-      : [],
-  );
-};
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisLegacyObservationQuery(opts.filter);
+    const traceId = exactDorisLegacyFilterValue(opts.filter, "traceId");
+    return !query.range && traceId
+      ? getDorisTelemetryRepositories().observations.countForTrace({
+          projectId: opts.projectId,
+          traceId,
+          filters: query.filters,
+          search: opts.searchQuery
+            ? { query: opts.searchQuery, searchType: opts.searchType }
+            : undefined,
+        })
+      : getDorisTelemetryRepositories().observations.count({
+          projectId: opts.projectId,
+          range: query.range,
+          filters: query.filters,
+          search: opts.searchQuery
+            ? { query: opts.searchQuery, searchType: opts.searchType }
+            : undefined,
+        });
+  }
 
-export const getObservationsTableCount = async (opts: ObservationTableQuery) =>
-  getObservationsCountFromEventsTable(opts);
+  const count = await getObservationsTableInternal<{
+    count: string;
+  }>({
+    ...opts,
+    select: "count",
+  });
+
+  return Number(count[0].count);
+};
 
 export const getObservationsTableWithModelData = async (
   opts: ObservationTableQuery,
-): Promise<FullObservations> =>
-  (await getObservationsWithModelDataFromEventsTable(opts)) as FullObservations;
+): Promise<FullObservations> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisLegacyObservationQuery(opts.filter);
+    const traceId = exactDorisLegacyFilterValue(opts.filter, "traceId");
+    const common = {
+      projectId: opts.projectId,
+      filters: query.filters,
+      search: opts.searchQuery
+        ? { query: opts.searchQuery, searchType: opts.searchType }
+        : undefined,
+      orderBy: toDorisLegacyObservationOrderBy(opts.orderBy),
+      offset: opts.offset,
+      limit: opts.limit ?? 999,
+      includeFullContent: Boolean(opts.selectIOAndMetadata),
+    };
+    const page =
+      !query.range && traceId
+        ? await getDorisTelemetryRepositories().observations.listForTrace({
+            ...common,
+            traceId,
+          })
+        : await getDorisTelemetryRepositories().observations.list({
+            ...common,
+            range: query.range,
+          });
+    const modelIds = [
+      ...new Set(
+        page.items.flatMap(({ internalModelId }) =>
+          internalModelId ? [internalModelId] : [],
+        ),
+      ),
+    ];
+    const models =
+      modelIds.length > 0
+        ? await prisma.model.findMany({
+            where: {
+              id: { in: modelIds },
+              OR: [{ projectId: opts.projectId }, { projectId: null }],
+            },
+            include: { Price: true },
+          })
+        : [];
+    const modelsById = new Map(models.map((model) => [model.id, model]));
+    return page.items.map((observation) => ({
+      ...toDorisEventsObservation(observation),
+      traceName: observation.traceName,
+      traceTags: [...observation.tags],
+      traceTimestamp: null,
+      toolDefinitionsCount: observation.toolDefinitionsCount,
+      toolCallsCount: observation.toolCallsCount,
+      ...enrichObservationWithModelData(
+        observation.internalModelId
+          ? modelsById.get(observation.internalModelId)
+          : undefined,
+      ),
+    }));
+  }
 
-async function facet(
+  const observationRecords = await getObservationsTableInternal<
+    Omit<
+      ObservationsTableQueryResult,
+      "trace_tags" | "trace_name" | "trace_user_id"
+    >
+  >({
+    ...opts,
+    select: "rows",
+  });
+
+  const uniqueModels: string[] = Array.from(
+    new Set(
+      observationRecords
+        .map((r) => r.internal_model_id)
+        .filter((r): r is string => Boolean(r)),
+    ),
+  );
+
+  const [models, traces] = await Promise.all([
+    uniqueModels.length > 0
+      ? prisma.model.findMany({
+          where: {
+            id: {
+              in: uniqueModels,
+            },
+            OR: [{ projectId: opts.projectId }, { projectId: null }],
+          },
+          include: {
+            Price: true,
+          },
+        })
+      : [],
+    getTracesByIds(
+      observationRecords
+        .map((o) => o.trace_id)
+        .filter((o): o is string => Boolean(o)),
+      opts.projectId,
+    ),
+  ]);
+
+  return observationRecords.map((o) => {
+    const trace = traces.find((t) => t.id === o.trace_id);
+    const model = models.find((m) => m.id === o.internal_model_id);
+    return {
+      ...convertObservation(o),
+      latency: o.latency ? Number(o.latency) / 1000 : null,
+      timeToFirstToken: o.time_to_first_token
+        ? Number(o.time_to_first_token) / 1000
+        : null,
+      traceName: trace?.name ?? null,
+      traceTags: trace?.tags ?? [],
+      traceTimestamp: trace?.timestamp ?? null,
+      userId: trace?.userId ?? null,
+      // Tool counts for list view (actual data in toolDefinitions/toolCalls from domain)
+      toolDefinitionsCount: o.tool_definitions_count
+        ? Number(o.tool_definitions_count)
+        : null,
+      toolCallsCount: o.tool_calls_count ? Number(o.tool_calls_count) : null,
+      ...enrichObservationWithModelData(model),
+    };
+  });
+};
+
+const getObservationsTableInternal = async <T>(
+  opts: ObservationTableQuery & {
+    select: "count" | "rows";
+  },
+): Promise<Array<T>> => {
+  const select =
+    opts.select === "count"
+      ? "count(*) as count"
+      : `
+        o.id as id,
+        o.type as type,
+        o.project_id as "project_id",
+        o.name as name,
+        o."model_parameters" as model_parameters,
+        o.start_time as "start_time",
+        o.end_time as "end_time",
+        o.trace_id as "trace_id",
+        o.completion_start_time as "completion_start_time",
+        o.provided_usage_details as "provided_usage_details",
+        o.usage_details as "usage_details",
+        o.provided_cost_details as "provided_cost_details",
+        o.cost_details as "cost_details",
+        o.level as level,
+        o.environment as "environment",
+        o.status_message as "status_message",
+        o.version as version,
+        o.parent_observation_id as "parent_observation_id",
+        o.created_at as "created_at",
+        o.updated_at as "updated_at",
+        o.provided_model_name as "provided_model_name",
+        o.total_cost as "total_cost",
+        o.usage_pricing_tier_id as "usage_pricing_tier_id",
+        o.usage_pricing_tier_name as "usage_pricing_tier_name",
+        o.prompt_id as "prompt_id",
+        o.prompt_name as "prompt_name",
+        o.prompt_version as "prompt_version",
+        internal_model_id as "internal_model_id",
+        if(isNull(end_time), NULL, date_diff('millisecond', start_time, end_time)) as latency,
+        if(isNull(completion_start_time), NULL,  date_diff('millisecond', start_time, completion_start_time)) as "time_to_first_token",
+        length(mapKeys(o.tool_definitions)) as "tool_definitions_count",
+        length(o.tool_calls) as "tool_calls_count"`;
+
+  const {
+    projectId,
+    filter,
+    selectIOAndMetadata,
+    limit,
+    offset,
+    orderBy,
+    clickhouseConfigs,
+  } = opts;
+
+  // OTel projects use immutable spans - no need for deduplication
+  const skipDedup = await shouldSkipObservationsFinal(projectId);
+
+  const selectString = selectIOAndMetadata
+    ? `${select}, o.input, o.output, o.metadata`
+    : select;
+
+  const timeFilter = filter.find(
+    (f) =>
+      f.column === "Start Time" && (f.operator === ">=" || f.operator === ">"),
+  );
+
+  const scoresFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "scores",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+    }),
+  ]);
+
+  const hasScoresFilter = filter.some((f) =>
+    f.column.toLowerCase().includes("score"),
+  );
+
+  // query optimisation: joining traces onto observations is expensive. Hence, only join if the UI table contains filters on traces.
+  const traceTableFilter = filter.filter((f) =>
+    observationsTableTraceUiColumnDefinitions.some((c) =>
+      matchesUiColumnMapping(c, f.column),
+    ),
+  );
+
+  const orderByTraces = orderBy
+    ? observationsTableTraceUiColumnDefinitions.some((c) =>
+        matchesUiColumnMapping(c, orderBy.column),
+      )
+    : undefined;
+
+  timeFilter
+    ? scoresFilter.push(
+        new DateTimeFilter({
+          clickhouseTable: "scores",
+          field: "timestamp",
+          operator: ">=",
+          value: timeFilter.value as Date,
+        }),
+      )
+    : undefined;
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedScoresFilter = scoresFilter.apply();
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  const search = clickhouseSearchCondition({
+    query: opts.searchQuery,
+    searchType: opts.searchType,
+    tablePrefix: "o",
+  });
+
+  const scoresCte = `WITH scores_agg AS (
+    SELECT
+      trace_id,
+      observation_id,
+      -- For numeric scores, use tuples of (name, avg_value)
+      groupArrayIf(
+        tuple(name, avg_value),
+        data_type IN ('NUMERIC', 'BOOLEAN')
+      ) AS scores_avg,
+      -- For categorical scores, use name:value format for improved query performance
+      groupArrayIf(
+        concat(name, ':', string_value),
+        data_type = 'CATEGORICAL' AND notEmpty(string_value)
+      ) AS score_categories,
+      ${scoreBooleansAggregation()} AS score_booleans
+    FROM (
+      SELECT
+        trace_id,
+        observation_id,
+        name,
+        avg(value) avg_value,
+        string_value,
+        data_type,
+        comment
+      FROM
+        scores FINAL
+      WHERE ${appliedScoresFilter.query}
+      GROUP BY
+        trace_id,
+        observation_id,
+        name,
+        string_value,
+        data_type,
+        comment
+      ORDER BY
+        trace_id
+      ) tmp
+    GROUP BY
+      trace_id,
+      observation_id
+  )`;
+
+  // if we have default ordering by time, we order by toDate(o.start_time) first and then by
+  // o.start_time. This way, clickhouse is able to read more efficiently directly from disk without ordering
+  const newDefaultOrder =
+    orderBy?.column === "startTime"
+      ? [{ column: "order_by_date", order: orderBy.order }, orderBy]
+      : [orderBy ?? null];
+
+  const chOrderBy = orderByToClickhouseSql(newDefaultOrder, [
+    ...observationsTableUiColumnDefinitions,
+    {
+      uiTableName: "order_by_date",
+      uiTableId: "order_by_date",
+      clickhouseTableName: "observation",
+      clickhouseSelect: "toDate(o.start_time)",
+    },
+  ]);
+
+  // joins with traces are very expensive. We need to filter by time as well.
+  // We assume that a trace has to have been within the last 2 days to be relevant.
+
+  const query = `
+      ${scoresCte}
+      SELECT
+       ${selectString}
+      FROM observations o
+        ${traceTableFilter.length > 0 || orderByTraces || search.query ? "LEFT JOIN __TRACE_TABLE__ t FINAL ON t.id = o.trace_id AND t.project_id = o.project_id" : ""}
+        ${hasScoresFilter ? `LEFT JOIN scores_agg AS s ON s.trace_id = o.trace_id and s.observation_id = o.id` : ""}
+      WHERE ${appliedObservationsFilter.query}
+
+        ${timeFilter && (traceTableFilter.length > 0 || orderByTraces) ? `AND t.timestamp > {tracesTimestampFilter: DateTime64(3)} - ${OBSERVATIONS_TO_TRACE_INTERVAL}` : ""}
+        ${search.query}
+      ${chOrderBy}
+      ${opts.select === "rows" && !skipDedup ? "LIMIT 1 BY o.id, o.project_id" : ""}
+      ${limit !== undefined && offset !== undefined ? `LIMIT ${limit} OFFSET ${offset}` : ""};`;
+
+  return measureAndReturn({
+    operationName: "getObservationsTableInternal",
+    projectId,
+    input: {
+      params: {
+        ...appliedScoresFilter.params,
+        ...appliedObservationsFilter.params,
+        ...(timeFilter
+          ? {
+              tracesTimestampFilter: convertDateToClickhouseDateTime(
+                timeFilter.value as Date,
+              ),
+            }
+          : {}),
+        ...search.params,
+      },
+      tags: { projectId },
+    },
+    fn: async (input) => {
+      return queryClickhouse<T>({
+        query: query.replace("__TRACE_TABLE__", "traces"),
+        params: input.params,
+        tags: input.tags,
+        clickhouseConfigs,
+      });
+    },
+  });
+};
+
+async function getDorisLegacyObservationFacet(
   projectId: string,
   filter: FilterState,
-  column: string,
+  column:
+    | "providedModelName"
+    | "modelId"
+    | "name"
+    | "promptName"
+    | "toolNames"
+    | "calledToolNames",
   additionalFilters: EventsTableFilterState = [],
 ) {
-  const mapped = mapLegacyColumns(filter);
-  const lower = mapped
-    .filter(
-      (item): item is Extract<typeof item, { type: "datetime" }> =>
-        item.type === "datetime" &&
-        item.column === "startTime" &&
-        (item.operator === ">" || item.operator === ">="),
-    )
-    .map(({ value }) => value);
-  const upper = mapped
-    .filter(
-      (item): item is Extract<typeof item, { type: "datetime" }> =>
-        item.type === "datetime" &&
-        item.column === "startTime" &&
-        (item.operator === "<" || item.operator === "<="),
-    )
-    .map(({ value }) => value);
+  const query = buildDorisLegacyObservationQuery(filter);
+  const to = query.range?.to ?? new Date();
+  const range =
+    query.range ??
+    ({
+      from: new Date(0),
+      to,
+    } as const);
   return getDorisTelemetryRepositories().observations.filterOptionValues({
     projectId,
-    range: {
-      from:
-        lower.length > 0
-          ? new Date(Math.max(...lower.map((date) => date.getTime())))
-          : new Date(0),
-      to:
-        upper.length > 0
-          ? new Date(Math.min(...upper.map((date) => date.getTime())))
-          : new Date(),
-    },
-    filters: [...mapped, ...additionalFilters],
+    range,
+    filters: [...query.filters, ...additionalFilters],
     column,
     limit: 1_000,
   });
@@ -251,140 +1165,776 @@ async function facet(
 export const getObservationsGroupedByModel = async (
   projectId: string,
   filter: FilterState,
-) =>
-  (
-    await facet(projectId, filter, "providedModelName", [
-      { type: "string", column: "type", operator: "=", value: "GENERATION" },
-    ])
-  ).map(({ value }) => ({ model: value }));
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "providedModelName",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ model: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  // We mainly use queries like this to retrieve filter options.
+  // Therefore, we can skip final as some inaccuracy in count is acceptable.
+  const query = `
+    SELECT o.provided_model_name as name
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    AND o.type = 'GENERATION'
+    GROUP BY o.provided_model_name
+    ORDER BY count() DESC
+    LIMIT 1000;
+  `;
+
+  const res = await queryClickhouse<{ name: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+  return res.map((r) => ({ model: r.name }));
+};
 
 export const getObservationsGroupedByModelId = async (
   projectId: string,
   filter: FilterState,
-) =>
-  (
-    await facet(projectId, filter, "modelId", [
-      { type: "string", column: "type", operator: "=", value: "GENERATION" },
-    ])
-  ).map(({ value }) => ({ modelId: value }));
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "modelId",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ modelId: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  // We mainly use queries like this to retrieve filter options.
+  // Therefore, we can skip final as some inaccuracy in count is acceptable.
+  const query = `
+    SELECT o.internal_model_id as modelId
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    AND o.type = 'GENERATION'
+    GROUP BY o.internal_model_id
+    ORDER BY count() DESC
+    LIMIT 1000;
+  `;
+
+  const res = await queryClickhouse<{ modelId: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+  return res.map((r) => ({ modelId: r.modelId }));
+};
 
 export const getObservationsGroupedByName = async (
   projectId: string,
   filter: FilterState,
   type: ObservationType | null = "GENERATION",
-) =>
-  (
-    await facet(
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
       projectId,
       filter,
       "name",
       type
         ? [{ type: "string", column: "type", operator: "=", value: type }]
         : [],
-    )
-  ).map(({ value }) => ({ name: value }));
+    );
+    return rows.map(({ value }) => ({ name: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  // We mainly use queries like this to retrieve filter options.
+  // Therefore, we can skip final as some inaccuracy in count is acceptable.
+  const query = `
+    SELECT o.name as name
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    ${type ? `AND o.type = {type: String}` : ""}
+    GROUP BY o.name
+    ORDER BY count() DESC
+    LIMIT 1000;
+  `;
+
+  const res = await queryClickhouse<{ name: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+      ...(type ? { type } : {}),
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+  return res;
+};
 
 export const getObservationsGroupedByToolName = async (
   projectId: string,
   filter: FilterState,
-) =>
-  (await facet(projectId, filter, "toolNames")).map(({ value }) => ({
-    toolName: value,
-  }));
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "toolNames",
+    );
+    return rows.map(({ value }) => ({ toolName: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  const query = `
+    SELECT arrayJoin(mapKeys(o.tool_definitions)) as toolName
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    AND length(mapKeys(o.tool_definitions)) > 0
+    GROUP BY toolName
+    ORDER BY count() DESC
+    LIMIT 1000;
+  `;
+
+  const res = await queryClickhouse<{ toolName: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+  return res;
+};
 
 export const getObservationsGroupedByCalledToolName = async (
   projectId: string,
   filter: FilterState,
-) =>
-  (await facet(projectId, filter, "calledToolNames")).map(({ value }) => ({
-    calledToolName: value,
-  }));
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "calledToolNames",
+    );
+    return rows.map(({ value }) => ({ calledToolName: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  const query = `
+    SELECT arrayJoin(o.tool_call_names) as calledToolName
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    AND length(o.tool_call_names) > 0
+    GROUP BY calledToolName
+    ORDER BY count() DESC
+    LIMIT 1000;
+  `;
+
+  const res = await queryClickhouse<{ calledToolName: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+  return res;
+};
 
 export const getObservationsGroupedByPromptName = async (
   projectId: string,
   filter: FilterState,
-) =>
-  (
-    await facet(projectId, filter, "promptName", [
-      { type: "string", column: "type", operator: "=", value: "GENERATION" },
-    ])
-  ).map(({ value }) => ({ promptName: value }));
+) => {
+  if (isDorisAnalyticsBackend()) {
+    const rows = await getDorisLegacyObservationFacet(
+      projectId,
+      filter,
+      "promptName",
+      [{ type: "string", column: "type", operator: "=", value: "GENERATION" }],
+    );
+    return rows.map(({ value }) => ({ promptName: value }));
+  }
+
+  const observationsFilter = new FilterList([
+    new StringFilter({
+      clickhouseTable: "observations",
+      field: "project_id",
+      operator: "=",
+      value: projectId,
+      tablePrefix: "o",
+    }),
+  ]);
+
+  observationsFilter.push(
+    ...createFilterFromFilterState(
+      filter,
+      observationsTableUiColumnDefinitions,
+      observationsTableCols,
+    ),
+  );
+
+  const appliedObservationsFilter = observationsFilter.apply();
+
+  // We mainly use queries like this to retrieve filter options.
+  // Therefore, we can skip final as some inaccuracy in count is acceptable.
+  const query = `
+    SELECT o.prompt_id as id
+    FROM observations o
+    WHERE ${appliedObservationsFilter.query}
+    AND o.type = 'GENERATION'
+    AND o.prompt_id IS NOT NULL
+    GROUP BY o.prompt_id
+    ORDER BY count() DESC
+    LIMIT 1000;
+    `;
+
+  const res = await queryClickhouse<{ id: string }>({
+    query,
+    params: {
+      ...appliedObservationsFilter.params,
+    },
+    tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
+  });
+
+  const prompts = res.map((r) => r.id).filter((r): r is string => Boolean(r));
+
+  const pgPrompts =
+    prompts.length > 0
+      ? await prisma.prompt.findMany({
+          select: {
+            id: true,
+            name: true,
+          },
+          where: {
+            id: {
+              in: prompts,
+            },
+            projectId,
+          },
+        })
+      : [];
+
+  return pgPrompts.map((p) => ({
+    promptName: p.name,
+  }));
+};
 
 export const getCostForTraces = async (
   projectId: string,
-  _timestamp: Date,
+  timestamp: Date,
   traceIds: string[],
 ) => {
-  const traces = await Promise.all(
-    traceIds.map((traceId) =>
-      getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
-    ),
-  );
-  return traces.reduce((total, trace) => total + (trace?.totalCost ?? 0), 0);
+  if (isDorisAnalyticsBackend()) {
+    const traces = await Promise.all(
+      traceIds.map((traceId) =>
+        getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
+      ),
+    );
+    return traces.reduce((total, trace) => total + (trace?.totalCost ?? 0), 0);
+  }
+
+  // Wrapping the query in a CTE allows us to skip FINAL which allows Clickhouse to use skip indexes.
+  const query = `
+    WITH selected_observations AS (
+      SELECT o.total_cost as total_cost
+      FROM observations o
+      WHERE o.project_id = {projectId: String}
+      AND o.trace_id IN ({traceIds: Array(String)})
+      AND o.start_time >= {timestamp: DateTime64(3)} - ${OBSERVATIONS_TO_TRACE_INTERVAL}
+      ORDER BY o.event_ts DESC
+      LIMIT 1 BY o.id, o.project_id
+    )
+
+    SELECT sum(total_cost) as total_cost
+    FROM selected_observations
+ `;
+
+  const res = await queryClickhouse<{ total_cost: string }>({
+    query,
+    params: {
+      projectId,
+      traceIds,
+      timestamp: convertDateToClickhouseDateTime(timestamp),
+    },
+    tags: { projectId },
+  });
+  return res.length > 0 ? Number(res[0].total_cost) : undefined;
 };
 
-function promptRange(window: { fromTimestamp?: Date; toTimestamp?: Date }) {
-  return {
-    from: window.fromTimestamp ?? new Date(0),
-    to: window.toTimestamp ?? new Date(Date.now() + 1),
-  };
-}
+export const deleteObservationsByTraceIds = async (
+  projectId: string,
+  traceIds: string[],
+) => {
+  const preflight = await queryClickhouse<{
+    min_ts: string;
+    max_ts: string;
+    cnt: string;
+  }>({
+    query: `
+      SELECT
+        min(start_time) - INTERVAL 1 HOUR as min_ts,
+        max(start_time) + INTERVAL 1 HOUR as max_ts,
+        count(*) as cnt
+      FROM observations
+      WHERE project_id = {projectId: String} AND trace_id IN ({traceIds: Array(String)})
+    `,
+    params: { projectId, traceIds },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: { projectId },
+  });
+
+  const count = Number(preflight[0]?.cnt ?? 0);
+  if (count === 0) {
+    logger.info(
+      `deleteObservationsByTraceIds: no rows found for project ${projectId}, skipping DELETE`,
+    );
+    return;
+  }
+
+  await commandClickhouse({
+    query: `
+      DELETE FROM observations
+      WHERE project_id = {projectId: String}
+      AND trace_id IN ({traceIds: Array(String)})
+      AND start_time >= {minTs: String}::DateTime64(3)
+      AND start_time <= {maxTs: String}::DateTime64(3)
+    `,
+    params: {
+      projectId,
+      traceIds,
+      minTs: preflight[0].min_ts,
+      maxTs: preflight[0].max_ts,
+    },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: { projectId },
+  });
+};
+
+export const hasAnyObservation = async (projectId: string) => {
+  const query = `
+    SELECT 1
+    FROM observations
+    WHERE project_id = {projectId: String}
+    LIMIT 1
+  `;
+
+  const rows = await queryClickhouse<{ 1: number }>({
+    query,
+    params: { projectId },
+    tags: { projectId },
+  });
+
+  return rows.length > 0;
+};
+
+export const deleteObservationsByProjectId = async (
+  projectId: string,
+): Promise<boolean> => {
+  const hasData = await hasAnyObservation(projectId);
+  if (!hasData) {
+    return false;
+  }
+
+  const query = `
+    DELETE FROM observations
+    WHERE project_id = {projectId: String};
+  `;
+  const tags = { projectId };
+
+  await commandClickhouse({
+    query,
+    params: { projectId },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags,
+  });
+
+  return true;
+};
+
+export const hasAnyObservationOlderThan = async (
+  projectId: string,
+  beforeDate: Date,
+) => {
+  const query = `
+    SELECT 1
+    FROM observations
+    WHERE project_id = {projectId: String}
+    AND start_time < {cutoffDate: DateTime64(3)}
+    LIMIT 1
+  `;
+
+  const rows = await queryClickhouse<{ 1: number }>({
+    query,
+    params: {
+      projectId,
+      cutoffDate: convertDateToClickhouseDateTime(beforeDate),
+    },
+    tags: { projectId },
+  });
+
+  return rows.length > 0;
+};
+
+export const deleteObservationsOlderThanDays = async (
+  projectId: string,
+  beforeDate: Date,
+): Promise<boolean> => {
+  const hasData = await hasAnyObservationOlderThan(projectId, beforeDate);
+  if (!hasData) {
+    return false;
+  }
+
+  const query = `
+    DELETE FROM observations
+    WHERE project_id = {projectId: String}
+    AND start_time < {cutoffDate: DateTime64(3)};
+  `;
+  await commandClickhouse({
+    query: query,
+    params: {
+      projectId,
+      cutoffDate: convertDateToClickhouseDateTime(beforeDate),
+    },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: { projectId },
+  });
+
+  return true;
+};
 
 export const getObservationsWithPromptName = async (
   projectId: string,
   promptNames: string[],
-  window: { fromTimestamp?: Date; toTimestamp?: Date } = {},
-) =>
-  getDorisTelemetryRepositories().observations.promptNameCounts({
-    projectId,
-    promptNames,
-    range: promptRange(window),
+  {
+    fromTimestamp,
+    toTimestamp,
+  }: { fromTimestamp?: Date; toTimestamp?: Date } = {},
+) => {
+  const query = `
+  SELECT uniq(id) as count, prompt_name
+  FROM observations
+  WHERE project_id = {projectId: String}
+  AND prompt_name IN ({promptNames: Array(String)})
+  AND prompt_name IS NOT NULL
+  ${fromTimestamp ? "AND start_time >= {fromTimestamp: DateTime64(3)}" : ""}
+  ${toTimestamp ? "AND start_time <= {toTimestamp: DateTime64(3)}" : ""}
+  GROUP BY prompt_name
+`;
+  const rows = await queryClickhouse<{ count: string; prompt_name: string }>({
+    query: query,
+    params: {
+      projectId,
+      promptNames,
+      fromTimestamp: fromTimestamp
+        ? convertDateToClickhouseDateTime(fromTimestamp)
+        : undefined,
+      toTimestamp: toTimestamp
+        ? convertDateToClickhouseDateTime(toTimestamp)
+        : undefined,
+    },
+    tags: { projectId },
   });
+
+  return rows.map((r) => ({
+    count: Number(r.count),
+    promptName: r.prompt_name,
+  }));
+};
 
 export const getObservationMetricsForPrompts = async (
   projectId: string,
   promptIds: string[],
-  window: { fromTimestamp?: Date; toTimestamp?: Date } = {},
-) =>
-  getDorisTelemetryRepositories().observations.promptMetrics({
-    projectId,
-    promptIds,
-    range: promptRange(window),
+  {
+    fromTimestamp,
+    toTimestamp,
+  }: { fromTimestamp?: Date; toTimestamp?: Date } = {},
+) => {
+  const query = `
+      WITH latencies AS
+          (
+              SELECT
+                  prompt_id,
+                  prompt_version,
+                  start_time,
+                  end_time,
+                  usage_details,
+                  cost_details,
+                  dateDiff('millisecond', start_time, end_time) AS latency_ms
+              FROM observations
+              FINAL
+              WHERE (type = 'GENERATION')
+              AND (prompt_name IS NOT NULL)
+              AND project_id={projectId: String}
+              AND prompt_id IN ({promptIds: Array(String)})
+              ${fromTimestamp ? "AND start_time >= {fromTimestamp: DateTime64(3)}" : ""}
+              ${toTimestamp ? "AND start_time <= {toTimestamp: DateTime64(3)}" : ""}
+          )
+      SELECT
+          count(*) AS count,
+          prompt_id,
+          prompt_version,
+          min(start_time) AS first_observation,
+          max(start_time) AS last_observation,
+          medianExact(arraySum(mapValues(mapFilter(x -> positionCaseInsensitive(x.1, 'input') > 0, usage_details)))) AS median_input_usage,
+          medianExact(arraySum(mapValues(mapFilter(x -> positionCaseInsensitive(x.1, 'output') > 0, usage_details)))) AS median_output_usage,
+          medianExact(cost_details['total']) AS median_total_cost,
+          medianExact(latency_ms) AS median_latency_ms
+      FROM latencies
+      GROUP BY
+          prompt_id,
+          prompt_version
+      ORDER BY prompt_version DESC
+`;
+  const rows = await queryClickhouse<{
+    count: string;
+    prompt_id: string;
+    prompt_version: number;
+    first_observation: string;
+    last_observation: string;
+    median_input_usage: string;
+    median_output_usage: string;
+    median_total_cost: string;
+    median_latency_ms: string;
+  }>({
+    query: query,
+    params: {
+      projectId,
+      promptIds,
+      ...(fromTimestamp
+        ? { fromTimestamp: convertDateToClickhouseDateTime(fromTimestamp) }
+        : {}),
+      ...(toTimestamp
+        ? { toTimestamp: convertDateToClickhouseDateTime(toTimestamp) }
+        : {}),
+    },
+    tags: { projectId },
   });
+
+  return rows.map((r) => ({
+    count: Number(r.count),
+    promptId: r.prompt_id,
+    promptVersion: r.prompt_version,
+    firstObservation: parseClickhouseUTCDateTimeFormat(r.first_observation),
+    lastObservation: parseClickhouseUTCDateTimeFormat(r.last_observation),
+    medianInputUsage: Number(r.median_input_usage),
+    medianOutputUsage: Number(r.median_output_usage),
+    medianTotalCost: Number(r.median_total_cost),
+    medianLatencyMs: Number(r.median_latency_ms),
+  }));
+};
 
 export const getLatencyAndTotalCostForObservations = async (
   projectId: string,
   observationIds: string[],
   timestamp?: Date,
-) =>
-  getDorisTelemetryRepositories().observations.costAndLatencyByIds({
-    projectId,
-    observationIds,
-    from: timestamp,
+) => {
+  const query = `
+    SELECT
+        id,
+        cost_details['total'] AS total_cost,
+        dateDiff('millisecond', start_time, end_time) AS latency_ms
+    FROM observations FINAL
+    WHERE project_id = {projectId: String}
+    AND id IN ({observationIds: Array(String)})
+    ${timestamp ? `AND start_time >= {timestamp: DateTime64(3)}` : ""}
+`;
+  const rows = await queryClickhouse<{
+    id: string;
+    total_cost: string;
+    latency_ms: string;
+  }>({
+    query: query,
+    params: {
+      projectId,
+      observationIds,
+      ...(timestamp
+        ? { timestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: { projectId },
   });
+
+  return rows.map((r) => ({
+    id: r.id,
+    totalCost: Number(r.total_cost),
+    latency: Number(r.latency_ms) / 1000,
+  }));
+};
 
 export const getLatencyAndTotalCostForObservationsByTraces = async (
   projectId: string,
   traceIds: string[],
+  timestamp?: Date,
 ) => {
-  const traces = await Promise.all(
-    traceIds.map((traceId) =>
-      getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
-    ),
-  );
-  return traces.flatMap((trace, index) =>
-    trace
-      ? [
-          {
-            traceId: traceIds[index]!,
-            totalCost: trace.totalCost ?? 0,
-            latency: trace.latency,
-          },
-        ]
-      : [],
-  );
+  if (isDorisAnalyticsBackend()) {
+    const traces = await Promise.all(
+      traceIds.map((traceId) =>
+        getDorisTelemetryRepositories().traces.get({ projectId, traceId }),
+      ),
+    );
+    return traces.flatMap((trace, index) =>
+      trace
+        ? [
+            {
+              traceId: traceIds[index]!,
+              totalCost: trace.totalCost ?? 0,
+              latency: trace.latency,
+            },
+          ]
+        : [],
+    );
+  }
+
+  const query = `
+    SELECT
+        trace_id,
+        sumMap(cost_details)['total'] AS total_cost,
+        dateDiff('millisecond', min(start_time), max(end_time)) AS latency_ms
+    FROM observations FINAL
+    WHERE project_id = {projectId: String}
+    AND trace_id IN ({traceIds: Array(String)})
+    ${timestamp ? `AND start_time >= {timestamp: DateTime64(3)}` : ""}
+    GROUP BY trace_id
+`;
+  const rows = await queryClickhouse<{
+    trace_id: string;
+    total_cost: string;
+    latency_ms: string;
+  }>({
+    query: query,
+    params: {
+      projectId,
+      traceIds,
+      ...(timestamp
+        ? { timestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: { projectId },
+  });
+
+  return rows.map((r) => ({
+    traceId: r.trace_id,
+    totalCost: Number(r.total_cost),
+    latency: Number(r.latency_ms) / 1000,
+  }));
 };
 
+/**
+ * Tuple type for observation data from ClickHouse groupArray
+ */
 export type ObservationTuple = [
   id: string,
   parentObservationId: string | null,
@@ -394,165 +1944,666 @@ export type ObservationTuple = [
   latencyMs: number,
 ];
 
+/**
+ * Get observations grouped by trace ID with cost and latency data
+ *
+ * This is a pure data-fetching function that returns observations organized by trace.
+ * For business logic like recursive cost calculations, use the utility functions
+ * in the utils layer.
+ */
 export const getObservationsGroupedByTraceId = async (
   projectId: string,
   traceIds: string[],
   timestamp?: Date,
 ): Promise<Map<string, ObservationTuple[]>> => {
-  const grouped = await Promise.all(
-    traceIds.map(async (traceId) => {
-      const observations: DorisObservation[] = [];
-      let cursor: string | undefined;
-      do {
-        const page =
-          await getDorisTelemetryRepositories().observations.listForTrace({
-            projectId,
-            traceId,
-            filters: timestamp
-              ? [
-                  {
-                    type: "datetime",
-                    column: "startTime",
-                    operator: ">=",
-                    value: timestamp,
-                  },
-                ]
-              : [],
-            cursor,
-            limit: 999,
-          });
-        observations.push(...page.items);
-        cursor = page.nextCursor ?? undefined;
-      } while (cursor);
-      return [
-        traceId,
-        observations.map(
-          (observation): ObservationTuple => [
-            observation.id,
-            observation.parentObservationId,
-            String(observation.costDetails.total ?? 0),
-            String(observation.costDetails.input ?? 0),
-            String(observation.costDetails.output ?? 0),
-            (observation.latency ?? 0) * 1_000,
-          ],
-        ),
-      ] as const;
-    }),
-  );
-  return new Map(grouped);
+  if (traceIds.length === 0) return new Map();
+
+  if (isDorisAnalyticsBackend()) {
+    const grouped = await Promise.all(
+      traceIds.map(async (traceId) => {
+        const observations: DorisObservation[] = [];
+        let cursor: string | undefined;
+        do {
+          const page =
+            await getDorisTelemetryRepositories().observations.listForTrace({
+              projectId,
+              traceId,
+              filters: timestamp
+                ? [
+                    {
+                      type: "datetime",
+                      column: "startTime",
+                      operator: ">=",
+                      value: timestamp,
+                    },
+                  ]
+                : [],
+              cursor,
+              limit: 999,
+            });
+          observations.push(...page.items);
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor);
+        return [
+          traceId,
+          observations.map(
+            (observation): ObservationTuple => [
+              observation.id,
+              observation.parentObservationId,
+              String(observation.costDetails.total ?? 0),
+              String(observation.costDetails.input ?? 0),
+              String(observation.costDetails.output ?? 0),
+              observation.latency === null ? 0 : observation.latency * 1_000,
+            ],
+          ),
+        ] as const;
+      }),
+    );
+    return new Map(grouped);
+  }
+
+  const query = `
+    SELECT
+        trace_id,
+        groupArray((
+          id,
+          parent_observation_id,
+          cost_details['total'],
+          cost_details['input'],
+          cost_details['output'],
+          dateDiff('millisecond', start_time, end_time)
+        )) AS observations
+    FROM observations FINAL
+    WHERE project_id = {projectId: String}
+    AND trace_id IN ({traceIds: Array(String)})
+    ${timestamp ? `AND start_time >= {timestamp: DateTime64(3)}` : ""}
+    GROUP BY trace_id
+  `;
+
+  const groupedObservations = await queryClickhouse<{
+    trace_id: string;
+    observations: ObservationTuple[];
+  }>({
+    query,
+    params: {
+      projectId,
+      traceIds,
+      ...(timestamp
+        ? { timestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: { projectId },
+  });
+
+  return new Map(groupedObservations.map((g) => [g.trace_id, g.observations]));
+};
+
+export const getObservationCountsByProjectInCreationInterval = async ({
+  start,
+  end,
+}: {
+  start: Date;
+  end: Date;
+}) => {
+  const query = `
+    SELECT
+      project_id,
+      count(*) as count
+    FROM observations
+    WHERE created_at >= {start: DateTime64(3)}
+    AND created_at < {end: DateTime64(3)}
+    GROUP BY project_id
+  `;
+
+  const rows = await queryClickhouse<{ project_id: string; count: string }>({
+    query,
+    params: {
+      start: convertDateToClickhouseDateTime(start),
+      end: convertDateToClickhouseDateTime(end),
+    },
+    clickhouseConfigs: {
+      request_timeout: 300000, // 5 minutes timeout
+    },
+  });
+
+  return rows.map((row) => ({
+    projectId: row.project_id,
+    count: Number(row.count),
+  }));
+};
+
+export const getObservationCountOfProjectsSinceCreationDate = async ({
+  projectIds,
+  start,
+}: {
+  projectIds: string[];
+  start: Date;
+}) => {
+  const query = `
+    SELECT
+      count(*) as count
+    FROM observations
+    WHERE project_id IN ({projectIds: Array(String)})
+    AND created_at >= {start: DateTime64(3)}
+  `;
+
+  const rows = await queryClickhouse<{ count: string }>({
+    query,
+    params: {
+      projectIds,
+      start: convertDateToClickhouseDateTime(start),
+    },
+  });
+
+  return Number(rows[0]?.count ?? 0);
 };
 
 export const getTraceIdsForObservations = async (
   projectId: string,
   observationIds: string[],
 ) => {
-  const observations = await Promise.all(
-    observationIds.map((observationId) =>
-      getDorisTelemetryRepositories().observations.get({
-        projectId,
-        observationId,
-      }),
+  if (isDorisAnalyticsBackend()) {
+    const observations = await Promise.all(
+      observationIds.map((observationId) =>
+        getDorisTelemetryRepositories().observations.get({
+          projectId,
+          observationId,
+        }),
+      ),
+    );
+    return observations.flatMap((observation) =>
+      observation ? [{ id: observation.id, traceId: observation.traceId }] : [],
+    );
+  }
+
+  const query = `
+    SELECT
+      trace_id,
+      id
+    FROM observations
+    WHERE project_id = {projectId: String}
+    AND id IN ({observationIds: Array(String)})
+  `;
+
+  const rows = await queryClickhouse<{ id: string; trace_id: string }>({
+    query,
+    params: {
+      projectId,
+      observationIds,
+    },
+    tags: { projectId },
+  });
+
+  return rows.map((row) => ({
+    id: row.id,
+    traceId: row.trace_id,
+  }));
+};
+
+// SQL expressions for the export fields of LEGACY_OBSERVATION_EXPORT_FIELDS
+// (the domain-level export contract) that are not plain column reads. Every
+// other field selects the table column of the same name.
+const LEGACY_OBSERVATION_EXPORT_SQL_OVERRIDES: Record<string, string> = {
+  latency:
+    "if(isNull(end_time), NULL, date_diff('millisecond', start_time, end_time) / 1000) as latency",
+  time_to_first_token:
+    "if(isNull(completion_start_time), NULL, date_diff('millisecond', start_time, completion_start_time) / 1000) as time_to_first_token",
+  model_id: "internal_model_id as model_id",
+};
+
+// Shared SQL+params builder for the observations blob-export. Both the parsed
+// stream (standard path) and the raw-passthrough path (LFE-10402) run the
+// SAME query, so the output is parsed-equal by construction. Note latency is
+// already converted to seconds in the SELECT (no JS conversion needed), so this
+// query is identical for both paths.
+const buildObservationsForBlobStorageExportQuery = (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+  fieldGroups: ObservationFieldGroupFull[],
+) => {
+  // core is always required (provides id, trace_id, start/end_time used for deduplication)
+  const effectiveGroups = new Set<ObservationFieldGroupFull>([
+    "core",
+    ...fieldGroups,
+  ]);
+
+  const selectedColumns = LEGACY_OBSERVATION_EXPORT_FIELDS.filter((column) =>
+    effectiveGroups.has(column.group),
+  ).map(
+    (column) =>
+      LEGACY_OBSERVATION_EXPORT_SQL_OVERRIDES[column.field] ?? column.field,
+  );
+
+  const query = `
+    SELECT
+      ${selectedColumns.join(",\n      ")}
+    FROM observations
+    WHERE project_id = {projectId: String}
+    AND start_time >= {minTimestamp: DateTime64(3)}
+    AND start_time <= {maxTimestamp: DateTime64(3)}
+    ORDER BY event_ts DESC
+    LIMIT 1 BY id, project_id, type
+  `;
+
+  return {
+    query,
+    params: {
+      projectId,
+      minTimestamp: convertDateToClickhouseDateTime(minTimestamp),
+      maxTimestamp: convertDateToClickhouseDateTime(maxTimestamp),
+    },
+    // Tagged explicitly: worker baggage isn't active during the deferred stream send.
+    tags: { projectId, surface: "worker", route: "blob_export" },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
+    },
+    preferredClickhouseService: "ReadOnly" as const,
+  };
+};
+
+export const getObservationsForBlobStorageExport = function (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+  fieldGroups: ObservationFieldGroupFull[] = [...OBSERVATION_FIELD_GROUPS_FULL],
+) {
+  return queryClickhouseStream<Record<string, unknown>>(
+    buildObservationsForBlobStorageExportQuery(
+      projectId,
+      minTimestamp,
+      maxTimestamp,
+      fieldGroups,
     ),
   );
-  return observations.flatMap((observation) =>
-    observation ? [{ id: observation.id, traceId: observation.traceId }] : [],
+};
+
+// Raw-passthrough variant (LFE-10402): yields each row's unparsed JSONEachRow
+// text, skipping the per-row parse/enrich/serialize cycle. Price columns are
+// NOT added here — that enrichment is dropped on this path.
+export const getObservationsForBlobStorageExportRaw = function (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+  fieldGroups: ObservationFieldGroupFull[] = [...OBSERVATION_FIELD_GROUPS_FULL],
+) {
+  return queryClickhouseStreamRawText(
+    buildObservationsForBlobStorageExportQuery(
+      projectId,
+      minTimestamp,
+      maxTimestamp,
+      fieldGroups,
+    ),
   );
 };
 
-export const hasAnyObservation = async (projectId: string): Promise<boolean> =>
-  (await getDorisTelemetryRepositories().observations.count({
-    projectId,
-    range: { from: new Date(0), to: new Date() },
-    filters: [],
-  })) > 0;
+// LFE-10463: FORMAT Parquet export — reuses the field-group-aware builder and
+// streams raw binary bytes to upload. Like raw passthrough, no JS enrichment, so
+// price columns are NOT added.
+export const getObservationsForBlobStorageExportParquet = function (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+  fieldGroups: ObservationFieldGroupFull[] = [...OBSERVATION_FIELD_GROUPS_FULL],
+) {
+  return queryClickhouseExecRaw({
+    ...buildObservationsForBlobStorageExportQuery(
+      projectId,
+      minTimestamp,
+      maxTimestamp,
+      fieldGroups,
+    ),
+    format: "Parquet",
+    clickhouseSettings: BLOB_EXPORT_PARQUET_CLICKHOUSE_SETTINGS,
+  });
+};
 
-export const getObservationCountsByProjectInCreationInterval = async (input: {
-  start: Date;
-  end: Date;
-}) => [
-  ...(await getDorisTelemetryRepositories().observations.countByProjectCreatedAt(
-    input,
-  )),
-];
-export const getObservationCountOfProjectsSinceCreationDate = (input: {
-  projectIds: string[];
-  start: Date;
-}) => getDorisTelemetryRepositories().observations.countProjectsSince(input);
-export const getObservationCountsByProjectAndDay = async (input: {
+export const getGenerationsForAnalyticsIntegrations = async function* (
+  projectId: string,
+  projectName: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+  options: { useGraceHash?: boolean } = {},
+) {
+  // Pre-filter traces in a CTE so the trace timestamp window prunes partitions
+  // directly, instead of living alongside the LEFT JOIN where the planner
+  // cannot push it down. LEFT JOIN keeps generations whose trace is missing or
+  // outside the 7-day window — they still ship to PostHog with NULL trace
+  // fields rather than being silently dropped.
+  const query = `
+    WITH selected_traces AS (
+      SELECT
+        t.project_id as project_id,
+        t.id as id,
+        t.name as name,
+        t.session_id as session_id,
+        t.user_id as user_id,
+        t.release as release,
+        t.tags as tags,
+        t.metadata['$posthog_session_id'] as posthog_session_id,
+        t.metadata['$mixpanel_session_id'] as mixpanel_session_id
+      FROM traces t FINAL
+      WHERE t.project_id = {projectId: String}
+      AND t.timestamp >= {minTimestamp: DateTime64(3)} - ${OBSERVATIONS_TO_TRACE_INTERVAL}
+      AND t.timestamp <= {maxTimestamp: DateTime64(3)} + ${TRACE_TO_OBSERVATIONS_INTERVAL}
+    )
+
+    SELECT
+      o.name as name,
+      o.start_time as start_time,
+      o.id as id,
+      o.total_cost as total_cost,
+      if(isNull(completion_start_time), NULL, date_diff('millisecond', start_time, completion_start_time)) as time_to_first_token,
+      o.usage_details['total'] as input_tokens,
+      o.usage_details['output'] as output_tokens,
+      o.cost_details['total'] as total_tokens,
+      o.project_id as project_id,
+      if(isNull(end_time), NULL, date_diff('millisecond', start_time, end_time) / 1000) as latency,
+      o.provided_model_name as model,
+      o.level as level,
+      o.version as version,
+      o.environment as environment,
+      t.id as trace_id,
+      t.name as trace_name,
+      t.session_id as trace_session_id,
+      t.user_id as trace_user_id,
+      t.release as trace_release,
+      t.tags as trace_tags,
+      t.posthog_session_id as posthog_session_id,
+      t.mixpanel_session_id as mixpanel_session_id
+    FROM observations o FINAL
+    LEFT JOIN selected_traces t ON o.trace_id = t.id AND o.project_id = t.project_id
+    WHERE o.project_id = {projectId: String}
+    AND o.start_time >= {minTimestamp: DateTime64(3)}
+    AND o.start_time < {maxTimestamp: DateTime64(3)}
+    AND o.type = 'GENERATION'
+  `;
+
+  const records = queryClickhouseStream<Record<string, unknown>>({
+    query,
+    params: {
+      projectId,
+      minTimestamp: convertDateToClickhouseDateTime(minTimestamp),
+      maxTimestamp: convertDateToClickhouseDateTime(maxTimestamp),
+    },
+    tags: { projectId },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
+      ...(options.useGraceHash
+        ? {
+            clickhouse_settings: {
+              join_algorithm: "grace_hash",
+              grace_hash_join_initial_buckets: "32",
+            },
+          }
+        : {}),
+    },
+  });
+
+  const baseUrl = env.NEXTAUTH_URL?.replace("/api/auth", "");
+  for await (const record of records) {
+    yield {
+      timestamp: record.start_time,
+      langfuse_generation_name: record.name,
+      langfuse_trace_name: record.trace_name,
+      langfuse_trace_id: record.trace_id,
+      langfuse_url: `${baseUrl}/project/${projectId}/traces/${encodeURIComponent(record.trace_id as string)}?observation=${encodeURIComponent(record.id as string)}`,
+      langfuse_user_url: record.trace_user_id
+        ? `${baseUrl}/project/${projectId}/users/${encodeURIComponent(record.trace_user_id as string)}`
+        : undefined,
+      langfuse_id: record.id,
+      langfuse_cost_usd: record.total_cost,
+      langfuse_input_units: record.input_tokens,
+      langfuse_output_units: record.output_tokens,
+      langfuse_total_units: record.total_tokens,
+      langfuse_session_id: record.trace_session_id,
+      langfuse_project_id: projectId,
+      langfuse_project_name: projectName,
+      langfuse_user_id: record.trace_user_id || null,
+      langfuse_latency: record.latency,
+      langfuse_time_to_first_token: record.time_to_first_token,
+      langfuse_release: record.trace_release,
+      langfuse_version: record.version,
+      langfuse_model: record.model,
+      langfuse_level: record.level,
+      langfuse_tags: record.trace_tags,
+      langfuse_environment: record.environment,
+      langfuse_event_version: "1.0.0",
+      posthog_session_id: record.posthog_session_id ?? null,
+      mixpanel_session_id: record.mixpanel_session_id ?? null,
+    } satisfies AnalyticsGenerationEvent;
+  }
+};
+
+/**
+ * Get observation counts grouped by project and day within a date range.
+ *
+ * Returns one row per project per day with the count of observations started on that day.
+ * Uses half-open interval [startDate, endDate) for filtering based on start_time.
+ *
+ * @param startDate - Start of date range (inclusive)
+ * @param endDate - End of date range (exclusive)
+ * @returns Array of { count, projectId, date } objects
+ *
+ * @example
+ * // Get observation counts for March 1-2, 2024
+ * const counts = await getObservationCountsByProjectAndDay({
+ *   startDate: new Date('2024-03-01T00:00:00Z'),
+ *   endDate: new Date('2024-03-03T00:00:00Z')
+ * });
+ *
+ * Note: Skips using FINAL (double counting risk) for faster and cheaper
+ * queries against clickhouse. Generous 4x overcompensation before blocking allows
+ * for usage aggregation to be meaningful.
+ */
+export const getObservationCountsByProjectAndDay = async ({
+  startDate,
+  endDate,
+}: {
   startDate: Date;
   endDate: Date;
-}) => [
-  ...(await getDorisTelemetryRepositories().observations.countByProjectAndDay({
-    start: input.startDate,
-    end: input.endDate,
-  })),
-];
+}) => {
+  const query = `
+    SELECT
+      count(*) as count,
+      project_id,
+      toDate(start_time) as date
+    FROM observations
+    WHERE start_time >= {startDate: DateTime64(3)}
+    AND start_time < {endDate: DateTime64(3)}
+    GROUP BY project_id, toDate(start_time)
+  `;
 
+  const rows = await queryClickhouse<{
+    count: string;
+    project_id: string;
+    date: string;
+  }>({
+    query,
+    params: {
+      startDate: convertDateToClickhouseDateTime(startDate),
+      endDate: convertDateToClickhouseDateTime(endDate),
+    },
+    clickhouseConfigs: { request_timeout: 120_000 },
+  });
+
+  return rows.map((row) => ({
+    count: Number(row.count),
+    projectId: row.project_id,
+    date: row.date,
+  }));
+};
+
+/**
+ * Get total cost grouped by evaluator ID (job_configuration_id) for the last week.
+ *
+ * @param projectId - Project ID
+ * @param evaluatorIds - Array of evaluator IDs (job_configuration_id from metadata)
+ * @returns Array of { evaluatorId, totalCost } objects
+ */
 export const getCostByEvaluatorIds = async (
-  _projectId: string,
-  _evaluatorIds: string[],
+  projectId: string,
+  evaluatorIds: string[],
 ): Promise<Array<{ evaluatorId: string; totalCost: number }>> => {
-  throw new InvalidRequestError(
-    "Evaluator analytics are unavailable in Doris R1A",
-  );
+  if (evaluatorIds.length === 0) return [];
+
+  const query = `
+    SELECT
+      metadata['job_configuration_id'] as evaluator_id,
+      sum(total_cost) as total_cost
+    FROM observations FINAL
+    WHERE project_id = {projectId: String}
+      AND metadata['job_configuration_id'] IN ({evaluatorIds: Array(String)})
+      AND type = 'GENERATION'
+      AND start_time > today() - 7
+    GROUP BY metadata['job_configuration_id']
+  `;
+
+  const rows = await queryClickhouse<{
+    evaluator_id: string;
+    total_cost: string;
+  }>({
+    query,
+    params: {
+      projectId,
+      evaluatorIds,
+    },
+    tags: { projectId },
+  });
+
+  return rows.map((row) => ({
+    evaluatorId: row.evaluator_id,
+    totalCost: Number(row.total_cost),
+  }));
 };
 
-export const generateObservationsForPublicApi = async (params: {
+// ─── Public-API observation query helpers ─────────────────────────────────────
+
+export const generateObservationsForPublicApi = async ({
+  projectId,
+  filter,
+  pagination,
+}: {
   projectId: string;
-  filter: EventsTableFilterState;
+  filter: FilterList;
   pagination: { limit: number; page: number };
-}) =>
-  getObservationsFromEventsTableForPublicApi({
-    projectId: params.projectId,
-    page: params.pagination.page,
-    limit: params.pagination.limit,
-    advancedFilters: params.filter,
-  });
+}) => {
+  const appliedFilter = filter.apply();
+  const traceFilter = filter.find((f) => f.clickhouseTable === "traces");
 
-export const getObservationsCountForPublicApi = async (params: {
+  const disableObservationsFinal = await shouldSkipObservationsFinal(projectId);
+
+  const query = `
+    with clickhouse_keys as (
+      SELECT DISTINCT
+        id,
+        trace_id,
+        project_id,
+        type,
+        toDate(start_time)
+      FROM observations o
+        ${traceFilter ? `LEFT JOIN __TRACE_TABLE__ t ON o.trace_id = t.id AND t.project_id = o.project_id` : ""}
+      WHERE o.project_id = {projectId: String}
+        ${traceFilter ? `AND t.project_id = {projectId: String}` : ""}
+        AND ${appliedFilter.query}
+      ORDER BY start_time DESC
+        LIMIT {limit: Int32} OFFSET {offset: Int32}
+    )
+    SELECT
+      id,
+      trace_id,
+      project_id,
+      type,
+      parent_observation_id,
+      environment,
+      start_time,
+      end_time,
+      name,
+      metadata,
+      level,
+      status_message,
+      version,
+      input,
+      output,
+      provided_model_name,
+      internal_model_id,
+      model_parameters,
+      provided_usage_details,
+      usage_details,
+      provided_cost_details,
+      cost_details,
+      total_cost,
+      completion_start_time,
+      prompt_id,
+      prompt_name,
+      prompt_version,
+      created_at,
+      updated_at,
+      event_ts
+    FROM observations o ${disableObservationsFinal ? "" : "FINAL"}
+    WHERE o.project_id = {projectId: String}
+      AND (id, trace_id, project_id, type, toDate(start_time)) in (select * from clickhouse_keys)
+    ORDER BY start_time DESC
+  `;
+
+  return measureAndReturn({
+    operationName: "generateObservationsForPublicApi",
+    projectId,
+    input: {
+      params: {
+        ...appliedFilter.params,
+        projectId,
+        limit: pagination.limit,
+        offset: (pagination.page - 1) * pagination.limit,
+      },
+      tags: { projectId },
+    },
+    fn: async (input) => {
+      const result = await queryClickhouse<ObservationRecordReadType>({
+        query: query.replace("__TRACE_TABLE__", "traces"),
+        params: input.params,
+        tags: input.tags,
+        preferredClickhouseService: "ReadOnly",
+      });
+      return result.map((r) => convertObservation(r));
+    },
+  });
+};
+
+export const getObservationsCountForPublicApi = async ({
+  projectId,
+  filter,
+}: {
   projectId: string;
-  filter: EventsTableFilterState;
-}) =>
-  getObservationsCountFromEventsTableForPublicApi({
-    projectId: params.projectId,
-    page: 1,
-    limit: 1,
-    advancedFilters: params.filter,
+  filter: FilterList;
+}) => {
+  const appliedFilter = filter.apply();
+  const traceFilter = filter.find((f) => f.clickhouseTable === "traces");
+
+  const query = `
+    SELECT count() as count
+    FROM observations o
+    ${traceFilter ? `LEFT JOIN __TRACE_TABLE__ t ON o.trace_id = t.id AND t.project_id = o.project_id` : ""}
+    WHERE o.project_id = {projectId: String}
+    ${traceFilter ? `AND t.project_id = {projectId: String}` : ""}
+    AND ${appliedFilter.query}
+  `;
+
+  return measureAndReturn({
+    operationName: "getObservationsCountForPublicApi",
+    projectId,
+    input: {
+      params: { ...appliedFilter.params, projectId },
+      tags: { projectId },
+    },
+    fn: async (input) => {
+      const records = await queryClickhouse<{ count: string }>({
+        query: query.replace("__TRACE_TABLE__", "traces"),
+        params: input.params,
+        tags: input.tags,
+        preferredClickhouseService: "ReadOnly",
+      });
+      return records.map((record) => Number(record.count)).shift();
+    },
   });
-
-export async function* getGenerationsForAnalyticsIntegrations(
-  ..._args: unknown[]
-): AsyncGenerator<never> {
-  yield* [] as never[];
-  throw new InvalidRequestError(
-    "Analytics integrations are unavailable in Doris R1A",
-  );
-}
-
-export function getObservationsForBlobStorageExport(
-  ..._args: unknown[]
-): never {
-  throw new InvalidRequestError("Batch exports are unavailable in Doris R1A");
-}
-
-export const getObservationsForBlobStorageExportRaw =
-  getObservationsForBlobStorageExport;
-export const getObservationsForBlobStorageExportParquet =
-  getObservationsForBlobStorageExport;
-
-export const deleteObservationsByTraceIds = async (..._args: unknown[]) => {
-  throw new InvalidRequestError(
-    "Direct observation deletion is replaced by Doris materialized deletion",
-  );
 };
-export const deleteObservationsByProjectId = deleteObservationsByTraceIds;
-export const hasAnyObservationOlderThan = async () => false;
-export const deleteObservationsOlderThanDays = deleteObservationsByTraceIds;
-
-export const upsertObservation = async () => {
-  throw new InvalidRequestError(
-    "Legacy observation writes are unavailable in Doris R1A",
-  );
-};
-
-export type LegacyPublicApiObservationsQuery = PublicApiObservationsQuery;

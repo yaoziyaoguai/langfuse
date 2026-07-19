@@ -11,6 +11,7 @@ import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { TRPCError } from "@trpc/server";
 import { validateCommentReferenceObject } from "@/src/features/comments/validateCommentReferenceObject";
 import {
+  getTracesIdentifierForSession,
   getTracesIdentifierForSessionFromEvents,
   logger,
   NotificationQueue,
@@ -312,10 +313,13 @@ export const commentsRouter = createTRPCRouter({
         scope: "comments:read",
       });
 
-      const analyticsTraces = await getTracesIdentifierForSessionFromEvents(
-        input.projectId,
-        input.sessionId,
-      );
+      const clickhouseTraces = ctx.session.user?.v4BetaEnabled
+        ? await getTracesIdentifierForSessionFromEvents(
+            input.projectId,
+            input.sessionId,
+          )
+        : // eslint-disable-next-line @typescript-eslint/no-deprecated
+          await getTracesIdentifierForSession(input.projectId, input.sessionId);
 
       const allTraceCommentCounts = await ctx.prisma.$queryRaw<
         Array<{ objectId: string; count: bigint }>
@@ -327,7 +331,7 @@ export const commentsRouter = createTRPCRouter({
           GROUP BY object_id
         `;
 
-      const traceIds = new Set(analyticsTraces.map((t) => t.id));
+      const traceIds = new Set(clickhouseTraces.map((t) => t.id));
       return new Map(
         allTraceCommentCounts
           .filter((c) => traceIds.has(c.objectId))
@@ -348,12 +352,15 @@ export const commentsRouter = createTRPCRouter({
         scope: "comments:read",
       });
 
-      const analyticsTraces = await getTracesIdentifierForSessionFromEvents(
-        input.projectId,
-        input.sessionId,
-      );
+      const clickhouseTraces = ctx.session.user?.v4BetaEnabled
+        ? await getTracesIdentifierForSessionFromEvents(
+            input.projectId,
+            input.sessionId,
+          )
+        : // eslint-disable-next-line @typescript-eslint/no-deprecated
+          await getTracesIdentifierForSession(input.projectId, input.sessionId);
 
-      const traceIds = analyticsTraces.map((t) => t.id);
+      const traceIds = clickhouseTraces.map((t) => t.id);
 
       if (traceIds.length === 0) {
         return {};

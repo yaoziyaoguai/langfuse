@@ -15,6 +15,7 @@ export default withMiddlewares({
     querySchema: GetMetricsDailyV1Query,
     responseSchema: GetMetricsDailyV1Response,
     rateLimitResource: "public-api-daily-metrics-legacy",
+    rejectInEventsOnlyMode: false,
     fn: async ({ query, auth }) => {
       const filterProps = {
         projectId: auth.scope.projectId,

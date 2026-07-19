@@ -35,27 +35,27 @@ export default async function handler(
       });
     }
 
-    const client = DorisClientManager.getInstance().getClient(
-      parseDorisQueryConfig(
-        process.env,
-        resolveDorisNodeEnv(env.NODE_ENV, env.DORIS_LOCAL_DEV_MODE),
-      ),
-    );
-    const analytics = await checkAnalyticsReadiness({
-      executor: client,
-      controlState: new PrismaAnalyticsCompatibilityControlState(prisma),
-      supportedCanonicalizerVersions: SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
-      supportedSchemaVersions: SUPPORTED_DORIS_SCHEMA_VERSIONS,
-    });
-    if (!analytics.ready) {
-      logger.warn("Analytics readiness check failed", {
-        code: analytics.code,
-        schemaVersion: analytics.schemaVersion,
+    if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+      const client = DorisClientManager.getInstance().getClient(
+        parseDorisQueryConfig(
+          process.env,
+          resolveDorisNodeEnv(env.NODE_ENV, env.DORIS_LOCAL_DEV_MODE),
+        ),
+      );
+      const analytics = await checkAnalyticsReadiness({
+        executor: client,
+        controlState: new PrismaAnalyticsCompatibilityControlState(prisma),
+        supportedCanonicalizerVersions: SUPPORTED_DORIS_CANONICALIZER_VERSIONS,
+        supportedSchemaVersions: SUPPORTED_DORIS_SCHEMA_VERSIONS,
       });
-      return res.status(503).json({
-        status: "Analytics readiness check failed",
-        version: VERSION.replace("v", ""),
-      });
+      if (!analytics.ready) {
+        return res.status(503).json({
+          status: "Analytics readiness check failed",
+          analytics: analytics.code,
+          schemaVersion: analytics.schemaVersion,
+          version: VERSION.replace("v", ""),
+        });
+      }
     }
   } catch (e) {
     traceException(e);

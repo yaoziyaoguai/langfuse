@@ -1,5 +1,5 @@
 // Standard analytics event types for analytics integrations (PostHog, Mixpanel, etc.)
-// These represent the raw data structure from Doris queries
+// These represent the raw data structure from ClickHouse queries
 
 export type AnalyticsTraceEvent = {
   langfuse_id: unknown;

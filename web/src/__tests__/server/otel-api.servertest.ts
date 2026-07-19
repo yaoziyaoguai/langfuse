@@ -1,8 +1,8 @@
 import { makeAPICall } from "@/src/__tests__/test-utils";
 import waitForExpect from "wait-for-expect";
 import {
+  clickhouseClient,
   createBasicAuthHeader,
-  getDorisQueryExecutor,
   getObservationById,
   getObservationByIdFromEventsTable,
   getS3EventStorageClient,
@@ -10,10 +10,13 @@ import {
 } from "@langfuse/shared/src/server";
 import { env as sharedEnv } from "@langfuse/shared/src/env";
 import { randomBytes } from "crypto";
+import { env } from "@/src/env.mjs";
 import { $root } from "@/src/pages/api/public/otel/otlp-proto/generated/root";
 
 const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
-const maybeEventsTable = it;
+const eventsTableAvailable =
+  env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+const maybeEventsTable = eventsTableAvailable ? it : it.skip;
 
 type IngestionAttributionRow = {
   ingestion_api_key: string;
@@ -21,21 +24,30 @@ type IngestionAttributionRow = {
   ingestion_sdk_version: string;
 };
 
-const getEventsAttribution = async (spanId: string) => {
-  const rows = await getDorisQueryExecutor().query<IngestionAttributionRow>(
-    `
+const getEventsAttribution = async (
+  table: "events_full" | "events_core",
+  spanId: string,
+) => {
+  const result = await clickhouseClient().query({
+    query: `
       SELECT
         ingestion_api_key,
         ingestion_sdk_name,
         ingestion_sdk_version
-      FROM events_current
-      WHERE project_id = ?
-        AND span_id = ?
-      ORDER BY version_token DESC
+      FROM ${table}
+      WHERE project_id = {projectId: String}
+        AND span_id = {spanId: String}
+      ORDER BY event_ts DESC
       LIMIT 1
     `,
-    [projectId, spanId],
-  );
+    query_params: {
+      projectId,
+      spanId,
+    },
+    format: "JSONEachRow",
+  });
+
+  const rows = await result.json<IngestionAttributionRow>();
   return rows[0];
 };
 
@@ -438,9 +450,12 @@ describe("/api/public/otel/v1/traces API Endpoint", () => {
           ingestion_sdk_version: "4.0.0",
         };
 
-        expect(await getEventsAttribution(spanId.toString("hex"))).toEqual(
-          expectedAttribution,
-        );
+        expect(
+          await Promise.all([
+            getEventsAttribution("events_full", spanId.toString("hex")),
+            getEventsAttribution("events_core", spanId.toString("hex")),
+          ]),
+        ).toEqual([expectedAttribution, expectedAttribution]);
       }, 25_000);
     },
     30_000,

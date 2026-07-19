@@ -20,7 +20,7 @@ const context: ServerContext = {
 describe("MCP tool registry community capability gates", () => {
   it("keeps deferred tools discoverable but blocks their handlers", async () => {
     const handler = vi.fn().mockResolvedValue({ executed: true });
-    const registry = new ToolRegistry();
+    const registry = new ToolRegistry("doris");
     registry.register({
       name: "evals",
       description: "Deferred evaluator tools",
@@ -51,7 +51,7 @@ describe("MCP tool registry community capability gates", () => {
   it("blocks R1B dataset-run tools without hiding R1A dataset tools", async () => {
     const runHandler = vi.fn().mockResolvedValue({ executed: true });
     const itemHandler = vi.fn().mockResolvedValue({ executed: true });
-    const registry = new ToolRegistry();
+    const registry = new ToolRegistry("doris");
     registry.register({
       name: "datasets",
       description: "Dataset tools",
@@ -88,5 +88,30 @@ describe("MCP tool registry community capability gates", () => {
       executed: true,
     });
     expect(itemHandler).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the original handlers with ClickHouse", async () => {
+    const handler = vi.fn().mockResolvedValue({ executed: true });
+    const registry = new ToolRegistry("clickhouse");
+    registry.register({
+      name: "evals",
+      description: "ClickHouse evaluator tools",
+      tools: [
+        {
+          definition: {
+            name: "create-evaluator",
+            description: "Create an evaluator",
+            inputSchema: { type: "object" },
+          },
+          handler,
+        },
+      ],
+    });
+
+    const tool = await registry.getEnabledTool("create-evaluator", context);
+    await expect(tool?.handler({}, context)).resolves.toEqual({
+      executed: true,
+    });
+    expect(handler).toHaveBeenCalledOnce();
   });
 });

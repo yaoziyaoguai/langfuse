@@ -1,6 +1,5 @@
 services:
   langfuse-web:
-    image: langfuse-web-doris-build
     build:
       dockerfile: ./web/Dockerfile
       context: .
@@ -13,8 +12,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      doris-migrate:
-        condition: service_completed_successfully
     ports:
       - "3000:3000"
     environment: &langfuse-web-env
@@ -26,6 +23,8 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000} # generate via `openssl rand -hex 32`
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
+      LANGFUSE_ANALYTICS_BACKEND: ${LANGFUSE_ANALYTICS_BACKEND:-clickhouse}
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
       LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
@@ -35,11 +34,20 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
-      DORIS_LOCAL_DEV_MODE: "true"
-      DORIS_QUERY_URL: mysql://doris-fe:9030/langfuse
-      DORIS_QUERY_USER: root
-      DORIS_QUERY_PASSWORD: ""
-      DORIS_QUERY_TLS_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
+      DORIS_LOCAL_DEV_MODE: ${DORIS_LOCAL_DEV_MODE:-false}
+      DORIS_QUERY_URL: ${DORIS_QUERY_URL:-}
+      DORIS_QUERY_USER: ${DORIS_WEB_QUERY_USER:-}
+      DORIS_QUERY_PASSWORD: ${DORIS_WEB_QUERY_PASSWORD:-}
+      DORIS_QUERY_TLS_ENABLED: ${DORIS_QUERY_TLS_ENABLED:-false}
+      DORIS_QUERY_TLS_CA_PATH: ${DORIS_QUERY_TLS_CA_PATH:-}
+      DORIS_QUERY_MAX_CONNECTIONS: ${DORIS_QUERY_MAX_CONNECTIONS:-25}
+      DORIS_QUERY_CONNECT_TIMEOUT_MS: ${DORIS_QUERY_CONNECT_TIMEOUT_MS:-5000}
+      DORIS_QUERY_TIMEOUT_MS: ${DORIS_QUERY_TIMEOUT_MS:-15000}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
       LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-us-east-1}
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
@@ -55,11 +63,8 @@ services:
       REDIS_TLS_CERT: ${REDIS_TLS_CERT:-/certs/redis.crt}
       REDIS_TLS_KEY: ${REDIS_TLS_KEY:-/certs/redis.key}
     restart: always
-    networks:
-      - default
-      - doris-internal
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,22 +79,25 @@ services:
       context: .
       args:
         - NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=${NEXT_PUBLIC_LANGFUSE_CLOUD_REGION}
-    depends_on: *langfuse-depends-on
+    depends_on:
+      <<: *langfuse-depends-on
+      langfuse-web:
+        condition: service_healthy
     ports:
       - "3030:3030"
     environment:
       <<: *langfuse-web-env
-      DORIS_STREAM_LOAD_FE_URL: http://doris-fe:8030
-      DORIS_STREAM_LOAD_DATABASE: langfuse
-      DORIS_STREAM_LOAD_USER: root
-      DORIS_STREAM_LOAD_PASSWORD: ""
-      DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: 172.29.0.2
-      DORIS_STREAM_LOAD_BE_ALLOWLIST: http://doris-be:8040
-      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: 172.29.0.3
+      DORIS_QUERY_USER: ${DORIS_WORKER_QUERY_USER:-}
+      DORIS_QUERY_PASSWORD: ${DORIS_WORKER_QUERY_PASSWORD:-}
+      DORIS_STREAM_LOAD_FE_URL: ${DORIS_STREAM_LOAD_FE_URL:-}
+      DORIS_STREAM_LOAD_DATABASE: ${DORIS_STREAM_LOAD_DATABASE:-langfuse}
+      DORIS_STREAM_LOAD_USER: ${DORIS_STREAM_LOAD_USER:-}
+      DORIS_STREAM_LOAD_PASSWORD: ${DORIS_STREAM_LOAD_PASSWORD:-}
+      DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: ${DORIS_STREAM_LOAD_FE_IP_ALLOWLIST:-}
+      DORIS_STREAM_LOAD_BE_ALLOWLIST: ${DORIS_STREAM_LOAD_BE_ALLOWLIST:-}
+      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: ${DORIS_STREAM_LOAD_BE_IP_ALLOWLIST:-}
+      DORIS_STREAM_LOAD_TLS_CA_PATH: ${DORIS_STREAM_LOAD_TLS_CA_PATH:-}
     restart: always
-    networks:
-      - default
-      - doris-internal
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3030/api/health"]
       interval: 30s
@@ -99,81 +107,25 @@ services:
       start_period: 60s
       start_interval: 2s
 
-  doris-fe:
-    image: apache/doris:fe-4.0.7
-    hostname: doris-fe
-    entrypoint: ["sh", "-c"]
-    command:
-      - >
-        sed -i 's/-Xmx8192m -Xms8192m/-Xmx2048m -Xms2048m/' /opt/apache-doris/fe/conf/fe.conf
-        && exec bash /usr/local/bin/init_fe.sh
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server
+    user: "101:101"
     environment:
-      - FE_SERVERS=fe1:172.29.0.2:9010
-      - FE_ID=1
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
     volumes:
-      - langfuse_doris_fe_meta:/opt/apache-doris/fe/doris-meta
-      - langfuse_doris_fe_logs:/opt/apache-doris/fe/log
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
     ports:
-      - "8030:8030"
-      - "9030:9030"
-    networks:
-      doris-internal:
-        ipv4_address: 172.29.0.2
+      - "8123:8123"
+      - "9000:9000"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8030/api/bootstrap || exit 1"]
-      interval: 10s
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 90s
-
-  doris-be:
-    image: apache/doris:be-4.0.7
-    hostname: doris-be
-    entrypoint: ["sh", "-c"]
-    command:
-      - >
-        echo 'mem_limit_percentage = 70' >> /opt/apache-doris/be/conf/be.conf
-        && exec bash /usr/local/bin/init_be.sh
-    depends_on:
-      doris-fe:
-        condition: service_healthy
-    environment:
-      - MASTER_FE_IP=172.29.0.2
-      - CURRENT_BE_IP=172.29.0.3
-      - CURRENT_BE_PORT=9050
-      - PRIORITY_NETWORKS=172.29.0.0/24
-    volumes:
-      - langfuse_doris_be_storage:/opt/apache-doris/be/storage
-      - langfuse_doris_be_logs:/opt/apache-doris/be/log
-    ports:
-      - "8040:8040"
-    networks:
-      doris-internal:
-        ipv4_address: 172.29.0.3
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8040/api/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 90s
-
-  doris-migrate:
-    image: langfuse-web-doris-build
-    restart: "no"
-    entrypoint: ["node", "/app/packages/shared/dist/doris/scripts/migrate.js"]
-    depends_on:
-      doris-fe:
-        condition: service_healthy
-      doris-be:
-        condition: service_healthy
-    environment:
-      NODE_ENV: development
-      DORIS_MIGRATION_URL: mysql://doris-fe:9030/langfuse
-      DORIS_MIGRATION_USER: root
-      DORIS_MIGRATION_PASSWORD: ""
-      DORIS_MIGRATION_TLS_ENABLED: "false"
-    networks:
-      - doris-internal
+      retries: 10
+      start_period: 1s
 
   minio:
     image: cgr.dev/chainguard/minio
@@ -231,20 +183,9 @@ services:
 volumes:
   langfuse_postgres_data:
     driver: local
-  langfuse_doris_fe_meta:
+  langfuse_clickhouse_data:
     driver: local
-  langfuse_doris_fe_logs:
-    driver: local
-  langfuse_doris_be_storage:
-    driver: local
-  langfuse_doris_be_logs:
+  langfuse_clickhouse_logs:
     driver: local
   langfuse_minio_data:
     driver: local
-
-networks:
-  doris-internal:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.29.0.0/24

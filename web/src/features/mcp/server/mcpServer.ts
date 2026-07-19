@@ -100,6 +100,10 @@ export function createMcpServer(context: ServerContext): Server {
         surface: "mcp",
         route: name,
       },
+      clickhouse: {
+        surface: "mcp",
+        route: name,
+      },
     });
     const result = await otelContext.with(analyticsCtx, () =>
       registeredTool.handler(args, context),

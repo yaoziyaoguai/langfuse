@@ -1,5 +1,4 @@
 import {
-  AnalyticsProjectDeletionInProgressError,
   scheduleTraceDeletionOperations,
   type AnalyticsDeletionRequester,
 } from "@langfuse/shared/src/server";
@@ -47,23 +46,16 @@ export async function processAnalyticsTraceDeletionBatch(input: {
 
   const missingTraceIds = traceIds.filter((traceId) => !provided.has(traceId));
   if (missingTraceIds.length > 0) {
-    const project = await prisma.project.findFirst({
+    const project = await prisma.project.findFirstOrThrow({
       where: { id: input.projectId, deletedAt: null },
       select: { orgId: true },
     });
-    if (!project) return;
-    let scheduled;
-    try {
-      scheduled = await scheduleTraceDeletionOperations({
-        projectId: input.projectId,
-        organizationId: project.orgId,
-        traceIds: missingTraceIds,
-        requester: SYSTEM_REQUESTER,
-      });
-    } catch (error) {
-      if (error instanceof AnalyticsProjectDeletionInProgressError) return;
-      throw error;
-    }
+    const scheduled = await scheduleTraceDeletionOperations({
+      projectId: input.projectId,
+      organizationId: project.orgId,
+      traceIds: missingTraceIds,
+      requester: SYSTEM_REQUESTER,
+    });
     for (const item of scheduled) {
       provided.set(item.traceId, {
         operationId: item.operation.id,

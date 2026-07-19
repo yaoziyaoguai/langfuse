@@ -45,7 +45,7 @@ export const filterOptionsQuery = protectedProjectProcedure
           }))
         : [];
 
-    const getAnalyticsTraceName = async (): Promise<
+    const getClickhouseTraceName = async (): Promise<
       Array<{ traceName: string }>
     > => {
       const traces = await getTracesGroupedByName(
@@ -56,7 +56,9 @@ export const filterOptionsQuery = protectedProjectProcedure
       return traces.map((i) => ({ traceName: i.name }));
     };
 
-    const getAnalyticsTraceTags = async (): Promise<Array<{ tag: string }>> => {
+    const getClickhouseTraceTags = async (): Promise<
+      Array<{ tag: string }>
+    > => {
       const traces = await getTracesGroupedByTags({
         projectId: input.projectId,
         filter: traceTimestampFilters,
@@ -96,9 +98,9 @@ export const filterOptionsQuery = protectedProjectProcedure
         startTimeFilter ?? [],
       ),
       //trace name
-      getAnalyticsTraceName(),
+      getClickhouseTraceName(),
       // trace tags
-      getAnalyticsTraceTags(),
+      getClickhouseTraceTags(),
       // modelId
       getObservationsGroupedByModelId(input.projectId, startTimeFilter ?? []),
       // available tool names (from tool_definitions)

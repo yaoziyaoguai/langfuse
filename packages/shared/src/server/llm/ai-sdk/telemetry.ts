@@ -68,9 +68,9 @@ export type AiSdkTelemetryCapture = {
  * in memory. Its id generator returns `traceSinkParams.traceId` for root
  * spans, so the internal root span carries the Langfuse trace ID without any
  * span rewriting, and all child spans inherit it via context. After the call,
- * spans are serialized to OTLP JSON and submitted through
- * `OtelIngestionProcessor.publishToOtelIngestionQueue` — internal traces get
- * exactly the same ingestion treatment as user traces.
+ * spans are serialized to OTLP JSON and submitted through the configured
+ * analytics backend — internal traces get exactly the same ingestion
+ * treatment as user traces.
  *
  * For experiment run items (`eventsWriter.experimentContext` present), the
  * `langfuse.experiment.*` attributes are set on every captured span with the

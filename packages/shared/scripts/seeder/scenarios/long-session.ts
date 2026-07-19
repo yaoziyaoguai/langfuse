@@ -4,16 +4,16 @@ import {
   createObservation,
   createTraceScore,
   createSessionScore,
+  createTracesCh,
+  createObservationsCh,
+  createScoresCh,
+  createEventsCh,
   EventRecordInsertType,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
   TraceRecordInsertType,
 } from "../../../src/server";
-import { observationToEvent } from "./event-mirror";
-import {
-  seedEventFixtures,
-  seedScoreFixtures,
-} from "../utils/analytics-writer";
+import { observationToEvent, traceToEvent } from "./event-mirror";
 import { buildPayload, generationUsageCost, PayloadStyle } from "./payload";
 import { jitter, Rng, utcDayStartMs } from "./rng";
 import {
@@ -43,7 +43,7 @@ const run = async (
   const observationsPerTrace = params["observations-per-trace"] as number;
   const payloadBytes = params["payload-bytes"] as number;
   const windowMinutes = params["minutes"] as number;
-  const withV4 = true;
+  const withV4 = params["v4"] as boolean;
   const sessionId =
     (params["session-id"] as string) || `${ctx.idPrefix}-session`;
 
@@ -78,7 +78,7 @@ const run = async (
       utcDayStartMs() - windowMinutes * 60 * 1000 + jitter(ctx.seed, 0, 500);
     return {
       scenario: "long-session",
-      target: "doris",
+      target: "clickhouse",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -314,12 +314,15 @@ const run = async (
     }),
   );
 
-  const tracesById = new Map(traces.map((trace) => [trace.id, trace]));
-  for (const observation of observations) {
-    const trace = observation.trace_id
-      ? tracesById.get(observation.trace_id)
-      : undefined;
-    if (trace) events.push(observationToEvent(observation, trace));
+  if (withV4) {
+    const tracesById = new Map(traces.map((tr) => [tr.id, tr]));
+    for (const trace of traces) {
+      events.push(traceToEvent(trace));
+    }
+    for (const obs of observations) {
+      const trace = obs.trace_id ? tracesById.get(obs.trace_id) : undefined;
+      if (trace) events.push(observationToEvent(obs, trace));
+    }
   }
 
   const counts: Record<string, number> = {
@@ -350,9 +353,15 @@ const run = async (
   ctx.log(
     `writing 1 session, ${traces.length} traces, ${observations.length} observations, ${scores.length} scores${withV4 ? `, ${events.length} events` : ""}`,
   );
-  await seedScoreFixtures(scores);
+  for (const batch of chunk(traces, 1000)) {
+    await createTracesCh(batch);
+  }
+  for (const batch of chunk(observations, 1000)) {
+    await createObservationsCh(batch);
+  }
+  await createScoresCh(scores);
   for (const batch of chunk(events, 500)) {
-    await seedEventFixtures(batch);
+    await createEventsCh(batch);
   }
 
   // uniqExact(id): count() would see pre-merge ReplacingMergeTree duplicates
@@ -413,7 +422,7 @@ const run = async (
 
   return {
     scenario: "long-session",
-    target: "doris",
+    target: "clickhouse",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

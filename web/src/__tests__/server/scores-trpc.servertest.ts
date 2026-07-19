@@ -39,11 +39,11 @@ import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import { ScoreConfigDataType } from "@langfuse/shared";
 import {
   createObservation,
-  createObservationsDoris,
+  createObservationsCh,
   createTrace,
   createTraceScore,
-  createTracesDoris,
-  createScoresDoris,
+  createTracesCh,
+  createScoresCh,
   ScoreDeleteQueue,
   BatchActionQueue,
   QueueJobs,
@@ -97,6 +97,7 @@ describe("scores trpc", () => {
           },
         ],
         featureFlags: {
+          excludeClickhouseRead: false,
           templateFlag: true,
           searchBar: false,
           v4BetaToggleVisible: false,
@@ -143,7 +144,7 @@ describe("scores trpc", () => {
         string_value: null,
       });
 
-      await createScoresDoris([
+      await createScoresCh([
         trueBooleanScore,
         falseBooleanScore,
         emptyBooleanScore,
@@ -201,7 +202,7 @@ describe("scores trpc", () => {
       const configId = randomUUID();
       const scoreName = `boolean-annotation-score-${configId.slice(0, 8)}`;
 
-      await createTracesDoris([
+      await createTracesCh([
         createTrace({
           id: traceId,
           project_id: projectId,
@@ -241,7 +242,7 @@ describe("scores trpc", () => {
       const createdScore = createTraceScore({
         project_id: projectId,
       });
-      await createScoresDoris([createdScore]);
+      await createScoresCh([createdScore]);
       const scoreDeleteQueue = ScoreDeleteQueue.getInstance();
 
       // When
@@ -271,7 +272,7 @@ describe("scores trpc", () => {
         project_id: projectId,
         name: scoreName,
       });
-      await createScoresDoris([createdScore]);
+      await createScoresCh([createdScore]);
       const batchActionQueue = BatchActionQueue.getInstance();
 
       // When
@@ -329,13 +330,13 @@ describe("scores trpc", () => {
       const traceId = randomUUID();
       const observationId = randomUUID();
 
-      await createTracesDoris([
+      await createTracesCh([
         createTrace({
           id: traceId,
           project_id: projectId,
         }),
       ]);
-      await createObservationsDoris([
+      await createObservationsCh([
         createObservation({
           id: observationId,
           trace_id: traceId,
@@ -343,7 +344,7 @@ describe("scores trpc", () => {
         }),
       ]);
 
-      await createScoresDoris([
+      await createScoresCh([
         createTraceScore({
           project_id: projectId,
           trace_id: traceId,

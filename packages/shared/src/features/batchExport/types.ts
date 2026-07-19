@@ -55,6 +55,11 @@ export const BatchExportQuerySchema = z
     orderBy,
     limit: z.number().optional(),
     page: z.number().optional(),
+    // Snapshotted at dispatch time from the user's v4 beta flag. When true, the
+    // sessions export reads from the ClickHouse events table instead of the
+    // legacy traces path. Persisted in the job's query column so the worker reads
+    // the snapshot, never the live user record.
+    useEventsTable: z.boolean().optional(),
   })
   // Reject `datasets` at runtime, not by narrowing the `tableName` enum:
   // BatchExportQueryType is shared with the batch-action read stream (which

@@ -1,16 +1,22 @@
+import { prisma } from "@langfuse/shared/src/db";
 import {
   GetObservationV1Query,
   GetObservationV1Response,
   transformDbToApiObservation,
 } from "@/src/features/public-api/types/observations";
 import {
-  LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
 import { LangfuseNotFoundError } from "@langfuse/shared";
-import { getObservationsFromEventsTableForPublicApi } from "@langfuse/shared/src/server";
+import {
+  enrichObservationWithModelData,
+  getObservationById,
+  getObservationByIdFromEventsTable,
+} from "@langfuse/shared/src/server";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
+import { env } from "@/src/env.mjs";
 
 export default withMiddlewares(
   {
@@ -21,20 +27,64 @@ export default withMiddlewares(
       querySchema: GetObservationV1Query,
       responseSchema: GetObservationV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.observationGet,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
-        const [observation] = await getObservationsFromEventsTableForPublicApi({
-          projectId: auth.scope.projectId,
-          page: 0,
-          limit: 1,
-          advancedFilters: [
-            {
-              type: "stringOptions",
-              column: "id",
-              operator: "any of",
-              value: [query.observationId],
-            },
-          ],
-        });
+        const clickhouseObservation =
+          query.useEventsTable && env.LANGFUSE_ANALYTICS_BACKEND !== "doris"
+            ? await getObservationByIdFromEventsTable({
+                id: query.observationId,
+                projectId: auth.scope.projectId,
+                fetchWithInputOutput: true,
+              })
+            : // eslint-disable-next-line @typescript-eslint/no-deprecated
+              await getObservationById({
+                id: query.observationId,
+                projectId: auth.scope.projectId,
+                fetchWithInputOutput: true,
+                preferredClickhouseService: "ReadOnly",
+              });
+
+        if (!clickhouseObservation) {
+          throw new LangfuseNotFoundError(
+            "Observation not found within authorized project",
+          );
+        }
+
+        const model = clickhouseObservation.internalModelId
+          ? await prisma.model.findFirst({
+              where: {
+                AND: [
+                  {
+                    id: clickhouseObservation.internalModelId,
+                  },
+                  {
+                    OR: [
+                      {
+                        projectId: auth.scope.projectId,
+                      },
+                      {
+                        projectId: null,
+                      },
+                    ],
+                  },
+                ],
+              },
+              include: {
+                Price: true,
+              },
+              orderBy: {
+                projectId: {
+                  sort: "desc",
+                  nulls: "last",
+                },
+              },
+            })
+          : undefined;
+
+        const observation = {
+          ...clickhouseObservation,
+          ...enrichObservationWithModelData(model),
+        };
 
         if (!observation) {
           throw new LangfuseNotFoundError(
@@ -46,7 +96,7 @@ export default withMiddlewares(
     }),
   },
   {
-    analyticsResourceErrorMessage:
-      LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+    clickHouseResourceErrorMessage:
+      LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   },
 );

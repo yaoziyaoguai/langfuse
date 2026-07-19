@@ -34,7 +34,7 @@ export type DorisPublicApiObservationsQuery = {
     readonly lastId: string;
   };
   readonly fields?: readonly ObservationFieldGroupPublicApi[] | null;
-  readonly expandMetadataKeys?: readonly string[];
+  readonly expandMetadataKeys?: readonly string[] | null;
   readonly includeLookahead?: boolean;
 };
 

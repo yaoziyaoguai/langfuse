@@ -6,15 +6,21 @@ import {
 import {
   filterInterface,
   sqlInterface,
-  type DatabaseRow,
 } from "@/src/server/api/services/sqlInterface";
+import { createHistogramData } from "@/src/features/dashboard/lib/score-analytics-utils";
 import { TRPCError } from "@trpc/server";
 import {
+  getScoreAggregate,
+  getNumericScoreHistogram,
   extractFromAndToTimestampsFromFilter,
   logger,
+  getObservationCostByTypeByTime,
+  getObservationUsageByTypeByTime,
+  isDorisAnalyticsBackend,
   DashboardService,
   DashboardDefinitionSchema,
 } from "@langfuse/shared/src/server";
+import { type DatabaseRow } from "@/src/server/api/services/sqlInterface";
 import { executeQuery } from "@langfuse/shared/query/server";
 import {
   query as customQuery,
@@ -124,7 +130,9 @@ const LEGACY_CAMEL_CASE_MAP: Record<string, string> = {
  */
 function prepareScoresNumericV2Params(filter: FilterState) {
   const [from, to] = extractFromAndToTimestampsFromFilter(filter);
-  // Bound unfiltered Home queries to the product's supported historical range.
+  // Fallback to 2000-01-01 instead of epoch 0 — ClickHouse DateTimeFilter
+  // passes new Date(value).getTime() as the parameter, and the value 0
+  // (epoch) is rejected by ClickHouse's DateTime64(3) parameter parser.
   const fromIso = from?.value
     ? new Date(from.value as Date).toISOString()
     : new Date("2000-01-01T00:00:00.000Z").toISOString();
@@ -147,15 +155,17 @@ function prepareScoresNumericV2Params(filter: FilterState) {
 }
 
 /**
- * Converts analytics histogram output to the { chartData, chartLabels }
+ * Converts ClickHouse histogram(N)(...) output to the { chartData, chartLabels }
  * shape returned by createHistogramData (used by the NumericScoreHistogram component).
  *
- * Doris histogram() returns an Array(Tuple(Float64, Float64, Float64))
+ * ClickHouse histogram() returns an Array(Tuple(Float64, Float64, Float64))
  * where each tuple is (lower_bound, upper_bound, count).
  * The result column is named "histogram_value" by QueryBuilder
  * (pattern: `${aggregation}_${alias}`).
  */
-function histogramToChartData(result: Array<Record<string, unknown>>): {
+function clickhouseHistogramToChartData(
+  result: Array<Record<string, unknown>>,
+): {
   chartData: Array<{ binLabel: string; count: number }>;
   chartLabels: string[];
 } {
@@ -218,7 +228,7 @@ async function getScoreAggregateV2({
   };
 
   // The scores-categorical view has no "value" dimension, so we handle value
-  // filters manually: categorical scores always have value=0 in Doris, so
+  // filters manually: categorical scores always have value=0 in ClickHouse, so
   // value=0 should include all categoricals, while any other value filter
   // (e.g. value=1) should exclude them. This matches v1 behavior where numeric
   // and categorical scores are queried together in a single SQL statement.
@@ -332,7 +342,7 @@ export const dashboardRouter = createTRPCRouter({
     .query(async ({ input }) => {
       const [from, to] = extractFromAndToTimestampsFromFilter(input.filter);
 
-      if (from?.value && to?.value && from.value > to.value) {
+      if (from.value && to.value && from.value > to.value) {
         logger.error(
           `from > to, returning empty result: from=${from}, to=${to}`,
         );
@@ -341,24 +351,51 @@ export const dashboardRouter = createTRPCRouter({
 
       switch (input.queryName) {
         case "score-aggregate":
-          return getScoreAggregateV2({
-            projectId: input.projectId,
-            filter: input.filter ?? [],
-          });
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
+            return getScoreAggregateV2({
+              projectId: input.projectId,
+              filter: input.filter ?? [],
+            });
+          }
+          const scores = await getScoreAggregate(
+            input.projectId,
+            input.filter ?? [],
+          );
+          return scores.map((row) => ({
+            scoreName: row.name,
+            scoreSource: row.source,
+            scoreDataType: row.data_type,
+            avgValue: row.avg_value,
+            countScoreId: Number(row.count),
+          })) as DatabaseRow[];
         case "observations-usage-by-type-timeseries":
-          return getObservationsByTypeV2({
-            projectId: input.projectId,
-            filter: input.filter ?? [],
-            dimensionField: "usageType",
-            metricMeasure: "usageByType",
-          });
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
+            return getObservationsByTypeV2({
+              projectId: input.projectId,
+              filter: input.filter ?? [],
+              dimensionField: "usageType",
+              metricMeasure: "usageByType",
+            });
+          }
+          const rowsObsType = await getObservationUsageByTypeByTime(
+            input.projectId,
+            input.filter ?? [],
+          );
+          return rowsObsType as DatabaseRow[];
         case "observations-cost-by-type-timeseries":
-          return getObservationsByTypeV2({
-            projectId: input.projectId,
-            filter: input.filter ?? [],
-            dimensionField: "costType",
-            metricMeasure: "costByType",
-          });
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
+            return getObservationsByTypeV2({
+              projectId: input.projectId,
+              filter: input.filter ?? [],
+              dimensionField: "costType",
+              metricMeasure: "costByType",
+            });
+          }
+          const rowsObsCostByType = await getObservationCostByTypeByTime(
+            input.projectId,
+            input.filter ?? [],
+          );
+          return rowsObsCostByType as DatabaseRow[];
         default:
           throw new TRPCError({
             code: "NOT_FOUND",
@@ -375,22 +412,37 @@ export const dashboardRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input }) => {
-      const { fromIso, toIso, mappedFilters } = prepareScoresNumericV2Params(
+      if (input.version === "v2" || isDorisAnalyticsBackend()) {
+        // v2: ClickHouse histogram() aggregates all matching rows server-side.
+        // `input.limit` is ignored — no row-level cap is needed.
+        const { fromIso, toIso, mappedFilters } = prepareScoresNumericV2Params(
+          input.filter ?? [],
+        );
+        const histogramQuery: QueryType = {
+          view: "scores-numeric",
+          dimensions: [],
+          metrics: [{ measure: "value", aggregation: "histogram" }],
+          filters: mappedFilters,
+          fromTimestamp: fromIso,
+          toTimestamp: toIso,
+          timeDimension: null,
+          orderBy: null,
+          chartConfig: { type: "HISTOGRAM", bins: 10 },
+        };
+        const result = await executeQuery(
+          input.projectId,
+          histogramQuery,
+          "v2",
+        );
+        return clickhouseHistogramToChartData(result);
+      }
+
+      const data = await getNumericScoreHistogram(
+        input.projectId,
         input.filter ?? [],
+        input.limit ?? 10000,
       );
-      const histogramQuery: QueryType = {
-        view: "scores-numeric",
-        dimensions: [],
-        metrics: [{ measure: "value", aggregation: "histogram" }],
-        filters: mappedFilters,
-        fromTimestamp: fromIso,
-        toTimestamp: toIso,
-        timeDimension: null,
-        orderBy: null,
-        chartConfig: { type: "HISTOGRAM", bins: 10 },
-      };
-      const result = await executeQuery(input.projectId, histogramQuery, "v2");
-      return histogramToChartData(result);
+      return createHistogramData(data);
     }),
   executeQuery: protectedProjectProcedure
     .input(
@@ -591,16 +643,34 @@ export const dashboardRouter = createTRPCRouter({
         scope: "dashboards:read",
       });
 
-      const dashboard = await DashboardService.getDashboard(
-        LANGFUSE_HOME_DASHBOARD_ID,
-        input.projectId,
-      );
+      const project = await ctx.prisma.project.findUnique({
+        where: { id: input.projectId },
+        select: { homeDashboardId: true },
+      });
+
+      // Resolve the pointer; a missing/foreign target silently falls back to
+      // the Langfuse-curated default (like an unset pointer).
+      const pointedDashboard = project?.homeDashboardId
+        ? await DashboardService.getDashboard(
+            project.homeDashboardId,
+            input.projectId,
+          )
+        : null;
+
+      const dashboard =
+        pointedDashboard ??
+        (await DashboardService.getDashboard(
+          LANGFUSE_HOME_DASHBOARD_ID,
+          input.projectId,
+        ));
 
       return {
         // null only when the curated row is also absent — the client then
         // renders from the shared constant.
         dashboard,
-        homeDashboardId: null,
+        homeDashboardId: pointedDashboard
+          ? (project?.homeDashboardId ?? null)
+          : null,
       };
     }),
 

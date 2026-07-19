@@ -60,11 +60,21 @@ export * from "./utils/transforms";
 export * from "./utils/billingCycleHelpers";
 export * from "./utils/compareVersions";
 export * from "./otel/utils";
+export * from "./clickhouse/client";
 export * from "./doris";
+export {
+  getClickHouseCompatibilitySettings,
+  initializeClickhouseCompatibility,
+} from "./clickhouse/compatibility";
+export * from "./clickhouse/schemaUtils";
+export * from "./clickhouse/schema";
+export * from "./clickhouse/queryTracking";
+export * from "./clickhouse/queryTags";
 export * from "./repositories/definitions";
 export * from "./repositories/analyticsIngestionOperations";
 export * from "./repositories/analyticsLoadBatches";
 export * from "./repositories/analyticsCheckpoints";
+export * from "./repositories/analyticsBackgroundMigrationRetirement";
 export * from "./repositories/telemetry/doris";
 export * from "../utils/IORepresentation/chatML/types";
 export * from "../server/ingestion/types";
@@ -73,6 +83,7 @@ export * from "./ingestion/ingestionAttribution";
 export * from "./ingestion/processEventBatch";
 export * from "../server/ingestion/validateAndInflateScore";
 export * from "./ingestion/extractToolsBackend";
+export * from "../server/queries/public-api-filter-builder";
 export * from "../server/queries/logical/searchPlan";
 export * from "../server/pricing-tiers";
 export * from "./redis/redis";
@@ -110,6 +121,7 @@ export * from "./webhooks/ipBlocking";
 export * from "./redis/experimentCreateQueue";
 export * from "./redis/dlqRetryQueue";
 export * from "./redis/entityChangeQueue";
+export * from "./redis/eventPropagationQueue";
 export * from "./redis/otelProjectTracking";
 export * from "./redis/s3SlowdownTracking";
 export * from "./redis/ingestionFailureTracking";
@@ -122,6 +134,8 @@ export * from "./instrumentation";
 export * from "./logger";
 export * from "./headerPropagation";
 export * from "./queries";
+export * from "./queries/clickhouse-sql/orderby-factory";
+export * from "./queries/clickhouse-sql/query-options";
 export * from "./repositories";
 export { SCORE_TO_TRACE_OBSERVATIONS_INTERVAL } from "./repositories/constants";
 export { scoreDomainToV3 } from "./repositories/scores";
@@ -145,6 +159,7 @@ export * from "./services/DefaultViewService";
 export * from "./services/DefaultEvaluationModelService";
 export * from "./services/blockEvaluatorConfigs";
 export * from "./services/getProjectAdminEmails";
+export * from "./clickhouse/measureAndReturn";
 export * from "./services/SlackService";
 export * from "./services/buildColoredAttachmentSlackMessage";
 export * from "./tableMappings";
@@ -166,10 +181,30 @@ export * from "./traceDeletionProcessor";
 export * from "./deletionGuard";
 export * from "./analytics-integrations/types";
 
-// Stable public aliases now route exclusively through the Doris event model.
+// Re-annotate these deprecated routing wrappers at the public server barrel.
+// They are otherwise exposed through multiple `export *` hops, where consumers
+// and lint tooling can lose the original JSDoc deprecation metadata.
+/**
+ * @deprecated Please prefer `getTraceByIdFromEventsTable` for new use-cases.
+ * This should be exclusively used for backwards compatibility if the write mode
+ * is events_only.
+ */
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- Intentional public alias for the deprecated routing wrapper.
 export const getTraceById = getTraceByIdRoutingWrapper;
 
+/**
+ * @deprecated Please prefer `getObservationByIdFromEventsTable` for new
+ * use-cases. This should be exclusively used for backwards compatibility if the
+ * write mode is events_only.
+ */
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- Intentional public alias for the deprecated routing wrapper.
 export const getObservationById = getObservationByIdRoutingWrapper;
 
+/**
+ * @deprecated Please prefer `getTracesIdentifierForSessionFromEvents` for new
+ * use-cases. This should be exclusively used for backwards compatibility if the
+ * write mode is events_only.
+ */
 export const getTracesIdentifierForSession =
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- Intentional public alias for the deprecated routing wrapper.
   getTracesIdentifierForSessionRoutingWrapper;

@@ -137,7 +137,7 @@ async function makeCallbackRequest<T>(params: {
 /**
  * Apply ingestion masking to data by making an HTTP callback to an external masking endpoint.
  *
- * This feature masks sensitive data from OTEL events before storage in Doris.
+ * This feature masks sensitive data from OTEL events before storage in ClickHouse.
  *
  * @param params - The parameters for the masking operation
  * @returns A MaskingResult containing the (potentially masked) data and success status

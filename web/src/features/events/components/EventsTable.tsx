@@ -859,6 +859,10 @@ export default function ObservationsEventsTable({
         orderBy: orderByState,
         searchQuery: searchQuery || undefined,
         searchType,
+        // Declare the dispatching surface: these are events-view filters, so
+        // the worker must read them from the events table. The server
+        // validates the declaration (beta flag or instance preview opt-in).
+        useEventsTable: true,
       },
       isBatchAction: selectAll,
     });
@@ -866,7 +870,8 @@ export default function ObservationsEventsTable({
   };
 
   // Confirmation counts for "Delete Traces": page selection counts directly;
-  // select-all counts resolve lazily ("..." while loading).
+  // select-all counts resolve lazily ("..." while loading) and the distinct
+  // trace count is a ClickHouse `uniq` approximation, hence the "~".
   const selectedVisibleRowCount = (observations.rows ?? []).filter(
     (observation) => selectedRows[observation.id],
   ).length;
@@ -885,7 +890,7 @@ export default function ObservationsEventsTable({
 
   // Select-all deletes persist the raw filterState into the batch action, but
   // comment filters (commentCount/commentContent) resolve via Postgres at read
-  // time and the worker cannot translate them into a Doris query — the
+  // time and the worker cannot translate them into a ClickHouse query — the
   // server blocks such dispatches, so disable the action up front with a
   // clear reason.
   const hasCommentFilter = filterState.some(

@@ -17,6 +17,7 @@ import {
 
 import type { InternalTraceEventInput } from "../llm/internalTraceEvents";
 import { logger } from "../logger";
+import { env } from "../../env";
 import { LangfuseOtelSpanAttributes } from "./attributes";
 import { OtelIngestionProcessor } from "./OtelIngestionProcessor";
 
@@ -26,8 +27,8 @@ const W3C_TRACE_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 /**
  * Publishes internally captured OTel spans through the regular OTel ingestion
- * pipeline (same durable raw receipt + outbox path as the public
- * /api/public/otel/v1/traces endpoint). Shared by the AI-SDK judge capture
+ * pipeline selected for this deployment, matching the public
+ * /api/public/otel/v1/traces endpoint. Shared by the AI-SDK judge capture
  * (`createAiSdkTelemetryCapture`) and `writeInternalTraceViaOtelIngestion`.
  */
 export async function publishInternalOtelSpans(params: {
@@ -56,7 +57,11 @@ export async function publishInternalOtelSpans(params: {
     isLangfuseInternal: true,
   });
 
-  await processor.publishToAnalyticsIngestion(resourceSpans);
+  if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+    await processor.publishToAnalyticsIngestion(resourceSpans);
+  } else {
+    await processor.publishToOtelIngestionQueue(resourceSpans);
+  }
 }
 
 /**

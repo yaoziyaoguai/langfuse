@@ -11,7 +11,7 @@
 // Metadata is stored as a flat Map(String, String): nested object values are
 // JSON-encoded strings under their top-level key, and the stringObject filter
 // matches the LITERAL top-level key ("we can only filter on the first level",
-// StringObjectFilter in Doris-filter.ts; the metadata view's filter
+// StringObjectFilter in clickhouse-filter.ts; the metadata view's filter
 // shortcut resolves the top-level key for the same reason — ValueCell.tsx).
 // A flattened `metadata.scope.name` suggestion would lower to key
 // "scope.name" and match nothing. Dot-paths still appear whenever producers

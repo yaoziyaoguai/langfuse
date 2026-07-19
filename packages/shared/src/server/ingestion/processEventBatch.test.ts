@@ -27,6 +27,7 @@ vi.mock("../s3", () => ({
 
 vi.mock("../../env", () => ({
   env: {
+    LANGFUSE_ANALYTICS_BACKEND: "doris",
     LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "events",
     LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "raw/",
   },

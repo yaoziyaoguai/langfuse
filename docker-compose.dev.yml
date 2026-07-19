@@ -1,7 +1,8 @@
 services:
-  # Doris 4.0.7 development target. This 1 FE + 1 BE topology is not HA and is
-  # not production evidence.
+  # Opt-in Doris 4.0.7 development target. This 1 FE + 1 BE topology is not HA
+  # and is not production evidence. Start it with `--profile doris`.
   doris-fe:
+    profiles: ["doris"]
     image: apache/doris:fe-4.0.7
     container_name: ${DORIS_FE_CONTAINER_NAME:-langfuse-doris-fe}
     hostname: doris-fe
@@ -31,6 +32,7 @@ services:
       start_period: 90s
 
   doris-be:
+    profiles: ["doris"]
     image: apache/doris:be-4.0.7
     container_name: ${DORIS_BE_CONTAINER_NAME:-langfuse-doris-be}
     hostname: doris-be
@@ -62,6 +64,33 @@ services:
       timeout: 5s
       retries: 30
       start_period: 90s
+
+  clickhouse:
+    # Upgrade from 24.3 to check behaviour on new events table.
+    # Unit tests still verify 24.3 behaviour using -azure and -redis-cluster configs.
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    container_name: ${CLICKHOUSE_CONTAINER_NAME:-langfuse-clickhouse}
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - ${HOST_IP:-127.0.0.1}:${CLICKHOUSE_HTTP_PORT:-8123}:8123
+      - ${HOST_IP:-127.0.0.1}:${CLICKHOUSE_NATIVE_PORT:-9000}:9000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    depends_on:
+      - postgres
+    networks:
+      - default
 
   minio:
     image: cgr.dev/chainguard/minio
@@ -153,6 +182,12 @@ volumes:
     name: ${DORIS_BE_LOGS_VOLUME_NAME:-langfuse_doris_be_logs}
   langfuse_postgres_data:
     name: ${POSTGRES_VOLUME_NAME:-langfuse_postgres_data}
+    driver: local
+  langfuse_clickhouse_data:
+    name: ${CLICKHOUSE_DATA_VOLUME_NAME:-langfuse_clickhouse_data}
+    driver: local
+  langfuse_clickhouse_logs:
+    name: ${CLICKHOUSE_LOGS_VOLUME_NAME:-langfuse_clickhouse_logs}
     driver: local
   langfuse_minio_data:
     name: ${MINIO_VOLUME_NAME:-langfuse_minio_data}

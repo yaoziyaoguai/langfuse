@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import type { AnalyticsBackend } from "@langfuse/shared/analytics-backend";
 
 export type CommunityCapability =
   | "evaluations"
@@ -64,7 +65,8 @@ export const COMMUNITY_CAPABILITIES: Readonly<
 
 export const isCommunityCapabilityAvailable = (
   _capability: CommunityCapability,
-): boolean => false;
+  backend: AnalyticsBackend = "doris",
+): boolean => backend === "clickhouse";
 
 export class CommunityCapabilityUnavailableError extends Error {
   readonly body: UnsupportedFeatureBody;
@@ -79,8 +81,9 @@ export class CommunityCapabilityUnavailableError extends Error {
 
 export function assertCommunityCapability(
   capability: CommunityCapability,
+  backend: AnalyticsBackend = "doris",
 ): void {
-  if (!isCommunityCapabilityAvailable(capability)) {
+  if (!isCommunityCapabilityAvailable(capability, backend)) {
     throw new CommunityCapabilityUnavailableError(capability);
   }
 }
@@ -118,6 +121,69 @@ export function capabilityForTrpcPath(
     )
   ) {
     return "customDashboards";
+  }
+  return null;
+}
+
+export function capabilityForPublicApiPath(
+  path: string,
+): CommunityCapability | null {
+  const pathname = path.split("?", 1)[0] ?? path;
+  if (
+    /^\/api\/public\/(dataset-run-items|datasets\/[^/]+\/runs(?:\/|$)|experiment-items(?:\/|$)|experiments(?:\/|$))/.test(
+      pathname,
+    )
+  ) {
+    return "experiments";
+  }
+  if (/^\/api\/public\/integrations\/blob-storage(?:\/|$)/.test(pathname)) {
+    return "batchExports";
+  }
+  if (
+    /^\/api\/public\/unstable\/(evaluation-rules|evaluators)(?:\/|$)/.test(
+      pathname,
+    )
+  ) {
+    return "evaluations";
+  }
+  if (
+    /^\/api\/public\/unstable\/(dashboard-widgets|dashboards)(?:\/|$)/.test(
+      pathname,
+    )
+  ) {
+    return "customDashboards";
+  }
+  return null;
+}
+
+export function capabilityForPagePath(
+  path: string,
+): CommunityCapability | null {
+  if (/^\/project\/\[projectId\]\/dashboards(?:\/|$)/.test(path)) {
+    return "customDashboards";
+  }
+  if (
+    /^\/project\/\[projectId\]\/(evals|experiments|monitors)(?:\/|$)/.test(path)
+  ) {
+    return path.includes("/evals")
+      ? "evaluations"
+      : path.includes("/monitors")
+        ? "monitors"
+        : "experiments";
+  }
+  if (
+    /^\/project\/\[projectId\]\/datasets\/\[datasetId\]\/(compare|experiments|items\/\[itemId\]\/runs|runs\/\[runId\])(?:\/|$)/.test(
+      path,
+    )
+  ) {
+    return "experiments";
+  }
+  if (
+    /^\/project\/\[projectId\]\/settings\/integrations\/(blobstorage|mixpanel|posthog)$/.test(
+      path,
+    )
+  ) {
+    return "batchExports";
   }
   return null;
 }

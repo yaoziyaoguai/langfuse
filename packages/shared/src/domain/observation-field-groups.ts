@@ -27,8 +27,8 @@
  *   - packages/shared/src/server/repositories/events.ts:
  *     `enrichObservationsWithModelData` (v2 read path) and the export
  *     streaming path that gates `model_export`.
- *   - packages/shared/src/server/repositories/telemetry/doris/publicApi.ts:
- *     field-group projections for the shared Doris public API adapter.
+ *   - packages/shared/src/server/queries/clickhouse-sql/event-query-builder.ts:
+ *     `FIELD_SETS` and `EVENTS_FIELDS` for the underlying column projections.
  */
 
 export const OBSERVATION_FIELD_GROUPS_PUBLIC_API = [
@@ -46,43 +46,6 @@ export const OBSERVATION_FIELD_GROUPS_PUBLIC_API = [
 
 export type ObservationFieldGroupPublicApi =
   (typeof OBSERVATION_FIELD_GROUPS_PUBLIC_API)[number];
-
-export const OBSERVATION_FIELD_GROUP_FIELD_NAMES = {
-  core: [
-    "id",
-    "traceId",
-    "startTime",
-    "endTime",
-    "projectId",
-    "parentObservationId",
-    "type",
-  ],
-  basic: [
-    "name",
-    "level",
-    "statusMessage",
-    "version",
-    "environment",
-    "bookmarked",
-    "public",
-    "userId",
-    "sessionId",
-  ],
-  time: ["completionStartTime", "createdAt", "updatedAt"],
-  io: ["input", "output"],
-  metadata: ["metadata"],
-  model: ["providedModelName", "internalModelId", "modelParameters"],
-  usage: [
-    "usageDetails",
-    "costDetails",
-    "totalCost",
-    "usagePricingTierId",
-    "usagePricingTierName",
-  ],
-  prompt: ["promptId", "promptName", "promptVersion"],
-  metrics: ["latency", "timeToFirstToken"],
-  trace_context: ["tags", "release", "traceName"],
-} as const satisfies Record<ObservationFieldGroupPublicApi, readonly string[]>;
 
 export const OBSERVATION_FIELD_GROUPS_FULL = [
   ...OBSERVATION_FIELD_GROUPS_PUBLIC_API,

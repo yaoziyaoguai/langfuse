@@ -15,6 +15,7 @@ import {
   QueueJobs,
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
+import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
 import { prisma } from "@langfuse/shared/src/db";
 
 type CreateBatchActionJob = {
@@ -30,6 +31,7 @@ type CreateBatchActionJob = {
   session: {
     user: {
       id: string;
+      v4BetaEnabled?: boolean | null;
     };
     orgId: string;
     orgRole: Role;
@@ -38,6 +40,10 @@ type CreateBatchActionJob = {
   };
   query: BatchActionQuery;
   targetId?: string;
+  // Call-site decision on whether this action reads from the events table
+  // (see traces.deleteMany). When unset, it is inferred from the user's v4
+  // beta flag below.
+  useEventsTableOverride?: boolean;
 };
 
 const ACTIVE_BATCH_ACTION_STATUSES = [
@@ -56,12 +62,37 @@ export const createBatchActionJob = async ({
   session,
   query,
   targetId,
+  useEventsTableOverride,
 }: CreateBatchActionJob) => {
+  // Whether the action reads from the events table is determined at the
+  // call site (useEventsTableOverride) or inferred from the user's v4 beta
+  // flag; the decision is snapshotted into the query at dispatch time.
+  const queryWithSnapshot: BatchActionQuery = {
+    ...query,
+    useEventsTable:
+      useEventsTableOverride ?? session.user.v4BetaEnabled ?? false,
+  };
+
+  assertLegacyTracingIoSearchCanCreateBatchJob({
+    searchQuery: queryWithSnapshot.searchQuery,
+    searchType: queryWithSnapshot.searchType,
+    tableName,
+    // Only TraceDelete's worker path honors useEventsTable (config.source
+    // "events" -> getTraceDeleteCursorPageFromEvents). Every other action
+    // reads from the legacy tables regardless of the flag, so it must keep
+    // the strict legacy IO-search guard.
+    useEventsTable:
+      actionId === ActionId.TraceDelete
+        ? queryWithSnapshot.useEventsTable
+        : undefined,
+  });
+
   const batchActionId = generateBatchActionId(projectId, actionId, tableName);
 
   if (actionId === ActionId.TraceDelete) {
     const cutoffCreatedAt = new Date();
     const config = createTraceDeleteBatchActionConfig({
+      useEventsTable: queryWithSnapshot.useEventsTable ?? false,
       cutoffCreatedAt,
     });
     const batchActionData = {
@@ -69,7 +100,7 @@ export const createBatchActionJob = async ({
       actionType: actionId,
       tableName,
       status: BatchActionStatus.Queued,
-      query,
+      query: queryWithSnapshot,
       config,
       totalCount: null,
       processedCount: 0,
@@ -154,7 +185,7 @@ export const createBatchActionJob = async ({
         actionId,
         tableName,
         cutoffCreatedAt: new Date(),
-        query,
+        query: queryWithSnapshot,
         targetId: targetId,
         type: actionType,
       },

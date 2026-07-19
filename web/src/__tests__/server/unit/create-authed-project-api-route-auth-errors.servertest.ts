@@ -38,7 +38,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
   },
   traceException: mockTraceException,
   contextWithLangfuseProps: vi.fn(() => ({})),
-  DorisClientManager: {
+  ClickHouseClientManager: {
     getInstance: () => ({
       closeAllConnections: vi.fn(async () => undefined),
     }),
@@ -194,37 +194,6 @@ describe("createAuthedProjectAPIRoute auth error handling", () => {
       message: "Service Unavailable",
     });
     expect(mockSendUnstablePublicApiErrorResponse).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not serialize a second response after a route ends the response", async () => {
-    mockVerifyAuthHeaderAndReturnScope.mockResolvedValueOnce(validAuth);
-    const handler = createAuthedProjectAPIRoute({
-      name: "Terminal Compatibility Route",
-      querySchema: z.object({}),
-      responseSchema: z.object({ ok: z.literal(true) }),
-      fn: async ({ res }) => {
-        res.status(501).json({
-          error: "UnsupportedFeature",
-          code: "R1A_LEGACY_TRACING_WRITE_UNAVAILABLE",
-        });
-        return { ok: true as const };
-      },
-    });
-    const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
-      method: "GET",
-      headers: { authorization: "Basic test" },
-      query: {},
-    });
-    const json = vi.spyOn(res, "json");
-
-    await handler(req, res);
-
-    expect(json).toHaveBeenCalledOnce();
-    expect(res.statusCode).toBe(501);
-    expect(res._getJSONData()).toMatchObject({
-      error: "UnsupportedFeature",
-      code: "R1A_LEGACY_TRACING_WRITE_UNAVAILABLE",
-    });
   });
 
   it("keeps the shared rate limit response for routes without upgrade guidance", async () => {

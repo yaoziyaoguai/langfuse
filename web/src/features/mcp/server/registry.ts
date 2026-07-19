@@ -17,9 +17,12 @@ import {
   COMMUNITY_CAPABILITIES,
   capabilityForMcpFeature,
   capabilityForMcpTool,
+  isCommunityCapabilityAvailable,
 } from "@/src/features/capabilities/communityAvailability";
 import { UnsupportedFeatureError } from "../core/errors";
 import { wrapErrorHandling } from "../core/error-formatting";
+import { env } from "@/src/env.mjs";
+import type { AnalyticsBackend } from "@langfuse/shared/analytics-backend";
 
 /**
  * Registered MCP tool
@@ -80,6 +83,10 @@ export class ToolRegistry {
   private features = new Map<string, McpFeatureModule>();
   private tools = new Map<string, RegisteredTool>();
 
+  constructor(
+    private readonly analyticsBackend: AnalyticsBackend = env.LANGFUSE_ANALYTICS_BACKEND,
+  ) {}
+
   /**
    * Register a feature module with its tools
    *
@@ -125,7 +132,11 @@ export class ToolRegistry {
     const definitions: ToolDefinition[] = [];
 
     for (const feature of this.features.values()) {
-      if (capabilityForMcpFeature(feature.name)) {
+      const capability = capabilityForMcpFeature(feature.name);
+      if (
+        capability &&
+        !isCommunityCapabilityAvailable(capability, this.analyticsBackend)
+      ) {
         for (const tool of feature.tools) definitions.push(tool.definition);
         continue;
       }
@@ -169,7 +180,10 @@ export class ToolRegistry {
 
     const capability =
       capabilityForMcpTool(name) ?? capabilityForMcpFeature(feature.name);
-    if (capability) {
+    if (
+      capability &&
+      !isCommunityCapabilityAvailable(capability, this.analyticsBackend)
+    ) {
       return {
         ...tool,
         handler: wrapErrorHandling(async () => {

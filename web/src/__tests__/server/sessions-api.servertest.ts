@@ -2,7 +2,7 @@ import { makeZodVerifiedAPICall } from "@/src/__tests__/test-utils";
 import { v4 } from "uuid";
 import { prisma } from "@langfuse/shared/src/db";
 import {
-  createTracesDoris,
+  createTracesCh,
   createOrgProjectAndApiKey,
 } from "@langfuse/shared/src/server";
 import { createTrace } from "@langfuse/shared/src/server";
@@ -30,7 +30,7 @@ describe("/api/public/sessions API Endpoint", () => {
         createTrace({ session_id: sessionId, project_id: projectId }),
       ];
 
-      await createTracesDoris(traces);
+      await createTracesCh(traces);
 
       const getScore = await makeZodVerifiedAPICall(
         GetSessionV1Response,

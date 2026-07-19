@@ -1,7 +1,9 @@
 import { getObservationsV2FromEventsTableForPublicApi } from "@langfuse/shared/src/server";
+import { LangfuseNotFoundError } from "@langfuse/shared";
 
 import { withMiddlewares } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
+import { env } from "@/src/env.mjs";
 
 import {
   GetObservationsV2Query,
@@ -16,6 +18,15 @@ export default withMiddlewares({
     querySchema: GetObservationsV2Query,
     responseSchema: GetObservationsV2Response,
     fn: async ({ query, auth }) => {
+      if (
+        env.LANGFUSE_ANALYTICS_BACKEND !== "doris" &&
+        env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN !== "true"
+      ) {
+        throw new LangfuseNotFoundError(
+          "The observations v2 API is only available in a Langfuse v4 write mode. Learn more at: https://langfuse.com/docs/v4",
+        );
+      }
+
       // Extract field groups and metadata expansion keys
       const fieldGroups = query.fields ?? undefined;
       const expandMetadataKeys = query.expandMetadata ?? undefined;

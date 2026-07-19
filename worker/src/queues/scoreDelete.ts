@@ -5,7 +5,10 @@ import {
   TQueueJobTypes,
 } from "@langfuse/shared/src/server";
 
+import { processClickhouseScoreDelete } from "../features/scores/processClickhouseScoreDelete";
 import { processAnalyticsScoreDelete } from "../features/scores/processAnalyticsScoreDelete";
+import { isAnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { env } from "../env";
 
 export const scoreDeleteProcessor: Processor = async (
   job: Job<TQueueJobTypes[QueueName.ScoreDelete]>,
@@ -16,5 +19,9 @@ export const scoreDeleteProcessor: Processor = async (
     return;
   }
 
-  await processAnalyticsScoreDelete(projectId, scoreIds);
+  if (isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "doris")) {
+    await processAnalyticsScoreDelete(projectId, scoreIds);
+  } else {
+    await processClickhouseScoreDelete(projectId, scoreIds);
+  }
 };

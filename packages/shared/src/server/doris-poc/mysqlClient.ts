@@ -41,6 +41,7 @@ function toPoolOptions(config: DorisPoCMysqlConfig): PoolOptions {
     connectTimeout: 10_000,
     enableKeepAlive: true,
     multipleStatements: true,
+    timezone: "Z",
     // Local PoC only: TLS is terminated by the frozen private path in
     // production (see docs/operations/doris-security.md). The PoC cluster binds
     // to 127.0.0.1.

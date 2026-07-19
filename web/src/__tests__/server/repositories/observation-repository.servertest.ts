@@ -1,6 +1,6 @@
 import {
   createObservation,
-  createObservationsDoris,
+  createObservationsCh,
 } from "@langfuse/shared/src/server";
 import {
   getObservationById,
@@ -56,7 +56,7 @@ describe("Clickhouse Observations Repository Test", () => {
       completion_start_time: Date.now(),
     });
 
-    await createObservationsDoris([observation]);
+    await createObservationsCh([observation]);
 
     const result = await getObservationById({
       id: observationId,
@@ -132,7 +132,7 @@ describe("Clickhouse Observations Repository Test", () => {
       completion_start_time: Date.now(),
     });
 
-    await createObservationsDoris([observation]);
+    await createObservationsCh([observation]);
 
     const result = await getObservationById({
       id: observationId,
@@ -184,7 +184,7 @@ describe("Clickhouse Observations Repository Test", () => {
       completion_start_time: Date.now() + 1000,
     });
 
-    await createObservationsDoris([observation]);
+    await createObservationsCh([observation]);
 
     const result = await getObservationsForTrace({
       traceId,

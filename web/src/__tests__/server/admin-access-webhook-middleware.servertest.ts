@@ -65,6 +65,7 @@ const createAdminSession = (
       } as SessionUser["organizations"][number],
     ],
     featureFlags: {
+      excludeClickhouseRead: false,
       templateFlag: true,
     } as SessionFeatureFlags,
     admin: true,

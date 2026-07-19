@@ -65,6 +65,7 @@ declare module "next-auth" {
       // Optional so existing session mocks need not set it; the real session
       // callback always populates it.
       v4WriteMode?: "legacy" | "dual" | "events_only";
+      analyticsBackend?: "clickhouse" | "doris";
     };
   }
 

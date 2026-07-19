@@ -5,6 +5,7 @@ import {
   type InternalOtelSpanInput,
 } from "./internalTraceOtelWriter";
 
+const publishToOtelIngestionQueue = vi.fn().mockResolvedValue(undefined);
 const publishToAnalyticsIngestion = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("./OtelIngestionProcessor", async (importOriginal) => {
@@ -13,6 +14,7 @@ vi.mock("./OtelIngestionProcessor", async (importOriginal) => {
   return {
     ...actual,
     OtelIngestionProcessor: class {
+      publishToOtelIngestionQueue = publishToOtelIngestionQueue;
       publishToAnalyticsIngestion = publishToAnalyticsIngestion;
     },
   };
@@ -45,8 +47,8 @@ const codeEvalRootInput: InternalOtelSpanInput = {
 // regression in attribute naming or the internal-schema contract fails here
 // instead of only in production.
 const processPublishedSpans = async () => {
-  expect(publishToAnalyticsIngestion).toHaveBeenCalledTimes(1);
-  const resourceSpans = publishToAnalyticsIngestion.mock.calls[0][0];
+  expect(publishToOtelIngestionQueue).toHaveBeenCalledTimes(1);
+  const resourceSpans = publishToOtelIngestionQueue.mock.calls[0][0];
 
   const { OtelIngestionProcessor } = await vi.importActual<
     typeof import("./OtelIngestionProcessor")
@@ -148,6 +150,7 @@ describe("writeInternalTraceViaOtelIngestion", () => {
       eventInputs: [{ ...codeEvalRootInput, traceId: "not-a-trace-id" }],
     });
 
+    expect(publishToOtelIngestionQueue).not.toHaveBeenCalled();
     expect(publishToAnalyticsIngestion).not.toHaveBeenCalled();
   });
 });

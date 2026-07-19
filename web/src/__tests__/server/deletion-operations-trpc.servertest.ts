@@ -41,6 +41,7 @@ function session(input: {
         },
       ] as SessionOrganizations,
       featureFlags: {
+        excludeClickhouseRead: false,
         templateFlag: true,
       } as SessionFeatureFlags,
       admin: false,

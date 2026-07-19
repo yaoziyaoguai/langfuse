@@ -9,6 +9,7 @@ import {
   type ApiAccessLevel,
   traceException,
   logger,
+  DORIS_LEGACY_INGESTION_UNAVAILABLE,
 } from "@langfuse/shared/src/server";
 import { PayloadTooLargeError, type RateLimitResource } from "@langfuse/shared";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
@@ -25,7 +26,8 @@ import {
   unstablePublicEvalsErrorContract,
   type PublicApiErrorContract,
 } from "@/src/features/public-api/server/unstable-public-api-error-contract";
-import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
+import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
+import { legacyIngestionRejection } from "@/src/features/public-api/server/analyticsBackendGuards";
 
 /** Access levels that can be accepted by project-scoped API routes. */
 type RouteAccessLevel = Exclude<ApiAccessLevel, "organization">;
@@ -73,6 +75,12 @@ export type AuthedProjectAPIRouteConfig<
    * Only set this to true on non-mutating (GET) routes that should be callable by the in-app agent.
    */
   allowInAppAgentKey?: boolean;
+  /**
+   * Marks a legacy tracing write route. Such routes return 501 with Doris and
+   * 404 when ClickHouse runs in events_only mode, because neither topology has
+   * a consumer for legacy trace/observation writes.
+   */
+  rejectInEventsOnlyMode?: boolean;
   fn: (params: {
     query: z.infer<TQuery>;
     body: z.infer<TBody>;
@@ -297,6 +305,30 @@ export const createAuthedProjectAPIRoute = <
   routeConfig: AuthedProjectAPIRouteConfig<TQuery, TBody, TResponse>,
 ): ((req: NextApiRequest, res: NextApiResponse) => Promise<void>) => {
   return async (req: NextApiRequest, res: NextApiResponse) => {
+    const legacyRejection = legacyIngestionRejection({
+      rejectLegacyRoute: routeConfig.rejectInEventsOnlyMode === true,
+      backend: env.LANGFUSE_ANALYTICS_BACKEND,
+      clickhouseWriteMode: env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+    });
+
+    // These routes write only to the legacy ClickHouse ingestion queue. Doris
+    // deliberately has no consumer for that queue, so accepting the request
+    // would acknowledge work that can never complete.
+    if (legacyRejection === "doris") {
+      res.status(501).json(DORIS_LEGACY_INGESTION_UNAVAILABLE);
+      return;
+    }
+
+    // Short-circuit legacy routes in ClickHouse events_only mode because the
+    // legacy tables are no longer populated.
+    if (legacyRejection === "events_only") {
+      res.status(404).json({
+        message:
+          "This endpoint is not available on deployments running in Langfuse v4 events_only mode. Learn more about Langfuse v4 at: https://langfuse.com/docs/v4",
+      });
+      return;
+    }
+
     let auth: AuthHeaderValidVerificationResult & {
       scope: { projectId: string; accessLevel: RouteAccessLevel };
     };
@@ -413,7 +445,11 @@ export const createAuthedProjectAPIRoute = <
       apiKeyId: auth.scope.apiKeyId,
       analytics: {
         surface: "publicapi",
-        route: analyticsRouteForRequest(req),
+        route: clickHouseRouteForRequest(req),
+      },
+      clickhouse: {
+        surface: "publicapi",
+        route: clickHouseRouteForRequest(req),
       },
     });
     return opentelemetry.context.with(ctx, async () => {

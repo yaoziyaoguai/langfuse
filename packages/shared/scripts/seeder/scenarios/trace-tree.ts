@@ -2,15 +2,15 @@ import {
   createTrace,
   createObservation,
   createTraceScore,
+  createTracesCh,
+  createObservationsCh,
+  createScoresCh,
+  createEventsCh,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
 } from "../../../src/server";
 import { ObservationType } from "../../../src/domain";
-import { observationToEvent } from "./event-mirror";
-import {
-  seedEventFixtures,
-  seedScoreFixtures,
-} from "../utils/analytics-writer";
+import { observationToEvent, traceToEvent } from "./event-mirror";
 import {
   buildPayload,
   generationUsageCost,
@@ -150,7 +150,7 @@ const run = async (
   const depth = Math.min(requestedDepth, observationCount);
   const payloadBytes = params["payload-bytes"] as number;
   const payloadStyle = params["payload-style"] as PayloadStyle;
-  const withV4 = true;
+  const withV4 = params["v4"] as boolean;
   const asyncParents = params["async-parents"] as boolean;
   // Type restriction is index-keyed (jitter), not rng-stream-keyed, so the
   // default (--plain absent) output stays byte-identical.
@@ -210,7 +210,7 @@ const run = async (
     // counts are derivable from the flags — skip payload/array generation
     return {
       scenario: "trace-tree",
-      target: "doris",
+      target: "clickhouse",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -560,9 +560,12 @@ const run = async (
     });
   }
 
-  const events = observations.map((observation) =>
-    observationToEvent(observation, trace),
-  );
+  const events = withV4
+    ? [
+        traceToEvent(trace),
+        ...observations.map((obs) => observationToEvent(obs, trace)),
+      ]
+    : [];
 
   const counts: Record<string, number> = {
     traces: 1,
@@ -574,11 +577,15 @@ const run = async (
   ctx.log(
     `writing 1 trace, ${observations.length} observations, ${scores.length} scores${withV4 ? `, ${events.length} events` : ""}`,
   );
+  await createTracesCh([trace]);
+  for (const batch of chunk(observations, 1000)) {
+    await createObservationsCh(batch);
+  }
   for (const batch of chunk(scores, 1000)) {
-    await seedScoreFixtures(batch);
+    await createScoresCh(batch);
   }
   for (const batch of chunk(events, 500)) {
-    await seedEventFixtures(batch);
+    await createEventsCh(batch);
   }
 
   // uniqExact(id): count() would see pre-merge ReplacingMergeTree duplicates
@@ -647,7 +654,7 @@ const run = async (
 
   return {
     scenario: "trace-tree",
-    target: "doris",
+    target: "clickhouse",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

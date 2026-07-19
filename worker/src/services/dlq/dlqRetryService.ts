@@ -4,24 +4,37 @@ import {
   recordHistogram,
 } from "@langfuse/shared/src/server";
 import { getQueue } from "@langfuse/shared/src/server";
+import { isAnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { env } from "../../env";
 
 export class DlqRetryService {
-  private static retryQueues = [
+  private static readonly backendIndependentRetryQueues = [
     QueueName.ProjectDelete,
     QueueName.TraceDelete,
     QueueName.ScoreDelete,
     QueueName.BatchActionQueue,
-    QueueName.DataRetentionProcessingQueue,
   ] as const;
+
+  static getRetryQueues(): Array<
+    | (typeof DlqRetryService.backendIndependentRetryQueues)[number]
+    | QueueName.DataRetentionProcessingQueue
+  > {
+    return isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "clickhouse")
+      ? [
+          ...DlqRetryService.backendIndependentRetryQueues,
+          QueueName.DataRetentionProcessingQueue,
+        ]
+      : [...DlqRetryService.backendIndependentRetryQueues];
+  }
 
   // called each 10 minutes, defined by the bull cron job
   public static async retryDeadLetterQueue() {
     logger.info(
-      `Retrying dead letter queues for queues: ${DlqRetryService.retryQueues.join(
+      `Retrying dead letter queues for queues: ${DlqRetryService.getRetryQueues().join(
         ", ",
       )}`,
     );
-    const retryQueues = DlqRetryService.retryQueues;
+    const retryQueues = DlqRetryService.getRetryQueues();
     for (const queueName of retryQueues) {
       const queue = getQueue(queueName);
 

@@ -4,23 +4,30 @@ import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import {
   createTrace,
-  createTracesDoris,
+  createTracesCh,
   createTraceScore,
   createSessionScore,
-  createScoresDoris,
+  createScoresCh,
   getTraceByIdFromTracesTable,
-  createEventsDoris,
+  createEventsCh,
   createEvent,
   getTraceByIdFromEventsTable,
   createObservation,
-  createObservationsDoris,
+  createObservationsCh,
 } from "@langfuse/shared/src/server";
 import waitForExpect from "wait-for-expect";
 import { randomUUID } from "crypto";
+import { env } from "@/src/env.mjs";
 import { composeAggregateScoreKey } from "@/src/features/scores/lib/aggregateScores";
+import { BatchExportFileFormat, BatchTableNames } from "@langfuse/shared";
 
 describe("traces trpc", () => {
   const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
+  const mutableEnv = env as unknown as {
+    LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH: "true" | "false";
+  };
+  const originalLegacyIoSearchDisabled =
+    mutableEnv.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH;
 
   const session: Session = {
     expires: "1",
@@ -53,6 +60,7 @@ describe("traces trpc", () => {
         },
       ],
       featureFlags: {
+        excludeClickhouseRead: false,
         templateFlag: true,
         searchBar: false,
         v4BetaToggleVisible: false,
@@ -67,13 +75,69 @@ describe("traces trpc", () => {
   const ctx = createInnerTRPCContext({ session, headers: {} });
   const caller = appRouter.createCaller({ ...ctx, prisma });
 
+  afterEach(() => {
+    mutableEnv.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH =
+      originalLegacyIoSearchDisabled;
+  });
+
   describe("traces.all", () => {
+    it("ignores legacy full-text-only search when legacy IO search is disabled", async () => {
+      mutableEnv.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH = "true";
+      const tag = `legacy-io-search-disabled-${randomUUID()}`;
+      const matchingName = `legacy-io-search-disabled-name-${randomUUID()}`;
+
+      const traces = [
+        createTrace({
+          project_id: projectId,
+          name: matchingName,
+          tags: [tag],
+        }),
+        createTrace({
+          project_id: projectId,
+          name: "legacy-io-search-disabled-other-trace",
+          tags: [tag],
+        }),
+      ];
+
+      await createTracesCh(traces);
+
+      const result = await caller.traces.all({
+        projectId,
+        filter: [
+          {
+            column: "timestamp",
+            type: "datetime",
+            operator: ">=",
+            value: new Date(new Date().getTime() - 1000).toISOString(),
+          },
+          {
+            column: "tags",
+            operator: "any of",
+            value: [tag],
+            type: "arrayOptions",
+          },
+        ],
+        searchQuery: matchingName,
+        searchType: ["content"],
+        page: 0,
+        limit: 50,
+        orderBy: {
+          column: "timestamp",
+          order: "DESC",
+        },
+      });
+
+      expect(result.traces.map((t) => t.id).sort()).toEqual(
+        traces.map((t) => t.id).sort(),
+      );
+    });
+
     it("list traces for default view", async () => {
       const trace = createTrace({
         project_id: projectId,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -103,7 +167,7 @@ describe("traces trpc", () => {
         project_id: projectId,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -133,7 +197,7 @@ describe("traces trpc", () => {
         project_id: projectId,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -163,7 +227,7 @@ describe("traces trpc", () => {
         project_id: projectId,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -225,12 +289,12 @@ describe("traces trpc", () => {
         traceWithoutScore.id,
       ];
 
-      await createTracesDoris([
+      await createTracesCh([
         traceWithTrueScore,
         traceWithFalseScore,
         traceWithoutScore,
       ]);
-      await createScoresDoris([
+      await createScoresCh([
         createTraceScore({
           project_id: projectId,
           trace_id: traceWithTrueScore.id,
@@ -331,7 +395,7 @@ describe("traces trpc", () => {
         name: "input-search-trace",
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -368,7 +432,7 @@ describe("traces trpc", () => {
         name: "output-search-trace",
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traces = await caller.traces.all({
         projectId,
@@ -397,7 +461,7 @@ describe("traces trpc", () => {
 
   describe("traces.countAll", () => {
     it("count traces correctly", async () => {
-      await createTracesDoris(
+      await createTracesCh(
         Array(120)
           .fill(0)
           .map(() =>
@@ -442,7 +506,7 @@ describe("traces trpc", () => {
         project_id: projectId,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traceRes = await caller.traces.byId({
         projectId,
@@ -466,7 +530,7 @@ describe("traces trpc", () => {
         metadata: { prototype: "test" },
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traceRes = await caller.traces.byId({
         projectId,
@@ -485,7 +549,7 @@ describe("traces trpc", () => {
         public: true,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traceRes = await caller.traces.byId({
         projectId: differentProjectId,
@@ -498,50 +562,61 @@ describe("traces trpc", () => {
       expect(traceRes?.timestamp).toEqual(new Date(trace.timestamp));
     });
 
-    it("access trace stored in Doris events", async () => {
-      const traceId = randomUUID();
-      const rootId = randomUUID();
-      const clickedId = randomUUID();
-      const rootTimestamp = new Date("2026-07-14T21:42:12.184Z");
-      const clickedTimestamp = new Date("2026-07-15T00:27:13.935Z");
+    // In dual write mode, internally produced traces (e.g. code-eval execution
+    // traces) exist ONLY in the events tables. Trace access must fall back to
+    // the events table instead of 404ing on the legacy `traces` miss — the
+    // fast-preview list showed such traces while the detail view threw
+    // "Trace not found".
+    // This specifically covers the dual-write fallback. Events-only routing is
+    // covered in traces-trpc-events-only.servertest.ts.
+    const isDualWrite = env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "dual";
+    (isDualWrite ? it : it.skip)(
+      "access trace that only exists in the events table",
+      async () => {
+        const traceId = randomUUID();
+        const rootId = randomUUID();
+        const clickedId = randomUUID();
+        const rootTimestamp = new Date("2026-07-14T21:42:12.184Z");
+        const clickedTimestamp = new Date("2026-07-15T00:27:13.935Z");
 
-      await createEventsDoris([
-        createEvent({
-          id: rootId,
-          span_id: rootId,
-          trace_id: traceId,
-          project_id: projectId,
-          parent_span_id: null,
-          start_time: rootTimestamp.getTime() * 1000,
-        }),
-        createEvent({
-          id: clickedId,
-          span_id: clickedId,
-          trace_id: traceId,
-          project_id: projectId,
-          parent_span_id: rootId,
-          start_time: clickedTimestamp.getTime() * 1000,
-        }),
-      ]);
+        await createEventsCh([
+          createEvent({
+            id: rootId,
+            span_id: rootId,
+            trace_id: traceId,
+            project_id: projectId,
+            parent_span_id: null,
+            start_time: rootTimestamp.getTime() * 1000,
+          }),
+          createEvent({
+            id: clickedId,
+            span_id: clickedId,
+            trace_id: traceId,
+            project_id: projectId,
+            parent_span_id: rootId,
+            start_time: clickedTimestamp.getTime() * 1000,
+          }),
+        ]);
 
-      // Precondition: legacy `traces` has no row.
-      expect(
-        await getTraceByIdFromTracesTable({ traceId, projectId }),
-      ).toBeUndefined();
+        // Precondition: legacy `traces` has no row.
+        expect(
+          await getTraceByIdFromTracesTable({ traceId, projectId }),
+        ).toBeUndefined();
 
-      // ClickHouse insert visibility can lag.
-      await waitForExpect(async () => {
-        const result = await caller.events.byTraceId({
-          projectId,
-          traceId,
-          timestamp: clickedTimestamp,
+        // ClickHouse insert visibility can lag.
+        await waitForExpect(async () => {
+          const result = await caller.events.byTraceId({
+            projectId,
+            traceId,
+            timestamp: clickedTimestamp,
+          });
+          expect(result.observations.map(({ id }) => id)).toEqual(
+            expect.arrayContaining([rootId, clickedId]),
+          );
+          expect(result.observations).toHaveLength(2);
         });
-        expect(result.observations.map(({ id }) => id)).toEqual(
-          expect.arrayContaining([rootId, clickedId]),
-        );
-        expect(result.observations).toHaveLength(2);
-      });
-    });
+      },
+    );
 
     it("access trace without any authentication", async () => {
       const unAuthedSession = createInnerTRPCContext({
@@ -558,7 +633,7 @@ describe("traces trpc", () => {
         public: true,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       const traceRes = await unAuthedCaller.traces.byId({
         projectId,
@@ -578,7 +653,7 @@ describe("traces trpc", () => {
       const trace = createTrace({
         project_id: projectId,
       });
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
       // Create a categorical score config with multiple possible values
       const scoreConfig = await prisma.scoreConfig.create({
@@ -603,7 +678,7 @@ describe("traces trpc", () => {
         data_type: "CATEGORICAL",
         config_id: scoreConfig.id,
       });
-      await createScoresDoris([score]);
+      await createScoresCh([score]);
 
       // Get filter options
       const filterOptions = await caller.traces.filterOptions({
@@ -631,14 +706,14 @@ describe("traces trpc", () => {
         project_id: projectId,
         trace_id: trace.id,
       });
-      await createTracesDoris([trace]);
-      await createObservationsDoris([observation]);
+      await createTracesCh([trace]);
+      await createObservationsCh([observation]);
 
       const observationScoreName = `observation_quality_${randomUUID()}`;
       const sessionScoreName = `session_quality_${randomUUID()}`;
       const scoreTimestamp = Date.now();
 
-      await createScoresDoris([
+      await createScoresCh([
         createTraceScore({
           project_id: projectId,
           trace_id: trace.id,
@@ -691,15 +766,15 @@ describe("traces trpc", () => {
         project_id: projectId,
         trace_id: trace.id,
       });
-      await createTracesDoris([trace]);
-      await createObservationsDoris([observation]);
+      await createTracesCh([trace]);
+      await createObservationsCh([observation]);
 
       const observationScoreName = `observation_bool_${randomUUID()}`;
       const emptyObservationScoreName = `observation_bool_empty_${randomUUID()}`;
       const sessionScoreName = `session_bool_${randomUUID()}`;
       const scoreTimestamp = Date.now();
 
-      await createScoresDoris([
+      await createScoresCh([
         createTraceScore({
           project_id: projectId,
           trace_id: trace.id,
@@ -775,9 +850,9 @@ describe("traces trpc", () => {
         trace_id: trace.id,
       });
 
-      await createTracesDoris([trace]);
-      await createObservationsDoris([firstObservation, secondObservation]);
-      await createScoresDoris([
+      await createTracesCh([trace]);
+      await createObservationsCh([firstObservation, secondObservation]);
+      await createScoresCh([
         createTraceScore({
           project_id: projectId,
           trace_id: trace.id,
@@ -822,6 +897,30 @@ describe("traces trpc", () => {
     });
   });
 
+  describe("batchExport.create", () => {
+    it("rejects new legacy full-text batch exports when legacy IO search is disabled", async () => {
+      mutableEnv.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH = "true";
+
+      await expect(
+        caller.batchExport.create({
+          projectId,
+          name: "Legacy IO search export",
+          format: BatchExportFileFormat.CSV,
+          query: {
+            tableName: BatchTableNames.Traces,
+            filter: [],
+            searchQuery: "expensive search",
+            searchType: ["content"],
+            orderBy: {
+              column: "timestamp",
+              order: "DESC",
+            },
+          },
+        }),
+      ).rejects.toThrow("Input/output search is disabled");
+    });
+  });
+
   describe("traces.getAgentGraphData", () => {
     it("should allow unauthenticated access to public trace agent graph data", async () => {
       const unAuthedSession = createInnerTRPCContext({
@@ -844,8 +943,8 @@ describe("traces trpc", () => {
         type: "GENERATION",
       });
 
-      await createTracesDoris([trace]);
-      await createObservationsDoris([observation]);
+      await createTracesCh([trace]);
+      await createObservationsCh([observation]);
 
       const minStartTime = new Date(
         new Date(trace.timestamp).getTime() - 1000,
@@ -886,8 +985,8 @@ describe("traces trpc", () => {
         type: "GENERATION",
       });
 
-      await createTracesDoris([trace]);
-      await createObservationsDoris([observation]);
+      await createTracesCh([trace]);
+      await createObservationsCh([observation]);
 
       const minStartTime = new Date(
         new Date(trace.timestamp).getTime() - 1000,
@@ -963,7 +1062,7 @@ describe("traces trpc", () => {
         ).resolves.toBe(false);
 
         // Trace is written to the legacy table only.
-        await createTracesDoris([createTrace({ project_id: freshProjectId })]);
+        await createTracesCh([createTrace({ project_id: freshProjectId })]);
 
         // Gate must open from legacy traces-table data alone (ClickHouse
         // insert visibility can lag).
@@ -989,6 +1088,8 @@ describe("traces trpc", () => {
   });
 
   describe("traces flags", () => {
+    const useEventsTable =
+      env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
     it("should bookmark a trace", async () => {
       // Create a trace that is not bookmarked
       const trace = createTrace({
@@ -996,18 +1097,20 @@ describe("traces trpc", () => {
         bookmarked: false,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
-      await createEventsDoris([
-        createEvent({
-          id: trace.id,
-          span_id: trace.id,
-          trace_id: trace.id,
-          project_id: trace.project_id,
-          parent_span_id: null,
-          bookmarked: false,
-        }),
-      ]);
+      if (useEventsTable) {
+        await createEventsCh([
+          createEvent({
+            id: trace.id,
+            span_id: trace.id,
+            trace_id: trace.id,
+            project_id: trace.project_id,
+            parent_span_id: null,
+            bookmarked: false,
+          }),
+        ]);
+      }
 
       const cleanTrace = await getTraceByIdFromTracesTable({
         traceId: trace.id,
@@ -1037,29 +1140,33 @@ describe("traces trpc", () => {
       expect(updatedTrace).toBeDefined();
       expect(updatedTrace?.bookmarked).toBe(true);
 
-      await waitForExpect(async () => {
-        const eventTrace = await getTraceByIdFromEventsTable({
-          projectId,
-          traceId: trace.id,
-          renderingProps: {
-            truncated: true,
-            shouldJsonParse: false,
-          },
-        });
-        expect(eventTrace).toBeDefined();
-        expect(eventTrace?.bookmarked).toBe(true);
+      if (useEventsTable) {
+        await waitForExpect(async () => {
+          // Verify events_core
+          const eventTrace = await getTraceByIdFromEventsTable({
+            projectId,
+            traceId: trace.id,
+            renderingProps: {
+              truncated: true,
+              shouldJsonParse: false,
+            },
+          });
+          expect(eventTrace).toBeDefined();
+          expect(eventTrace?.bookmarked).toBe(true);
 
-        const eventTraceFull = await getTraceByIdFromEventsTable({
-          projectId,
-          traceId: trace.id,
-          renderingProps: {
-            truncated: false,
-            shouldJsonParse: true,
-          },
+          // Verify events_full
+          const eventTraceFull = await getTraceByIdFromEventsTable({
+            projectId,
+            traceId: trace.id,
+            renderingProps: {
+              truncated: false,
+              shouldJsonParse: true,
+            },
+          });
+          expect(eventTraceFull).toBeDefined();
+          expect(eventTraceFull?.bookmarked).toBe(true);
         });
-        expect(eventTraceFull).toBeDefined();
-        expect(eventTraceFull?.bookmarked).toBe(true);
-      });
+      }
     });
 
     it("should make a trace public", async () => {
@@ -1069,18 +1176,20 @@ describe("traces trpc", () => {
         public: false,
       });
 
-      await createTracesDoris([trace]);
+      await createTracesCh([trace]);
 
-      await createEventsDoris([
-        createEvent({
-          id: trace.id,
-          span_id: trace.id,
-          trace_id: trace.id,
-          project_id: trace.project_id,
-          parent_span_id: null,
-          public: false,
-        }),
-      ]);
+      if (useEventsTable) {
+        await createEventsCh([
+          createEvent({
+            id: trace.id,
+            span_id: trace.id,
+            trace_id: trace.id,
+            project_id: trace.project_id,
+            parent_span_id: null,
+            public: false,
+          }),
+        ]);
+      }
 
       const cleanTrace = await getTraceByIdFromTracesTable({
         traceId: trace.id,
@@ -1110,29 +1219,33 @@ describe("traces trpc", () => {
       expect(updatedTrace).toBeDefined();
       expect(updatedTrace?.public).toBe(true);
 
-      await waitForExpect(async () => {
-        const eventTrace = await getTraceByIdFromEventsTable({
-          projectId,
-          traceId: trace.id,
-          renderingProps: {
-            truncated: true,
-            shouldJsonParse: false,
-          },
-        });
-        expect(eventTrace).toBeDefined();
-        expect(eventTrace?.public).toBe(true);
+      if (useEventsTable) {
+        await waitForExpect(async () => {
+          // Verify events_core
+          const eventTrace = await getTraceByIdFromEventsTable({
+            projectId,
+            traceId: trace.id,
+            renderingProps: {
+              truncated: true,
+              shouldJsonParse: false,
+            },
+          });
+          expect(eventTrace).toBeDefined();
+          expect(eventTrace?.public).toBe(true);
 
-        const eventTraceFull = await getTraceByIdFromEventsTable({
-          projectId,
-          traceId: trace.id,
-          renderingProps: {
-            truncated: false,
-            shouldJsonParse: true,
-          },
+          // Verify events_full
+          const eventTraceFull = await getTraceByIdFromEventsTable({
+            projectId,
+            traceId: trace.id,
+            renderingProps: {
+              truncated: false,
+              shouldJsonParse: true,
+            },
+          });
+          expect(eventTraceFull).toBeDefined();
+          expect(eventTraceFull?.public).toBe(true);
         });
-        expect(eventTraceFull).toBeDefined();
-        expect(eventTraceFull?.public).toBe(true);
-      });
+      }
     });
   });
 });

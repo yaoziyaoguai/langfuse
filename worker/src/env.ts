@@ -60,10 +60,65 @@ const EnvSchema = z.object({
   LANGFUSE_S3_EVENT_KEY_MAX_SEGMENT_BYTES:
     langfuseS3EventKeyMaxSegmentBytesSchema,
 
+  BATCH_EXPORT_PAGE_SIZE: z.coerce.number().positive().default(500),
+  BATCH_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(1_500_000),
+  BATCH_EXPORT_DOWNLOAD_LINK_EXPIRATION_HOURS: z.coerce
+    .number()
+    .positive()
+    .default(24),
+  BATCH_EXPORT_S3_PART_SIZE_MIB: z.coerce.number().min(5).max(100).default(10),
+  BATCH_ACTION_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(50_000),
+  LANGFUSE_MAX_HISTORIC_EVAL_CREATION_LIMIT: z.coerce
+    .number()
+    .positive()
+    .default(50_000),
   EMAIL_FROM_ADDRESS: z.string().optional(),
   SMTP_CONNECTION_URL: z.string().optional(),
   CLOUD_CRM_EMAIL: z.string().optional(),
+  LANGFUSE_OTEL_INGESTION_QUEUE_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+  LANGFUSE_OTEL_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(1),
+  LANGFUSE_SECONDARY_OTEL_INGESTION_QUEUE_ENABLED_PROJECT_IDS: z
+    .string()
+    .optional(),
+  LANGFUSE_INGESTION_QUEUE_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(20),
+  LANGFUSE_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+  LANGFUSE_SECONDARY_INGESTION_QUEUE_ENABLED_PROJECT_IDS: z.string().optional(),
+  LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE: z.coerce
+    .number()
+    .positive()
+    .default(1000),
+  LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: z.coerce
+    .number()
+    .positive()
+    .default(1000),
+  LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: z.coerce
+    .number()
+    .positive()
+    .default(3),
+
   LANGFUSE_USE_AZURE_BLOB: z.enum(["true", "false"]).default("false"),
+
+  CLICKHOUSE_URL: z.url().default("http://127.0.0.1:8123"),
+  CLICKHOUSE_USER: z.string().default("clickhouse"),
+  CLICKHOUSE_CLUSTER_NAME: z.string().default("default"),
+  CLICKHOUSE_DB: z.string().default("default"),
+  CLICKHOUSE_PASSWORD: z.string().default("clickhouse"),
+  CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
+  LANGFUSE_ANALYTICS_BACKEND: z
+    .enum(["clickhouse", "doris"])
+    .default("clickhouse"),
   // Doris credentials are injected per workload. Web never receives load auth.
   DORIS_LOCAL_DEV_MODE: z.enum(["true", "false"]).default("false"),
   DORIS_QUERY_URL: z.string().optional(),
@@ -94,7 +149,7 @@ const EnvSchema = z.object({
   DORIS_STREAM_LOAD_MAX_BODY_BYTES: z.coerce
     .number()
     .int()
-    .min(100 * 1024 * 1024)
+    .positive()
     .default(100 * 1024 * 1024),
   LANGFUSE_ANALYTICS_INGESTION_WORKER_CONCURRENCY: z.coerce
     .number()
@@ -110,7 +165,7 @@ const EnvSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(100)
+    .max(1_000)
     .default(100),
   LANGFUSE_ANALYTICS_INGESTION_LEGACY_HANDOFF_ENABLED: z
     .enum(["true", "false"])
@@ -145,6 +200,14 @@ const EnvSchema = z.object({
   LANGFUSE_MIXPANEL_FLUSH_DELAY_MS: z.coerce.number().min(0).default(100),
   LANGFUSE_DATASET_DELETE_CONCURRENCY: z.coerce.number().positive().default(1),
   LANGFUSE_PROJECT_DELETE_CONCURRENCY: z.coerce.number().positive().default(1),
+  LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+  LANGFUSE_LLM_AS_JUDGE_EXECUTION_WORKER_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
   LANGFUSE_LLM_AS_JUDGE_QUEUE_RETRY_MAX_ATTEMPTS: z.coerce
     .number()
     .int()
@@ -155,6 +218,31 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(120 * 60),
+  LANGFUSE_CODE_EVAL_EXECUTION_WORKER_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+  LANGFUSE_EVAL_EXECUTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+  LANGFUSE_SECONDARY_EVAL_EXECUTION_QUEUE_ENABLED_PROJECT_IDS: z
+    .string()
+    .optional(),
+  LANGFUSE_EXPERIMENT_CREATOR_WORKER_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(5),
+
+  // Skip the read from ClickHouse within the Ingestion pipeline for the given
+  // project ids. Applicable for projects that were created after the S3 write
+  // was activated and which don't rely on historic updates.
+  LANGFUSE_SKIP_INGESTION_CLICKHOUSE_READ_PROJECT_IDS: z.string().default(""),
+  // Set a date after which S3 was active. Projects created after this date do
+  // perform a ClickHouse read as part of the ingestion pipeline.
+  LANGFUSE_SKIP_INGESTION_CLICKHOUSE_READ_MIN_PROJECT_CREATE_DATE: z.iso
+    .date()
+    .optional(),
 
   // Otel
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default("http://localhost:4318"),
@@ -172,7 +260,24 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("true"),
 
+  LANGFUSE_BLOB_STORAGE_FAILURE_NOTIFICATION_COOLDOWN_HOURS: z.coerce
+    .number()
+    .positive()
+    .default(24),
+
+  // Comma-separated list of project IDs that should only export traces table (skip observations and scores)
+  LANGFUSE_BLOB_STORAGE_EXPORT_TRACE_ONLY_PROJECT_IDS: z
+    .string()
+    .optional()
+    .transform((s) => (s ? s.split(",").map((id) => id.trim()) : [])),
+
+  LANGFUSE_MONITOR_SCHEDULER_ENABLED: z.enum(["true", "false"]).default("true"),
+  LANGFUSE_MONITOR_SCHEDULERS: z.coerce.number().int().min(1).default(1),
+
   // Flags to toggle queue consumers on or off.
+  QUEUE_CONSUMER_MONITOR_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
@@ -180,6 +285,30 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_FREE_TIER_USAGE_THRESHOLD_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_EVAL_EXECUTION_SECONDARY_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_CODE_EVAL_EXECUTION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED: z
@@ -194,10 +323,31 @@ const EnvSchema = z.object({
   QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
+  QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
   QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_OTEL_INGESTION_SECONDARY_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
+  QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
   QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED: z
@@ -209,10 +359,21 @@ const EnvSchema = z.object({
   QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
+  QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
   QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
 
+  LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(10),
+  LANGFUSE_DATASET_RUN_BACKFILL_CHUNK_SIZE: z.coerce
+    .number()
+    .positive()
+    .default(100),
   LANGFUSE_EXPERIMENT_BACKFILL_THROTTLE_MS: z.coerce
     .number()
     .positive()
@@ -260,6 +421,10 @@ const EnvSchema = z.object({
   LANGFUSE_S3_MEDIA_UPLOAD_SSE_KMS_KEY_ID: z.string().optional(),
 
   // Metering data Postgres export - Langfuse Cloud
+  LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false"),
+
   // When disabled: Usage is still tracked in DB but no emails are sent and no orgs are blocked
   // When enabled: Full enforcement (emails + blocking)
   LANGFUSE_FREE_TIER_USAGE_THRESHOLD_ENFORCEMENT_ENABLED: z
@@ -267,15 +432,15 @@ const EnvSchema = z.object({
     .default("false"),
 
   LANGFUSE_S3_CONCURRENT_READS: z.coerce.number().positive().default(50),
-  LANGFUSE_ANALYTICS_PROJECT_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
+  LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS: z.coerce
     .number()
     .positive()
     .default(600_000), // 10 minutes
-  LANGFUSE_ANALYTICS_TRACE_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
+  LANGFUSE_CLICKHOUSE_TRACE_DELETION_CONCURRENCY_DURATION_MS: z.coerce
     .number()
     .positive()
     .default(120_000), // 2 minutes
-  LANGFUSE_ANALYTICS_DATASET_DELETION_RATE_LIMIT_WINDOW_MS: z.coerce
+  LANGFUSE_CLICKHOUSE_DATASET_DELETION_CONCURRENCY_DURATION_MS: z.coerce
     .number()
     .positive()
     .default(120_000), // 2 minutes
@@ -307,14 +472,47 @@ const EnvSchema = z.object({
     .positive()
     .default(5000), // Media items per chunk
 
-  // Media retention cleaner scheduling.
+  // Batch Data Retention Cleaner configuration (ClickHouse)
   LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED: z
     .enum(["true", "false"])
     .default("false"),
+  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_INTERVAL_MS: z.coerce
+    .number()
+    .positive()
+    .default(3_600_000), // 1 hour between runs
   LANGFUSE_MEDIA_RETENTION_CLEANER_INTERVAL_MS: z.coerce
     .number()
     .positive()
     .default(600_000), // 10 minutes between runs
+  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_PROJECT_LIMIT: z.coerce
+    .number()
+    .positive()
+    .default(100), // Max projects per batch DELETE
+  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_CHUNK_SIZE: z.coerce
+    .number()
+    .positive()
+    .default(100), // Chunk size for counting projects in ClickHouse
+  LANGFUSE_BATCH_DATA_RETENTION_CLEANER_DELETE_TIMEOUT_MS: z.coerce
+    .number()
+    .positive()
+    .default(3_600_000), // 1 hour for DELETE operations
+
+  // ClickHouse deleted-mask cleaner configuration
+  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_ENABLED: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_INTERVAL_MS: z.coerce
+    .number()
+    .positive()
+    .default(3_600_000), // 1 hour between runs
+  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_SUBMIT_TIMEOUT_MS: z.coerce
+    .number()
+    .positive()
+    .default(60_000), // Wait up to 1 minute for ALTER submission; mutation can run for hours
+  LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_CLUSTER_MODE_ENABLED: z
+    .enum(["true", "false"])
+    .default("false"), // Use ON CLUSTER and clusterAllReplicas for cleaner operations
+
   // Media Retention Cleaner configuration (S3/PostgreSQL)
   LANGFUSE_MEDIA_RETENTION_CLEANER_ITEM_LIMIT: z.coerce
     .number()
@@ -349,6 +547,54 @@ const EnvSchema = z.object({
     .positive()
     .default(5),
 
+  // V4 migration flags. See LFE-9778.
+  LANGFUSE_MIGRATION_V4_WRITE_MODE: z
+    .enum(["legacy", "dual", "events_only"])
+    .default("legacy"),
+  LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR: z
+    .enum(["dual_write", "direct"])
+    .default("dual_write"),
+  LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: z
+    .enum(["true", "false"])
+    .default("false"),
+
+  // Background-migration env gates. Names share the LANGFUSE_BACKGROUND_MIGRATION_
+  // prefix so the BackgroundMigrationManager can discover them by scanning env
+  // keys; each gates one or more rows in the background_migrations table via
+  // `args.envGate`. Default to "false" so dormant migrations only run when the
+  // operator explicitly opts in.
+  LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_BACKGROUND_MIGRATION_V4_DROP_PID_TID_SORTING_TABLES: z
+    .enum(["true", "false"])
+    .default("false"),
+
+  LANGFUSE_EXPERIMENT_EVENT_PROPAGATION_PARTITION_DELAY_MINUTES: z.coerce
+    .number()
+    .positive()
+    .int()
+    .default(10),
+
+  // Health-check threshold for the event-propagation ("dual write") job. When a
+  // client opts in via /api/health?failIfEventPropagationStuck=true, the check
+  // returns 503 if the heartbeat has not been refreshed within this many minutes,
+  // letting k8s liveness probes restart a container whose global-concurrency
+  // slot is wedged. The heartbeat is refreshed at the top of every invocation and
+  // per-chunk during the experiment backfill, so the threshold only needs to
+  // exceed the longest un-heartbeated step — a single CH INSERT (request_timeout
+  // 10 min). 15 min leaves headroom.
+  //
+  // Probes using this flag MUST set initialDelaySeconds >= 60s (one cron cycle):
+  // the heartbeat is only refreshed when the minute-boundary cron next runs, so a
+  // just-restarted (or just-re-enabled) container can carry a stale value until
+  // then. A shorter delay can crash-loop the very restart this check triggers.
+  LANGFUSE_EVENT_PROPAGATION_STUCK_THRESHOLD_MINUTES: z.coerce
+    .number()
+    .positive()
+    .int()
+    .default(15),
+
   LANGFUSE_WEBHOOK_QUEUE_PROCESSING_CONCURRENCY: z.coerce
     .number()
     .positive()
@@ -379,12 +625,52 @@ const EnvSchema = z.object({
 
 type ParsedEnv = z.infer<typeof EnvSchema>;
 
-// Compatibility export for Enterprise retention code outside the Community
-// Doris delivery boundary. Community runtime is always canonical-events only.
-export const v4WritesToEventsTable = (_envValue: ParsedEnv): boolean => true;
+// V4 migration flag helpers.
+export const v4WritesToEventsTable = (envValue: ParsedEnv): boolean =>
+  envValue.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy";
+
+export const v4WritesToLegacyTables = (envValue: ParsedEnv): boolean =>
+  envValue.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "events_only";
+
+export const v4ForceDirectOtelWrite = (envValue: ParsedEnv): boolean =>
+  envValue.LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR === "direct";
+
+export const v4AllowPreviewOptIn = (envValue: ParsedEnv): boolean =>
+  envValue.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+
+const validateV4Flags = (parsed: ParsedEnv): void => {
+  const mode = parsed.LANGFUSE_MIGRATION_V4_WRITE_MODE;
+  const otel = parsed.LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR;
+
+  // Hard errors: combinations that would silently lose data.
+  if (mode === "legacy" && otel === "direct") {
+    throw new Error(
+      "Invalid V4 config: LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR=direct " +
+        "requires LANGFUSE_MIGRATION_V4_WRITE_MODE in {dual, events_only}. " +
+        "Direct OTel writes target events_full, which is not read in legacy mode.",
+    );
+  }
+  if (mode === "events_only" && otel === "dual_write") {
+    throw new Error(
+      "Invalid V4 config: LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR=dual_write " +
+        "is incoherent with LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only " +
+        "(would dual-write to legacy tables the deployment otherwise skips).",
+    );
+  }
+  if (mode === "events_only" && !v4AllowPreviewOptIn(parsed)) {
+    throw new Error(
+      "Invalid V4 config: LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only requires " +
+        "LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true. Web reads are gated " +
+        "solely on the opt-in flag; without it they target the legacy " +
+        "traces/observations tables that events_only mode no longer writes to.",
+    );
+  }
+};
 
 const parseEnv = (): ParsedEnv => {
-  return EnvSchema.parse(removeEmptyEnvVariables(process.env));
+  const parsed = EnvSchema.parse(removeEmptyEnvVariables(process.env));
+  validateV4Flags(parsed);
+  return parsed;
 };
 
 export const env: ParsedEnv =

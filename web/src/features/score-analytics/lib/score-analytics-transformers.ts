@@ -161,7 +161,7 @@ export function calculateModeMetrics(params: {
   }
 
   // Extract unique categories and create mapping
-  // This matches the ORDER BY in the Doris query
+  // This matches the ORDER BY in the ClickHouse query
   const uniqueCategories = Array.from(
     new Set(params.timeSeries.map((item) => item.category)),
   ).sort();

@@ -236,7 +236,7 @@ describe("prepareTimeAxis", () => {
     );
   });
 
-  it("parses a no-timezone Doris datetime as UTC (not local)", () => {
+  it("parses a no-timezone ClickHouse datetime as UTC (not local)", () => {
     expect(parseChartTimestamp("2026-06-28 23:00:00")?.getTime()).toBe(
       Date.UTC(2026, 5, 28, 23, 0, 0),
     );

@@ -184,12 +184,21 @@ export default withMiddlewares({
       // At this point, we have the raw OpenTelemetry Span body. We upload the full batch to S3
       // and the OtelIngestionProcessor logic will handle processing in the worker container.
       try {
-        const operation =
-          await processor.publishToAnalyticsIngestion(resourceSpans);
-        res.setHeader(
-          "x-langfuse-ingestion-operation-id",
-          operation.operationId,
-        );
+        if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+          const operation = await processor.publishToAnalyticsBackend(
+            resourceSpans,
+            "doris",
+          );
+          res.setHeader(
+            "x-langfuse-ingestion-operation-id",
+            operation.operationId,
+          );
+        } else {
+          await processor.publishToAnalyticsBackend(
+            resourceSpans,
+            "clickhouse",
+          );
+        }
         return {};
       } catch (error) {
         markProjectIngestFailure(auth.scope.projectId, {

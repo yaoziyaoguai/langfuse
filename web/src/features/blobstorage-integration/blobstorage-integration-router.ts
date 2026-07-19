@@ -74,9 +74,15 @@ export const blobStorageIntegrationRouter = createTRPCRouter({
         scope: "integrations:CRUD",
       });
       try {
-        const isEnrichedExportAvailable = isEnrichedBlobExportAvailable();
+        const isCloud = Boolean(env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION);
+        const isEnrichedExportAvailable = isEnrichedBlobExportAvailable(
+          isCloud,
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true",
+        );
         // Data capability for legacy sources (see export-source-policy.ts).
-        const legacyWritesActive = areLegacyWritesActive();
+        const legacyWritesActive = areLegacyWritesActive(
+          env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+        );
 
         const config = await ctx.prisma.blobStorageIntegration.findFirst({
           where: {
@@ -125,6 +131,9 @@ export const blobStorageIntegrationRouter = createTRPCRouter({
         });
 
         const isCloud = Boolean(env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION);
+        const isV4PreviewEnabled =
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+
         const existingIntegration =
           await ctx.prisma.blobStorageIntegration.findUnique({
             where: { projectId: input.projectId },
@@ -147,8 +156,13 @@ export const blobStorageIntegrationRouter = createTRPCRouter({
           persistedExportSource: existingIntegration?.exportSource,
           ctx: {
             isCloud,
-            enrichedAvailable: isEnrichedBlobExportAvailable(),
-            legacyWritesActive: areLegacyWritesActive(),
+            enrichedAvailable: isEnrichedBlobExportAvailable(
+              isCloud,
+              isV4PreviewEnabled,
+            ),
+            legacyWritesActive: areLegacyWritesActive(
+              env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+            ),
             projectCreatedAt,
             integrationCreatedAt: existingIntegration?.createdAt ?? null,
           },

@@ -355,7 +355,7 @@ export const api = createTRPCNext<AppRouter>({
             networkMode: "always",
             // Don't retry on 404s: a deleted/missing resource never appears via
             // retry, so failing fast avoids piling up pointless refetches (and
-            // Doris load for resources backed by it). Every other 4xx keeps
+            // ClickHouse load for resources backed by it). Every other 4xx keeps
             // the default retry/backoff — some (e.g. a route param that hasn't
             // hydrated yet, a proxy-level 429) are transient and self-heal.
             retry: (failureCount, error) => {

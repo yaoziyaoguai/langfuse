@@ -30,6 +30,7 @@ const makeSession = ({
       canCreateOrganizations,
       organizations,
       featureFlags: {
+        excludeClickhouseRead: false,
         templateFlag: true,
       },
       admin: false,

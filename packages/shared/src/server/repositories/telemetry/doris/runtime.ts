@@ -1,4 +1,5 @@
 import { env } from "../../../../env";
+import { isAnalyticsBackend } from "../../../analytics-persistence";
 import { DorisClientManager } from "../../../doris/client";
 import {
   parseDorisQueryConfig,
@@ -12,7 +13,14 @@ import {
 let repositories: DorisTelemetryRepositories | undefined;
 let executor: ReturnType<DorisClientManager["getClient"]> | undefined;
 
+export function isDorisAnalyticsBackend(): boolean {
+  return isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "doris");
+}
+
 export function getDorisTelemetryRepositories(): DorisTelemetryRepositories {
+  if (!isDorisAnalyticsBackend()) {
+    throw new Error("Doris analytics repositories are not active");
+  }
   repositories ??= createDorisTelemetryRepositories(getDorisQueryExecutor());
   return repositories;
 }
@@ -20,6 +28,9 @@ export function getDorisTelemetryRepositories(): DorisTelemetryRepositories {
 export function getDorisQueryExecutor(): ReturnType<
   DorisClientManager["getClient"]
 > {
+  if (!isDorisAnalyticsBackend()) {
+    throw new Error("Doris analytics repositories are not active");
+  }
   executor ??= DorisClientManager.getInstance().getClient(
     parseDorisQueryConfig(
       {

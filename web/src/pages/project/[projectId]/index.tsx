@@ -12,6 +12,7 @@ import {
 } from "@langfuse/shared";
 import { useQueryFilterState } from "@/src/features/filters/hooks/useFilterState";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { StringParam, useQueryParam } from "use-query-params";
 import {
   DASHBOARD_AGGREGATION_OPTIONS,
   toAbsoluteTimeRange,
@@ -35,11 +36,18 @@ import {
   getDashboardQuerySchedulerMaxConcurrent,
   useDashboardQueryScheduler,
 } from "@/src/hooks/useDashboardQueryScheduler";
+import Link from "next/link";
+import { PencilIcon } from "lucide-react";
+import { showErrorToast } from "@/src/features/notifications/showErrorToast";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { Button } from "@/src/components/ui/button";
 import { DashboardGrid } from "@/src/features/widgets/components/DashboardGrid";
+import { HomeDashboardSelect } from "@/src/features/dashboard/components/HomeDashboardSelect";
 
 export default function Dashboard() {
   const router = useRouter();
+  const utils = api.useUtils();
   const capture = usePostHogClientCapture();
   const projectId = router.query.projectId as string;
   const { timeRange, setTimeRange } = useDashboardDateRange();
@@ -131,10 +139,57 @@ export default function Dashboard() {
     { projectId },
     { enabled: Boolean(projectId), retry: false },
   );
-  const displayedDashboard = homeDashboard.data?.dashboard ?? null;
-  const dashboardId = LANGFUSE_HOME_DASHBOARD_ID;
+  const appliedDefaultId =
+    homeDashboard.data?.homeDashboardId ?? LANGFUSE_HOME_DASHBOARD_ID;
+
+  // Selecting in the picker "peeks" a dashboard on Home — tracked in the URL
+  // (?dashboard=...) so the state is explicit and linkable; the bare URL
+  // always shows the project default. "Set default" persists for the project.
+  const [peekParam, setPeekParam] = useQueryParam("dashboard", StringParam);
+  const peekId = peekParam && peekParam !== appliedDefaultId ? peekParam : null;
+  const setPeekId = useCallback(
+    (id: string | null) => {
+      // replaceIn: peeking is view state, not a navigation history entry
+      setPeekParam(id ?? undefined, "replaceIn");
+    },
+    [setPeekParam],
+  );
+  const peekQuery = api.dashboard.getDashboard.useQuery(
+    { projectId, dashboardId: peekId ?? "" },
+    { enabled: Boolean(projectId) && Boolean(peekId), retry: false },
+  );
+
+  const displayedDashboard = peekId
+    ? (peekQuery.data ?? null)
+    : (homeDashboard.data?.dashboard ?? null);
+  const dashboardId =
+    displayedDashboard?.id ?? peekId ?? LANGFUSE_HOME_DASHBOARD_ID;
+  const dashboardName = displayedDashboard?.name ?? "Langfuse Home";
   const dashboardOwner = displayedDashboard?.owner ?? "LANGFUSE";
-  const isResolvingDashboard = homeDashboard.isPending;
+  // Show a loading state until the home resolution (or peek fetch) settles —
+  // rendering the curated fallback early would flash the wrong layout and
+  // fire its widget queries whenever the project default is a different
+  // dashboard. The constant fallback only renders once the query has settled
+  // without a dashboard (curated row missing / no read access).
+  const isResolvingDashboard = peekId
+    ? peekQuery.isPending
+    : homeDashboard.isPending;
+
+  const hasRbacCUDAccess = useHasProjectAccess({
+    projectId,
+    scope: "dashboards:CUD",
+  });
+
+  // Silent on success: the "Set default" button disappearing is the feedback.
+  const setHomeDashboard = api.dashboard.setHomeDashboard.useMutation({
+    onSuccess: () => {
+      utils.dashboard.getHomeDashboard.invalidate();
+      setPeekId(null);
+    },
+    onError: (e) => {
+      showErrorToast("Failed to set the default Home dashboard", e.message);
+    },
+  });
 
   // Usage analytics: which dashboard Home actually shows (default vs peek)
   const viewedRef = useRef<string | null>(null);
@@ -145,9 +200,15 @@ export default function Dashboard() {
     capture("dashboard:home_dashboard_viewed", {
       dashboard_id: displayedDashboard.id,
       dashboard_owner: displayedDashboard.owner,
-      is_curated_default: true,
+      is_peek: Boolean(peekId),
+      is_curated_default: !peekId && !homeDashboard.data?.homeDashboardId,
     });
-  }, [displayedDashboard, capture]);
+  }, [
+    displayedDashboard,
+    peekId,
+    homeDashboard.data?.homeDashboardId,
+    capture,
+  ]);
 
   // Home is a viewing surface: no in-place editing (that lives in the
   // Dashboards section, one pencil click away).
@@ -222,13 +283,74 @@ export default function Dashboard() {
                 columns={filterColumns}
                 filterState={userFilterState}
                 onChange={useDebounce(setUserFilterState)}
-                // Home presets query the canonical Doris events model.
+                // Analytics (LFE-10781): project-home dashboard filter — a
+                // v3/legacy surface (not the v4 events table).
                 tableName="home-dashboard"
-                isV4
+                isV4={false}
               />
             </>
           ),
-          actionButtonsRight: <SetupTracingButton />,
+          actionButtonsRight: (
+            <>
+              <HomeDashboardSelect
+                projectId={projectId}
+                value={dashboardId}
+                defaultDashboardId={appliedDefaultId}
+                onValueChange={(id) => {
+                  capture("dashboard:home_dashboard_peeked", {
+                    dashboard_id: id,
+                    is_default: id === appliedDefaultId,
+                  });
+                  setPeekId(id === appliedDefaultId ? null : id);
+                }}
+                currentDashboardName={dashboardName}
+              />
+              {Boolean(peekId) && hasRbacCUDAccess && (
+                <Button
+                  variant="outline"
+                  loading={setHomeDashboard.isPending}
+                  title="Show this dashboard on Home for everyone in this project"
+                  onClick={() => {
+                    capture("dashboard:home_dashboard_set_default", {
+                      dashboard_id: dashboardId,
+                      source: "home_selector",
+                    });
+                    setHomeDashboard.mutate({
+                      projectId,
+                      dashboardId:
+                        dashboardId === LANGFUSE_HOME_DASHBOARD_ID
+                          ? null
+                          : dashboardId,
+                    });
+                  }}
+                >
+                  Set default
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="icon"
+                title="Edit this dashboard in Dashboards"
+                asChild
+              >
+                <Link
+                  href={`/project/${projectId}/dashboards/${encodeURIComponent(dashboardId)}`}
+                  onClick={() =>
+                    capture("dashboard:home_edit_pencil_click", {
+                      dashboard_id: dashboardId,
+                      dashboard_owner: dashboardOwner,
+                    })
+                  }
+                >
+                  <PencilIcon className="h-4 w-4" />
+                  <span className="sr-only">
+                    Edit this dashboard in Dashboards
+                  </span>
+                </Link>
+              </Button>
+              <SetupTracingButton />
+            </>
+          ),
         }}
       >
         <PageHeaderControlsPortal>

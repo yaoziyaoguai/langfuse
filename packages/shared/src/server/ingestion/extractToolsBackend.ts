@@ -23,34 +23,38 @@ function parseIfString(data: unknown): unknown {
 }
 
 /**
- * Doris canonical schema for tool definitions.
+ * ClickHouse storage schema for tool definitions.
  *
  * Based on ToolDefinitionSchema from packages/shared/src/utils/IORepresentation/chatML/types.ts
  * `parameters` stored as JSON string instead of z.record
  */
-export const DorisToolDefinitionSchema = z.object({
+export const ClickhouseToolDefinitionSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
   parameters: z.string().optional(), // JSON string of parameters schema
 });
-export type DorisToolDefinition = z.infer<typeof DorisToolDefinitionSchema>;
+export type ClickhouseToolDefinition = z.infer<
+  typeof ClickhouseToolDefinitionSchema
+>;
 
 /**
- * Doris canonical schema for tool calls (invocations).
+ * ClickHouse storage schema for tool calls (invocations).
  *
  * Based on ToolCallSchema from packages/shared/src/utils/IORepresentation/chatML/types.ts
- * Adapted for the canonical Doris representation:
+ * Adapted for ClickHouse Array(JSON) storage:
  * - `arguments` stored as JSON string (base may have parsed object)
  * - `index` optional field included for parallel tool call ordering
  */
-export const DorisToolArgumentSchema = z.object({
+export const ClickhouseToolArgumentSchema = z.object({
   id: z.string(),
   name: z.string(),
   arguments: z.string(), // JSON string of call arguments
   type: z.string().optional(),
   index: z.number().optional(),
 });
-export type DorisToolArgument = z.infer<typeof DorisToolArgumentSchema>;
+export type ClickhouseToolArgument = z.infer<
+  typeof ClickhouseToolArgumentSchema
+>;
 
 /**
  * Flatten tool definition from nested or flat format.
@@ -119,13 +123,13 @@ function flattenToolCall(call: unknown): {
  * Helper to add a tool definition, deduplicating by name.
  */
 function addToolDefinition(
-  definitions: DorisToolDefinition[],
+  definitions: ClickhouseToolDefinition[],
   tool: unknown,
 ): void {
   const flattened = flattenToolDefinition(tool);
   if (!flattened.name) return; // Skip invalid tools
 
-  const normalized: DorisToolDefinition = {
+  const normalized: ClickhouseToolDefinition = {
     name: flattened.name,
     description: flattened.description,
     parameters: flattened.parameters
@@ -142,7 +146,7 @@ function addToolDefinition(
 /**
  * Helper to add a tool call/argument.
  */
-function addToolArgument(args: DorisToolArgument[], call: unknown): void {
+function addToolArgument(args: ClickhouseToolArgument[], call: unknown): void {
   const flattened = flattenToolCall(call);
   if (!flattened.name) return; // Skip invalid calls
 
@@ -156,7 +160,7 @@ function addToolArgument(args: DorisToolArgument[], call: unknown): void {
 }
 
 function addToolArguments(
-  args: DorisToolArgument[],
+  args: ClickhouseToolArgument[],
   calls: unknown[] | undefined,
 ): void {
   if (!calls) return;
@@ -234,7 +238,7 @@ function isMessageLike(value: unknown): boolean {
  * Handles Anthropic `tool_use` and AI SDK `tool-call` parts.
  */
 function addToolArgumentFromContentPart(
-  args: DorisToolArgument[],
+  args: ClickhouseToolArgument[],
   part: Record<string, unknown>,
 ): void {
   if (part.type === "tool_use") {
@@ -256,7 +260,7 @@ function addToolArgumentFromContentPart(
  */
 function extractToolsFromRawInput(
   input: unknown,
-  definitions: DorisToolDefinition[],
+  definitions: ClickhouseToolDefinition[],
 ): void {
   if (!input || typeof input !== "object") return;
 
@@ -301,7 +305,7 @@ function extractToolsFromRawInput(
  */
 function extractToolCallsFromRawOutput(
   output: unknown,
-  args: DorisToolArgument[],
+  args: ClickhouseToolArgument[],
 ): void {
   if (!output) return;
 
@@ -375,7 +379,7 @@ function extractToolCallsFromRawOutput(
  */
 function extractToolCallsFromMessage(
   msg: Record<string, unknown>,
-  args: DorisToolArgument[],
+  args: ClickhouseToolArgument[],
 ): void {
   const messageToolCalls =
     parseArrayIfString(msg.tool_calls) ?? parseArrayIfString(msg.toolCalls);
@@ -748,8 +752,8 @@ export function extractToolsFromObservation(
   input: unknown,
   output: unknown,
 ): {
-  toolDefinitions: DorisToolDefinition[];
-  toolArguments: DorisToolArgument[];
+  toolDefinitions: ClickhouseToolDefinition[];
+  toolArguments: ClickhouseToolArgument[];
 } {
   try {
     return extractToolsFromParsedObservation(
@@ -766,11 +770,11 @@ function extractToolsFromParsedObservation(
   parsedInput: unknown,
   parsedOutput: unknown,
 ): {
-  toolDefinitions: DorisToolDefinition[];
-  toolArguments: DorisToolArgument[];
+  toolDefinitions: ClickhouseToolDefinition[];
+  toolArguments: ClickhouseToolArgument[];
 } {
-  const toolDefinitions: DorisToolDefinition[] = [];
-  const toolArguments: DorisToolArgument[] = [];
+  const toolDefinitions: ClickhouseToolDefinition[] = [];
+  const toolArguments: ClickhouseToolArgument[] = [];
 
   extractToolsFromRawInput(parsedInput, toolDefinitions);
   extractToolCallsFromRawOutput(parsedOutput, toolArguments);
@@ -835,11 +839,11 @@ export function normalizeToolsForObservation(
 }
 
 /**
- * Convert tool definitions to the canonical name-keyed map.
+ * Convert array of tool definitions to Map format for ClickHouse.
  * Key: tool name, Value: JSON string of {description, parameters}
  */
 export function convertDefinitionsToMap(
-  definitions: DorisToolDefinition[],
+  definitions: ClickhouseToolDefinition[],
 ): Record<string, string> {
   const map: Record<string, string> = {};
   for (const def of definitions) {
@@ -853,7 +857,7 @@ export function convertDefinitionsToMap(
 }
 
 /**
- * Convert tool calls to parallel canonical arrays.
+ * Convert array of tool calls to parallel arrays for ClickHouse.
  *
  * Returns:
  * - tool_calls: Array of JSON strings containing {id, arguments, type, index} (NO name)
@@ -862,7 +866,7 @@ export function convertDefinitionsToMap(
  * This structure enables efficient filtering by name using has(tool_call_names, 'name')
  * without needing to parse JSON.
  */
-export function convertCallsToArrays(args: DorisToolArgument[]): {
+export function convertCallsToArrays(args: ClickhouseToolArgument[]): {
   tool_calls: string[];
   tool_call_names: string[];
 } {

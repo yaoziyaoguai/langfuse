@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 const requiredSharedEnv = {
+  CLICKHOUSE_URL: "http://localhost:8123",
+  CLICKHOUSE_USER: "default",
+  CLICKHOUSE_PASSWORD: "password",
   LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "test-bucket",
 };
 

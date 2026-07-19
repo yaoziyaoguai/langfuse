@@ -1,12 +1,6 @@
 import { env } from "../../env";
+import { type IngestionEntityTypes } from "../clickhouse/schemaUtils";
 import { safeBlobKeySegment } from "../services/safeBlobKeySegment";
-
-export type IngestionEntityType =
-  | "trace"
-  | "observation"
-  | "score"
-  | "sdk_log"
-  | "dataset_run_item";
 
 /**
  * Standard event-upload key: `<projectId>/<entityType>/<eventBodyId>/<eventId>.json`
@@ -52,7 +46,7 @@ export type ParsedEventKey =
  * the one this caller observed.
  *
  * `entityType` is returned as a raw string and is NOT validated against
- * `IngestionEntityType` here — callers that route by entity type (queue
+ * `IngestionEntityTypes` here — callers that route by entity type (queue
  * choice, event-type mapping) MUST validate before trusting it.
  */
 export function parseEventKey(key: string): ParsedEventKey | null {
@@ -82,7 +76,7 @@ export function parseEventKey(key: string): ParsedEventKey | null {
  *
  * Use this when the caller has the ORIGINAL entity ID — e.g. the producer at
  * write time, populating `bucketPrefix` on the IngestionQueue payload, or the
- * `Doris.ts` upsert path turning a record id into a path. Centralizing
+ * `clickhouse.ts` upsert path turning a record id into a path. Centralizing
  * the formula here is what makes producer/consumer drift structurally
  * impossible: every producer that writes an event file goes through this
  * exact function.
@@ -93,7 +87,7 @@ export function parseEventKey(key: string): ParsedEventKey | null {
  */
 export function buildEventBucketPrefix(params: {
   projectId: string;
-  entityType: IngestionEntityType;
+  entityType: IngestionEntityTypes;
   entityId: string;
 }): string {
   return `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}${params.projectId}/${params.entityType}/${safeBlobKeySegment(params.entityId)}/`;

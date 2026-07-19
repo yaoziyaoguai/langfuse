@@ -182,7 +182,7 @@ export function useEventsFilterOptions({
     [lazyColumnSet],
   );
 
-  // Eager bulk query: one Doris scan for the always-visible columns (lazy
+  // Eager bulk query: one ClickHouse scan for the always-visible columns (lazy
   // mode) — or the explicit/all columns in non-lazy mode (unchanged behavior).
   const eagerColumns = lazy ? [...EAGER_EVENT_FILTER_OPTION_COLUMNS] : columns;
   const eagerQuery = api.events.filterOptions.useQuery(

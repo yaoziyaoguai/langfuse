@@ -6,9 +6,9 @@ import {
   createDatasetRunScore,
 } from "@langfuse/shared/src/server";
 import {
-  createObservationsDoris,
-  createScoresDoris,
-  createTracesDoris,
+  createObservationsCh,
+  createScoresCh,
+  createTracesCh,
   createOrgProjectAndApiKey,
 } from "@langfuse/shared/src/server";
 import { makeZodVerifiedAPICall } from "@/src/__tests__/test-utils";
@@ -59,7 +59,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
         is_deleted: 0,
       });
 
-      await createScoresDoris([score]);
+      await createScoresCh([score]);
 
       const getScore = await makeZodVerifiedAPICall(
         GetScoreResponseV2,
@@ -101,10 +101,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
         comment: null,
         observation_id: null,
       });
-      await Promise.all([
-        createTracesDoris([trace]),
-        createScoresDoris([score]),
-      ]);
+      await Promise.all([createTracesCh([trace]), createScoresCh([score])]);
 
       const fetchedScore = await makeZodVerifiedAPICall(
         GetScoreResponseV2,
@@ -136,7 +133,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
         is_deleted: 0,
       });
 
-      await createScoresDoris([score]);
+      await createScoresCh([score]);
 
       const getScore = await makeZodVerifiedAPICall(
         GetScoreResponseV2,
@@ -180,7 +177,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
         is_deleted: 0,
       });
 
-      await createScoresDoris([score]);
+      await createScoresCh([score]);
 
       const getScore = await makeZodVerifiedAPICall(
         GetScoreResponseV2,
@@ -224,7 +221,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
         is_deleted: 0,
       });
 
-      await createScoresDoris([score]);
+      await createScoresCh([score]);
 
       const getScore = await makeZodVerifiedAPICall(
         GetScoreResponseV2,
@@ -322,8 +319,8 @@ describe("/api/public/v2/scores API Endpoint", () => {
               projectId: newProjectId,
             },
           }),
-          createTracesDoris([trace, trace_2, trace_3]),
-          createObservationsDoris([generation]),
+          createTracesCh([trace, trace_2, trace_3]),
+          createObservationsCh([generation]),
         ]);
 
         configId = config.id;
@@ -462,7 +459,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
         });
 
-        await createScoresDoris([
+        await createScoresCh([
           score1,
           score2,
           score3,
@@ -720,7 +717,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
             environment: "development",
           });
 
-          await createTracesDoris([traceWithDifferentEnv]);
+          await createTracesCh([traceWithDifferentEnv]);
 
           const traceScoreWithEnv = createTraceScore({
             id: traceScoreWithEnvId,
@@ -732,7 +729,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
             environment: "staging",
           });
 
-          await createScoresDoris([
+          await createScoresCh([
             sessionScoreWithEnv,
             sessionScoreDefaultEnv,
             traceScoreWithEnv,
@@ -806,7 +803,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
             environment: "staging",
           });
 
-          await createTracesDoris([matchingTrace]);
+          await createTracesCh([matchingTrace]);
 
           const matchingScore = createTraceScore({
             id: matchingScoreId,
@@ -818,7 +815,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
             environment: "staging",
           });
 
-          await createScoresDoris([matchingScore]);
+          await createScoresCh([matchingScore]);
 
           const getAllScore = await makeZodVerifiedAPICall(
             GetScoresResponseV2,
@@ -877,10 +874,10 @@ describe("/api/public/v2/scores API Endpoint", () => {
             queueGenerationId = v4();
 
             await Promise.all([
-              createTracesDoris([
+              createTracesCh([
                 createTrace({ id: queueTraceId, project_id: projectId }),
               ]),
-              createObservationsDoris([
+              createObservationsCh([
                 createObservation({
                   id: queueGenerationId,
                   project_id: projectId,
@@ -912,7 +909,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
               queue_id: queueId,
             });
 
-            await createScoresDoris([score, score2]);
+            await createScoresCh([score, score2]);
           });
 
           it("get all scores for queueId", async () => {
@@ -1451,10 +1448,8 @@ describe("/api/public/v2/scores API Endpoint", () => {
         const sId2 = v4();
         const sId3 = v4();
 
-        await createTracesDoris([
-          createTrace({ id: tId, project_id: projectId }),
-        ]);
-        await createObservationsDoris([
+        await createTracesCh([createTrace({ id: tId, project_id: projectId })]);
+        await createObservationsCh([
           createObservation({
             id: obsId1,
             project_id: projectId,
@@ -1471,7 +1466,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
             type: "GENERATION",
           }),
         ]);
-        await createScoresDoris([
+        await createScoresCh([
           createTraceScore({
             id: sId1,
             project_id: projectId,
@@ -1548,7 +1543,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           tags: ["tag1", "tag2"],
           environment: "production",
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1558,7 +1553,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1595,7 +1590,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           user_id: "test-user",
           tags: ["tag1"],
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1605,7 +1600,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 50,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1640,7 +1635,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           user_id: "test-user",
           tags: ["tag1", "tag2"],
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1650,7 +1645,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 75,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1680,7 +1675,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           project_id: projectId,
           user_id: "test-user",
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1690,7 +1685,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1723,7 +1718,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1755,7 +1750,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           user_id: "test-user",
           tags: ["tag1"],
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1765,7 +1760,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1819,7 +1814,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           user_id: "test-user",
           tags: ["tag1", "tag2"],
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -1845,7 +1840,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 30,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score1, score2, score3]);
+        await createScoresCh([score1, score2, score3]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1918,7 +1913,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           project_id: projectId,
           user_id: "test-user",
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1928,7 +1923,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1958,7 +1953,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           project_id: projectId,
           user_id: "test-user",
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score = createTraceScore({
           id: scoreId,
@@ -1968,7 +1963,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 100,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score]);
+        await createScoresCh([score]);
 
         const getScores = await makeZodVerifiedAPICall(
           GetScoresResponseV2,
@@ -1998,7 +1993,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2018,7 +2013,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
           metadata: { user_id: "bob" },
         });
-        await createScoresDoris([score1, score2]);
+        await createScoresCh([score1, score2]);
 
         const filterParam = JSON.stringify([
           {
@@ -2053,7 +2048,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2073,7 +2068,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
           metadata: { region: "eu-west-1" },
         });
-        await createScoresDoris([score1, score2]);
+        await createScoresCh([score1, score2]);
 
         const filterParam = JSON.stringify([
           {
@@ -2107,7 +2102,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2118,7 +2113,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
           metadata: { team: "backend" },
         });
-        await createScoresDoris([score1]);
+        await createScoresCh([score1]);
 
         const filterParam = JSON.stringify([
           {
@@ -2153,7 +2148,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2182,7 +2177,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
           metadata: { env: "staging", team: "backend" },
         });
-        await createScoresDoris([score1, score2, score3]);
+        await createScoresCh([score1, score2, score3]);
 
         const filterParam = JSON.stringify([
           {
@@ -2225,7 +2220,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2254,7 +2249,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           data_type: "NUMERIC",
           metadata: { user_id: "alice" },
         });
-        await createScoresDoris([score1, score2, score3]);
+        await createScoresCh([score1, score2, score3]);
 
         const filterParam = JSON.stringify([
           {
@@ -2289,7 +2284,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           id: traceId,
           project_id: projectId,
         });
-        await createTracesDoris([trace]);
+        await createTracesCh([trace]);
 
         const score1 = createTraceScore({
           id: scoreId1,
@@ -2307,7 +2302,7 @@ describe("/api/public/v2/scores API Endpoint", () => {
           value: 50,
           data_type: "NUMERIC",
         });
-        await createScoresDoris([score1, score2]);
+        await createScoresCh([score1, score2]);
 
         // Simple param says name=accuracy, but advanced filter overrides to name=latency
         const filterParam = JSON.stringify([

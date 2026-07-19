@@ -146,10 +146,12 @@ export const upsertWebCalloutEndpoint = async ({
 export const invokeWebCalloutEndpoint = async ({
   prisma,
   input,
+  useEventsTable,
   invoker,
 }: {
   prisma: PrismaClient;
   input: WebCalloutInvokeInput;
+  useEventsTable: boolean;
   invoker: {
     orgId: string;
     userId: string;
@@ -184,6 +186,7 @@ export const invokeWebCalloutEndpoint = async ({
     await assertTargetBelongsToProject({
       prisma,
       input,
+      useEventsTable,
     });
     await assertValidCalloutUrl(endpoint.url);
 

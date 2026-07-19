@@ -19,8 +19,9 @@ export default withMiddlewares({
     name: "Create Span (Legacy)",
     bodySchema: PostSpansV1Body,
     responseSchema: PostSpansV1Response,
-    // The compatibility route remains registered but processEventBatch
-    // returns a structured 501; R1A tracing ingestion uses OTLP.
+    // Writes an observation-create event that lands in the legacy observations
+    // ClickHouse table; events_only deployments expect OTel ingestion.
+    rejectInEventsOnlyMode: true,
     fn: async ({ body, auth, req, res }) => {
       const event = {
         id: v4(),
@@ -42,12 +43,9 @@ export default withMiddlewares({
       });
       if (result.errors.length > 0) {
         const error = result.errors[0];
-        res.status(error.status).json({
-          error: error.error,
-          code: error.code,
-          message: error.message,
-          recovery: error.recovery,
-        });
+        res
+          .status(error.status)
+          .json({ message: error.error ?? error.message });
         return { id: "" }; // dummy return
       }
       if (result.successes.length !== 1) {
@@ -61,6 +59,7 @@ export default withMiddlewares({
     name: "Update Span (Legacy)",
     bodySchema: PatchSpansV1Body,
     responseSchema: PatchSpansV1Response,
+    rejectInEventsOnlyMode: true,
     fn: async ({ body, auth, req, res }) => {
       const event = {
         id: v4(),
@@ -80,12 +79,9 @@ export default withMiddlewares({
       });
       if (result.errors.length > 0) {
         const error = result.errors[0];
-        res.status(error.status).json({
-          error: error.error,
-          code: error.code,
-          message: error.message,
-          recovery: error.recovery,
-        });
+        res
+          .status(error.status)
+          .json({ message: error.error ?? error.message });
         return { id: "" }; // dummy return
       }
       if (result.successes.length !== 1) {

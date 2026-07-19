@@ -31,6 +31,6 @@ export class PrismaAnalyticsCompatibilityControlState implements AnalyticsCompat
 }
 
 /** Compatibility adapter for the separately-owned EE package. */
-export function convertDateToClickhouseDateTime(date: Date): string {
+export function convertDateToDorisCompatibilityDateTime(date: Date): string {
   return date.toISOString().replace("T", " ").replace("Z", "");
 }

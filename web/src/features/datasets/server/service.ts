@@ -126,7 +126,11 @@ export const getRunItemsByRunIdOrItemId = async <WithIO extends boolean = true>(
         observationLevelRunItems.map((ri) => ri.traceId),
         filterTimestamp,
       ),
-      getLatencyAndTotalCostForObservationsByTraces(projectId, traceIds),
+      getLatencyAndTotalCostForObservationsByTraces(
+        projectId,
+        traceIds,
+        filterTimestamp,
+      ),
     ]);
 
   // Calculate recursive metrics for observation-level run items

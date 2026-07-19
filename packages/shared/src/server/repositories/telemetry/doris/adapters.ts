@@ -20,7 +20,7 @@ function prefixedTotal(
     : null;
 }
 
-export function reduceUsageOrCostDetails(
+export function reduceDorisUsageOrCostDetails(
   details: Readonly<Record<string, number>> | null | undefined,
 ): { input: number | null; output: number | null; total: number | null } {
   return {

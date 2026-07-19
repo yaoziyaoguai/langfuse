@@ -1,3 +1,4 @@
+import { env } from "@/src/env.mjs";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import {
@@ -14,6 +15,7 @@ import {
   Prisma,
 } from "@langfuse/shared";
 import {
+  getObservationById,
   getObservationByIdFromEventsTable,
   logger,
 } from "@langfuse/shared/src/server";
@@ -519,13 +521,20 @@ export const queueRouter = createTRPCRouter({
       };
 
       if (item.objectType === AnnotationQueueObjectType.OBSERVATION) {
-        const analyticsObservation = await getObservationByIdFromEventsTable({
-          id: item.objectId,
-          projectId: input.projectId,
-        });
+        const clickhouseObservation =
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
+            ? await getObservationByIdFromEventsTable({
+                id: item.objectId,
+                projectId: input.projectId,
+              })
+            : // eslint-disable-next-line @typescript-eslint/no-deprecated
+              await getObservationById({
+                id: item.objectId,
+                projectId: input.projectId,
+              });
         return {
           ...inflatedUpdatedItem,
-          parentTraceId: analyticsObservation?.traceId,
+          parentTraceId: clickhouseObservation?.traceId,
         };
       }
 

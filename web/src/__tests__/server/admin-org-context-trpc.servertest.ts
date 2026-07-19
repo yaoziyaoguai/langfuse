@@ -41,6 +41,7 @@ const createSession = (opts: { admin: boolean; member: boolean }): Session => ({
         ] as SessionOrgs)
       : [],
     featureFlags: {
+      excludeClickhouseRead: false,
       templateFlag: true,
     } as SessionFeatureFlags,
     admin: opts.admin,

@@ -99,7 +99,7 @@ async function getAuthorizedTrace(params: {
 }) {
   const { traceId, projectId, session } = params;
 
-  const analyticsTrace = await getTraceByIdFromEventsTable({
+  const clickhouseTrace = await getTraceByIdFromEventsTable({
     traceId,
     projectId,
     renderingProps: {
@@ -108,14 +108,14 @@ async function getAuthorizedTrace(params: {
     },
   });
 
-  if (!analyticsTrace) {
+  if (!clickhouseTrace) {
     throw new LangfuseNotFoundError("Trace not found");
   }
 
-  const traceSession = analyticsTrace.sessionId
+  const traceSession = clickhouseTrace.sessionId
     ? await prisma.traceSession.findFirst({
         where: {
-          id: analyticsTrace.sessionId,
+          id: clickhouseTrace.sessionId,
           projectId,
         },
         select: {
@@ -127,7 +127,7 @@ async function getAuthorizedTrace(params: {
   const isSessionPublic = traceSession?.public === true;
   const isAdmin = session?.user.admin === true;
   const canReadTrace =
-    analyticsTrace.public ||
+    clickhouseTrace.public ||
     isSessionPublic ||
     isAdmin ||
     hasProjectAccess(session, projectId);
@@ -151,7 +151,7 @@ async function getAuthorizedTrace(params: {
     });
   }
 
-  return analyticsTrace;
+  return clickhouseTrace;
 }
 
 export async function buildTraceExport({

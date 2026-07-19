@@ -2,6 +2,7 @@ import { context } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { normalizeAnalyticsQueryTags } from "../analyticsQueryTags";
+import { normalizeClickHouseQueryTags } from "../clickhouse/queryTags";
 import { contextWithLangfuseProps } from "../headerPropagation";
 import { instrumentAsync, instrumentSync } from ".";
 
@@ -21,13 +22,13 @@ describe("instrumentation baggage propagation", () => {
   it("instrumentAsync keeps worker surface/route across startNewTrace", async () => {
     const workerContext = contextWithLangfuseProps({
       projectId: "project-1",
-      analytics: { surface: "worker", route: "langfuse.queue.monitor" },
+      clickhouse: { surface: "worker", route: "langfuse.queue.monitor" },
     });
 
     const tags = await context.with(workerContext, () =>
       instrumentAsync(
         { name: "process monitor", startNewTrace: true },
-        async () => normalizeAnalyticsQueryTags(),
+        async () => normalizeClickHouseQueryTags(),
       ),
     );
 
@@ -41,18 +42,42 @@ describe("instrumentation baggage propagation", () => {
   it("instrumentSync keeps worker surface/route across startNewTrace", () => {
     const workerContext = contextWithLangfuseProps({
       projectId: "project-1",
-      analytics: { surface: "worker", route: "langfuse.queue.monitor" },
+      clickhouse: { surface: "worker", route: "langfuse.queue.monitor" },
     });
 
     const tags = context.with(workerContext, () =>
       instrumentSync({ name: "process monitor", startNewTrace: true }, () =>
-        normalizeAnalyticsQueryTags(),
+        normalizeClickHouseQueryTags(),
       ),
     );
 
     expect(tags).toMatchObject({
       surface: "worker",
       route: "langfuse.queue.monitor",
+      projectId: "project-1",
+    });
+  });
+
+  it("propagates neutral analytics tags alongside ClickHouse tags", () => {
+    const workerContext = contextWithLangfuseProps({
+      projectId: "project-1",
+      analytics: { surface: "worker", route: "langfuse.queue.analytics" },
+      clickhouse: { surface: "worker", route: "langfuse.queue.clickhouse" },
+    });
+
+    const tags = context.with(workerContext, () => ({
+      analytics: normalizeAnalyticsQueryTags(),
+      clickhouse: normalizeClickHouseQueryTags(),
+    }));
+
+    expect(tags.analytics).toMatchObject({
+      surface: "worker",
+      route: "langfuse.queue.analytics",
+      projectId: "project-1",
+    });
+    expect(tags.clickhouse).toMatchObject({
+      surface: "worker",
+      route: "langfuse.queue.clickhouse",
       projectId: "project-1",
     });
   });

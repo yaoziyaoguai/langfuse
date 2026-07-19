@@ -1,11 +1,13 @@
 import {
   createTrace,
   createObservation,
+  createTracesCh,
+  createObservationsCh,
+  createEventsCh,
   ObservationRecordInsertType,
 } from "../../../src/server";
 import { ObservationType } from "../../../src/domain";
-import { observationToEvent } from "./event-mirror";
-import { seedEventFixtures } from "../utils/analytics-writer";
+import { observationToEvent, traceToEvent } from "./event-mirror";
 import { buildPayload, generationUsageCost } from "./payload";
 import { jitter, Rng, utcDayStartMs } from "./rng";
 import {
@@ -68,7 +70,7 @@ const run = async (
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
   const turns = params["turns"] as number;
-  const withV4 = true;
+  const withV4 = params["v4"] as boolean;
   // Default: attach langgraph metadata (the explicit-flow graph). --timing-only
   // omits it to exercise the pure timing-based graph fallback. (A boolean that
   // defaults true can't be unset via the CLI's presence-only flags, so this is
@@ -156,7 +158,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "agent-timeline",
-      target: "doris",
+      target: "clickhouse",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -283,9 +285,12 @@ const run = async (
     });
   });
 
-  const events = observations.map((observation) =>
-    observationToEvent(observation, trace),
-  );
+  const events = withV4
+    ? [
+        traceToEvent(trace),
+        ...observations.map((o) => observationToEvent(o, trace)),
+      ]
+    : [];
 
   const counts: Record<string, number> = {
     traces: 1,
@@ -296,8 +301,12 @@ const run = async (
   ctx.log(
     `writing 1 trace (${turns} turns), ${observations.length} observations${withV4 ? `, ${events.length} events` : ""}`,
   );
+  await createTracesCh([trace]);
+  for (const batch of chunk(observations, 1000)) {
+    await createObservationsCh(batch);
+  }
   for (const batch of chunk(events, 500)) {
-    await seedEventFixtures(batch);
+    await createEventsCh(batch);
   }
 
   const verified: Record<string, number> = {
@@ -356,7 +365,7 @@ const run = async (
 
   return {
     scenario: "agent-timeline",
-    target: "doris",
+    target: "clickhouse",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

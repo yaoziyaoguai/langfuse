@@ -4,7 +4,11 @@ import {
   type ScoreDomain,
 } from "@langfuse/shared";
 
-export type { ScoreQueryType } from "@langfuse/shared/src/server";
+export {
+  _handleGenerateScoresForPublicApi,
+  _handleGetScoresCountForPublicApi,
+  type ScoreQueryType,
+} from "@langfuse/shared/src/server";
 
 type ScoreApiResult = Omit<ScoreDomain, "longStringValue"> & {
   stringValue?: string | null;

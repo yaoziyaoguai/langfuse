@@ -149,7 +149,9 @@ export async function upsertBlobStorageIntegration(params: {
     // Under events_only a new row must never fall back to the legacy Prisma
     // column default; force EVENTS in-transaction, deployment-agnostic
     // (see export-source-policy.ts).
-    const legacyWritesActive = areLegacyWritesActive();
+    const legacyWritesActive = areLegacyWritesActive(
+      env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+    );
     const createExportSource =
       data.exportSource ??
       (params.forceEventsOnCreate || !legacyWritesActive

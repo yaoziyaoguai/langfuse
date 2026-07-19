@@ -2,7 +2,7 @@ import { type NextApiRequest } from "next";
 
 const stripSearchAndHash = (url: string) => url.split(/[?#]/, 1)[0] ?? "";
 
-export const analyticsRouteForRequest = (req: NextApiRequest) => {
+export const clickHouseRouteForRequest = (req: NextApiRequest) => {
   const method = req.method ?? "UNKNOWN";
   const rawUrl = req.url ?? "";
 

@@ -2,25 +2,27 @@ import { v4 } from "uuid";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   createObservation,
-  createObservationsDoris,
+  createObservationsCh,
   createOrgProjectAndApiKey,
-  createScoresDoris,
+  createScoresCh,
   createSessionScore,
-  createTracesDoris,
+  createTracesCh,
   getSessionsWithMetrics,
   getSessionsWithMetricsFromEvents,
   getSessionMetricsFromEvents,
   getSessionsTable,
   getSessionsTableFromEvents,
   createEvent,
-  createEventsDoris,
+  createEventsCh,
   type TraceRecordInsertType,
   type ObservationRecordInsertType,
   type EventRecordInsertType,
 } from "@langfuse/shared/src/server";
 import { createTrace } from "@langfuse/shared/src/server";
 import { type FilterState } from "@langfuse/shared";
-const isEventsPath = true;
+import { env } from "@/src/env.mjs";
+
+const isEventsPath = env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
 
 // Pick the right listing function based on env flag
 const sessionsTable = isEventsPath
@@ -175,12 +177,12 @@ async function seedSessionData(
   traces: TraceRecordInsertType[],
   observations?: ObservationRecordInsertType[],
 ) {
-  await createTracesDoris(traces);
-  if (observations?.length) await createObservationsDoris(observations);
+  await createTracesCh(traces);
+  if (observations?.length) await createObservationsCh(observations);
 
   if (isEventsPath) {
     const events = buildMatchingEvents(traces, observations ?? []);
-    await createEventsDoris(events);
+    await createEventsCh(events);
   }
 }
 
@@ -631,7 +633,7 @@ describe("trpc.sessions", () => {
       value: 1,
       data_type: "NUMERIC",
     });
-    await createScoresDoris([score]);
+    await createScoresCh([score]);
 
     const tableRows = await sessionsTable({
       projectId: project_id,
@@ -673,7 +675,7 @@ describe("trpc.sessions", () => {
     });
     await seedSessionData([trace_with_score, trace_without_score]);
 
-    await createScoresDoris([
+    await createScoresCh([
       createSessionScore({
         project_id,
         session_id: session_id_with_score,
@@ -736,9 +738,9 @@ maybeEventsTable("parity: sessions metrics from events vs legacy", () => {
     ]);
 
     // Seed legacy path (sessions materialized view) and events table in parallel
-    await createTracesDoris(traces);
-    await createObservationsDoris(observations);
-    await createEventsDoris(buildMatchingEvents(traces, observations));
+    await createTracesCh(traces);
+    await createObservationsCh(observations);
+    await createEventsCh(buildMatchingEvents(traces, observations));
 
     const filter: FilterState = [];
 
@@ -812,10 +814,10 @@ maybeEventsTable("parity: sessions metrics from events vs legacy", () => {
       createTrace({ session_id: sessionIdWithoutScore, project_id: projectId }),
     ];
 
-    await createTracesDoris(traces);
-    await createEventsDoris(buildMatchingEvents(traces, []));
+    await createTracesCh(traces);
+    await createEventsCh(buildMatchingEvents(traces, []));
 
-    await createScoresDoris([
+    await createScoresCh([
       createSessionScore({
         project_id: projectId,
         session_id: sessionIdWithTrueScore,
@@ -873,8 +875,8 @@ maybeEventsTable("parity: sessions metrics from events vs legacy", () => {
       createTrace({ session_id: otherId, project_id: projectId }),
     ];
 
-    await createTracesDoris(traces);
-    await createEventsDoris(buildMatchingEvents(traces, []));
+    await createTracesCh(traces);
+    await createEventsCh(buildMatchingEvents(traces, []));
 
     const filter: FilterState = [
       {

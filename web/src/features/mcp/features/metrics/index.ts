@@ -1,3 +1,4 @@
+import { env } from "@/src/env.mjs";
 import type { McpFeatureModule } from "../../server/registry";
 import {
   getMetricsSchemaTool,
@@ -19,4 +20,6 @@ export const metricsFeature = {
       handler: handleGetMetricsSchema,
     },
   ],
+  isEnabled: async () =>
+    env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true",
 } as const satisfies McpFeatureModule;

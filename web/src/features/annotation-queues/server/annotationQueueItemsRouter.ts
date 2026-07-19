@@ -19,12 +19,15 @@ import {
   Prisma,
 } from "@langfuse/shared";
 import {
+  getObservationById,
   getObservationByIdFromEventsTable,
   getObservationsTraceIdsFromEventsTable,
+  getTraceIdsForObservations,
   logger,
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { env } from "@/src/env.mjs";
 
 const isItemLocked = (item: AnnotationQueueItem) => {
   return (
@@ -56,7 +59,10 @@ const MAP_OBJECT_TYPE_TO_ACTION_PROPS: Record<
   },
   [AnnotationQueueObjectType.OBSERVATION]: {
     actionId: ActionId.ObservationAddToAnnotationQueue,
-    tableName: BatchExportTableName.Events,
+    tableName:
+      env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
+        ? BatchExportTableName.Events
+        : BatchExportTableName.Observations,
   },
 };
 
@@ -131,18 +137,25 @@ export const queueItemRouter = createTRPCRouter({
       };
 
       if (item.objectType === AnnotationQueueObjectType.OBSERVATION) {
-        const analyticsObservation = await getObservationByIdFromEventsTable({
-          id: item.objectId,
-          projectId: input.projectId,
-        });
+        const clickhouseObservation =
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
+            ? await getObservationByIdFromEventsTable({
+                id: item.objectId,
+                projectId: input.projectId,
+              })
+            : // eslint-disable-next-line @typescript-eslint/no-deprecated
+              await getObservationById({
+                id: item.objectId,
+                projectId: input.projectId,
+              });
 
-        if (!analyticsObservation) {
+        if (!clickhouseObservation) {
           throw new LangfuseNotFoundError("Observation not found");
         }
 
         return {
           ...inflatedItem,
-          parentTraceId: analyticsObservation?.traceId,
+          parentTraceId: clickhouseObservation?.traceId,
         };
       }
 
@@ -217,10 +230,13 @@ export const queueItemRouter = createTRPCRouter({
       let traceIds: { id: string; traceId: string }[];
 
       if (hasQueueItemsReferencingObservations) {
-        traceIds = await getObservationsTraceIdsFromEventsTable({
-          projectId: input.projectId,
-          observationIds,
-        });
+        traceIds =
+          env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true"
+            ? await getObservationsTraceIdsFromEventsTable({
+                projectId: input.projectId,
+                observationIds,
+              })
+            : await getTraceIdsForObservations(input.projectId, observationIds);
       } else {
         traceIds = [];
       }

@@ -57,7 +57,7 @@ vi.mock("../../../features/evals/server/unstable-public-api/queries", () => ({
 vi.mock("@langfuse/shared/src/server", async () => ({
   ...(await vi.importActual("@langfuse/shared/src/server")),
   invalidateProjectEvalConfigCaches: vi.fn(),
-  DorisClientManager: {
+  ClickHouseClientManager: {
     getInstance: () => ({
       closeAllConnections: vi.fn().mockResolvedValue(undefined),
     }),

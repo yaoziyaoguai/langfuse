@@ -10,7 +10,7 @@ import {
 } from "@/src/features/public-api/types/traces";
 import { InvalidRequestError } from "@langfuse/shared";
 import {
-  LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
@@ -26,6 +26,10 @@ import {
 import { v4 } from "uuid";
 import { telemetry } from "@/src/features/telemetry";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
+import {
+  generateTracesForPublicApi,
+  getTracesCountForPublicApi,
+} from "@/src/features/public-api/server/traces";
 import { env } from "@/src/env.mjs";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
 
@@ -36,8 +40,9 @@ export default withMiddlewares(
       bodySchema: PostTracesV1Body,
       responseSchema: PostTracesV1Response, // Adjust this if you have a specific response schema
       rateLimitResource: "legacy-ingestion",
-      // The compatibility route remains registered but processEventBatch
-      // returns a structured 501; R1A tracing ingestion uses OTLP.
+      // Legacy POST writes a trace-create event that lands in the legacy traces
+      // ClickHouse table; events_only deployments expect OTel ingestion.
+      rejectInEventsOnlyMode: true,
       fn: async ({ body, auth, req, res }) => {
         await telemetry();
         const event = {
@@ -57,12 +62,9 @@ export default withMiddlewares(
         });
         if (result.errors.length > 0) {
           const error = result.errors[0];
-          res.status(error.status).json({
-            error: error.error,
-            code: error.code,
-            message: error.message,
-            recovery: error.recovery,
-          });
+          res
+            .status(error.status)
+            .json({ message: error.error ?? error.message });
           return { id: "" }; // dummy return
         }
         if (result.successes.length !== 1) {
@@ -79,6 +81,7 @@ export default withMiddlewares(
       querySchema: GetTracesV1Query,
       responseSchema: GetTracesV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.tracesList,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         // Api-performance controls.
         // 1. Reject if no date range and rejection is enabled
@@ -133,31 +136,60 @@ export default withMiddlewares(
           toTimestamp: query.toTimestamp ?? undefined,
         };
 
+        if (
+          query.useEventsTable ||
+          env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+        ) {
+          const [items, count] = await Promise.all([
+            getTracesFromEventsTableForPublicApi({
+              ...filterProps,
+              advancedFilters: query.filter,
+              orderBy: query.orderBy ?? null,
+            }),
+            getTracesCountFromEventsTableForPublicApi({
+              ...filterProps,
+              advancedFilters: query.filter,
+            }),
+          ]);
+
+          return {
+            data: items.map((item) => ({
+              ...item,
+              externalId: null,
+            })),
+            meta: {
+              page: query.page,
+              limit: query.limit,
+              totalItems: count,
+              totalPages: Math.ceil(count / query.limit),
+            },
+          };
+        }
+
+        // Legacy code path using traces table
         const [items, count] = await Promise.all([
-          getTracesFromEventsTableForPublicApi({
-            ...filterProps,
+          generateTracesForPublicApi({
+            props: filterProps,
             advancedFilters: query.filter,
             orderBy: query.orderBy ?? null,
           }),
-          getTracesCountFromEventsTableForPublicApi({
-            ...filterProps,
+          getTracesCountForPublicApi({
+            props: filterProps,
             advancedFilters: query.filter,
           }),
         ]);
 
+        const finalCount = count || 0;
         return {
           data: items.map((item) => ({
             ...item,
             externalId: null,
-            htmlPath:
-              item.htmlPath ??
-              `/project/${auth.scope.projectId}/traces/${item.id}`,
           })),
           meta: {
             page: query.page,
             limit: query.limit,
-            totalItems: count,
-            totalPages: Math.ceil(count / query.limit),
+            totalItems: finalCount,
+            totalPages: Math.ceil(finalCount / query.limit),
           },
         };
       },
@@ -206,7 +238,7 @@ export default withMiddlewares(
     }),
   },
   {
-    analyticsResourceErrorMessage:
-      LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+    clickHouseResourceErrorMessage:
+      LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   },
 );

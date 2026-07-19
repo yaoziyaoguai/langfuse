@@ -2,6 +2,7 @@ export * from "./AnalyticsBatchSink";
 export * from "./AnalyticsCheckpointCoordinator";
 export * from "./AnalyticsLifecycleStore";
 export * from "./DorisAnalyticsLifecycleStore";
+export * from "./analyticsBackend";
 export * from "./acceptAnalyticsIngestion";
 export * from "./canonicalHash";
 export * from "./errors";

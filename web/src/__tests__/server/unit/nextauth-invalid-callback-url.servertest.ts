@@ -20,7 +20,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
     warn: vi.fn(),
     error: vi.fn(),
   },
-  DorisClientManager: {
+  ClickHouseClientManager: {
     getInstance: () => ({
       closeAllConnections: vi.fn(async () => undefined),
     }),

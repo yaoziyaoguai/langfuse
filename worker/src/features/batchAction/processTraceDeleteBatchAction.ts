@@ -11,11 +11,13 @@ import {
 } from "@langfuse/shared";
 import {
   getTraceDeleteCursorPageFromEvents,
+  getTraceDeleteCursorPageFromTraces,
   logger,
   shouldSkipDeletionFor,
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
-import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
+import { processClickhouseTraceDelete } from "../traces/processClickhouseTraceDelete";
+import { processPostgresTraceDelete } from "../traces/processPostgresTraceDelete";
 
 type TraceDeleteCursorPageRow = TraceDeleteBatchActionCursor;
 type CanCommitProgress = () => Promise<boolean>;
@@ -224,15 +226,26 @@ const selectNextTraceDeleteBatch = async (opts: {
   const filter = convertDatesInFiltersFromStrings(query.filter ?? []);
   const cutoffCreatedAt = new Date(opts.config.cutoffCreatedAt);
 
-  const rows = await getTraceDeleteCursorPageFromEvents({
-    projectId: opts.projectId,
-    filter,
-    cutoffCreatedAt,
-    cursor: opts.cursor,
-    searchQuery: query.searchQuery,
-    searchType: query.searchType ?? ["id"],
-    limit: opts.batchSize,
-  });
+  const rows =
+    opts.config.source === "events"
+      ? await getTraceDeleteCursorPageFromEvents({
+          projectId: opts.projectId,
+          filter,
+          cutoffCreatedAt,
+          cursor: opts.cursor,
+          searchQuery: query.searchQuery,
+          searchType: query.searchType ?? ["id"],
+          limit: opts.batchSize,
+        })
+      : await getTraceDeleteCursorPageFromTraces({
+          projectId: opts.projectId,
+          filter,
+          cutoffCreatedAt,
+          cursor: opts.cursor,
+          searchQuery: query.searchQuery,
+          searchType: query.searchType ?? ["id"],
+          limit: opts.batchSize,
+        });
 
   return buildInFlightBatch(rows);
 };
@@ -403,10 +416,16 @@ export const processTraceDeleteBatchAction = async ({
         return { status: "failed", processedBatches };
       }
 
-      await processAnalyticsTraceDeletionBatch({
-        projectId: batchAction.projectId,
-        traceIds: inFlightBatch.traceIds,
-      });
+      await Promise.all([
+        processPostgresTraceDelete(
+          batchAction.projectId,
+          inFlightBatch.traceIds,
+        ),
+        processClickhouseTraceDelete(
+          batchAction.projectId,
+          inFlightBatch.traceIds,
+        ),
+      ]);
 
       await extendProcessingLease({ batchActionId, extendLease });
 

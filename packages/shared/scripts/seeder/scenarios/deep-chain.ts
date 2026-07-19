@@ -1,10 +1,12 @@
 import {
   createTrace,
   createObservation,
+  createTracesCh,
+  createObservationsCh,
+  createEventsCh,
   ObservationRecordInsertType,
 } from "../../../src/server";
-import { observationToEvent } from "./event-mirror";
-import { seedEventFixtures } from "../utils/analytics-writer";
+import { observationToEvent, traceToEvent } from "./event-mirror";
 import { jitter, utcDayStartMs } from "./rng";
 import {
   chunk,
@@ -53,7 +55,7 @@ const run = async (
 ): Promise<SeedSummary> => {
   const startedAt = Date.now();
   const observationCount = params["observations"] as number;
-  const withV4 = true;
+  const withV4 = params["v4"] as boolean;
 
   if (observationCount < 2 || observationCount > 100_000) {
     throw new SeedError(
@@ -68,7 +70,7 @@ const run = async (
   if (ctx.dryRun) {
     return {
       scenario: "deep-chain",
-      target: "doris",
+      target: "clickhouse",
       params,
       projectId: ctx.projectId,
       environment: ctx.environment,
@@ -218,9 +220,12 @@ const run = async (
       }),
     );
   }
-  const events = observations.map((observation) =>
-    observationToEvent(observation, trace),
-  );
+  const events = withV4
+    ? [
+        traceToEvent(trace),
+        ...observations.map((obs) => observationToEvent(obs, trace)),
+      ]
+    : [];
 
   const counts: Record<string, number> = {
     traces: 1,
@@ -232,8 +237,12 @@ const run = async (
   ctx.log(
     `writing 1 trace, ${observations.length} chained observations${withV4 ? `, ${events.length} events` : ""} (total wall-clock ${(cursor / 60000).toFixed(1)} min)`,
   );
+  await createTracesCh([trace]);
+  for (const batch of chunk(observations, 1000)) {
+    await createObservationsCh(batch);
+  }
   for (const batch of chunk(events, 500)) {
-    await seedEventFixtures(batch);
+    await createEventsCh(batch);
   }
 
   // uniqExact(id): count() would see pre-merge ReplacingMergeTree duplicates
@@ -279,7 +288,7 @@ const run = async (
 
   return {
     scenario: "deep-chain",
-    target: "doris",
+    target: "clickhouse",
     params,
     projectId: ctx.projectId,
     environment: ctx.environment,

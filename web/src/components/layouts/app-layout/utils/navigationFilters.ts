@@ -8,7 +8,7 @@ import type { NavigationFilterContext } from "./navigationFilters.types";
 import { hasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { hasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 import type { Session } from "next-auth";
-import { isCommunityCapabilityAvailable } from "@/src/features/capabilities/communityAvailability";
+import { capabilityForPagePath } from "@/src/features/capabilities/communityAvailability";
 
 /** Organization type from user session (can be null when not in project/org context) */
 type Organization =
@@ -21,12 +21,12 @@ type Organization =
  * Exported for testing and composition
  */
 export const filters = {
-  communityCapability: (
+  analyticsBackendCapability: (
     route: Route,
-    _ctx: NavigationFilterContext,
+    ctx: NavigationFilterContext,
   ): Route | null =>
-    route.communityCapability &&
-    !isCommunityCapabilityAvailable(route.communityCapability)
+    ctx.session?.environment?.analyticsBackend === "doris" &&
+    capabilityForPagePath(route.pathname)
       ? null
       : route,
 
@@ -199,9 +199,9 @@ function applyFiltersToRoute(
 ): Route | null {
   // Apply filters in sequence - chain short-circuits on first null
   const filterChain = [
-    filters.communityCapability,
     filters.projectScope,
     filters.organizationScope,
+    filters.analyticsBackendCapability,
     filters.uiCustomization,
     filters.featureFlags,
     filters.entitlements,

@@ -206,7 +206,13 @@ export async function runMigrations(
       sql: `CREATE DATABASE IF NOT EXISTS \`${config.database}\``,
       timeout: queryTimeoutMs,
     });
-    await conn.changeUser({ database: config.database });
+    // Doris rejects COM_CHANGE_USER for root/admin even when only the default
+    // database changes. The identifier is validated above, so select it with
+    // ordinary SQL while keeping the authenticated session unchanged.
+    await conn.query({
+      sql: `USE \`${config.database}\``,
+      timeout: queryTimeoutMs,
+    });
     await ensureVersionTable(conn, queryTimeoutMs);
     const migrations = loadMigrations();
     const applied: string[] = [];

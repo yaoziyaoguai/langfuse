@@ -1,10 +1,10 @@
 import { z } from "zod";
 import {
   OBSERVATION_FIELD_GROUPS_PUBLIC_API,
-  OBSERVATION_FIELD_GROUP_FIELD_NAMES,
   type ObservationFieldGroupPublicApi,
   type ObservationMcpAllowedEventsTableFilterColumn,
 } from "@langfuse/shared";
+import { OBSERVATION_FIELD_GROUP_FIELD_NAMES } from "@langfuse/shared/src/server";
 
 type ObservationMcpFieldMetadata = {
   type: ObservationMcpFieldType;

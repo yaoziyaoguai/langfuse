@@ -39,4 +39,29 @@ describe("OtelIngestionProcessor Doris acceptance", () => {
       }),
     );
   });
+
+  it("dispatches each configured backend to exactly one ingestion path", async () => {
+    const processor = new OtelIngestionProcessor({
+      projectId: "project-1",
+      publicKey: "pk-lf-test",
+      sdkName: "python",
+      sdkVersion: "4.0.0",
+    });
+    const resourceSpans = [{ scopeSpans: [] }];
+    const publishDoris = vi
+      .spyOn(processor, "publishToAnalyticsIngestion")
+      .mockResolvedValue({ operationId: "operation-1", status: "ACCEPTED" });
+    const publishClickHouse = vi
+      .spyOn(processor, "publishToOtelIngestionQueue")
+      .mockResolvedValue({} as never);
+
+    await processor.publishToAnalyticsBackend(resourceSpans, "doris");
+    expect(publishDoris).toHaveBeenCalledOnce();
+    expect(publishClickHouse).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    await processor.publishToAnalyticsBackend(resourceSpans, "clickhouse");
+    expect(publishClickHouse).toHaveBeenCalledOnce();
+    expect(publishDoris).not.toHaveBeenCalled();
+  });
 });

@@ -1,21 +1,22 @@
 # Doris Runtime Security and Credential Boundary
 
-This document defines the R1A runtime boundary introduced in U2. Doris remains
-inactive by default (`LANGFUSE_ANALYTICS_BACKEND=clickhouse`) until the U8
-cutover gates pass. The local `1 FE + 1 BE` profile is for development only and
-does not prove production availability, capacity, RPO, or RTO.
+This document defines the R1A runtime boundary introduced in U2. ClickHouse is
+the default, while `LANGFUSE_ANALYTICS_BACKEND=doris` activates the Doris
+adapter for the whole deployment. The local `1 FE + 1 BE` profile is for
+development only and does not prove production availability, capacity, RPO, or
+RTO.
 
 ## Workload identities
 
-| Workload | Secret location | Minimum access | Runtime lifetime |
-| --- | --- | --- | --- |
-| Web query | web only | SELECT on R1A tables and schema ledger | pooled runtime |
-| Worker query | worker only | SELECT on R1A tables and schema ledger | pooled runtime |
-| Worker load | worker only | Stream Load/INSERT on application-written R1A tables | runtime |
-| Migrator | one-shot job only | CREATE/ALTER/DROP needed by checked migrations | job only |
-| Backup | backup job only | snapshot/backup to the frozen repository | job only |
-| Restore | restore drill/job only | restore into an isolated target, then promoted by procedure | job only |
-| Monitor | monitoring plane only | read health, workload, compaction, and capacity metadata | runtime |
+| Workload     | Secret location        | Minimum access                                              | Runtime lifetime |
+| ------------ | ---------------------- | ----------------------------------------------------------- | ---------------- |
+| Web query    | web only               | SELECT on R1A tables and schema ledger                      | pooled runtime   |
+| Worker query | worker only            | SELECT on R1A tables and schema ledger                      | pooled runtime   |
+| Worker load  | worker only            | Stream Load/INSERT on application-written R1A tables        | runtime          |
+| Migrator     | one-shot job only      | CREATE/ALTER/DROP needed by checked migrations              | job only         |
+| Backup       | backup job only        | snapshot/backup to the frozen repository                    | job only         |
+| Restore      | restore drill/job only | restore into an isolated target, then promoted by procedure | job only         |
+| Monitor      | monitoring plane only  | read health, workload, compaction, and capacity metadata    | runtime          |
 
 Web and worker query identities must differ. The worker load identity must
 differ from both query identities. Migrator, backup, and restore credentials

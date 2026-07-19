@@ -1,5 +1,14 @@
-import { getS3MediaStorageClient } from "@langfuse/shared/src/server";
-import { env } from "../../env";
+import {
+  deleteEventsByTraceIds,
+  deleteObservationsByTraceIds,
+  deleteScoresByTraceIds,
+  deleteTraces,
+  getS3MediaStorageClient,
+  logger,
+  removeIngestionEventsFromS3AndDeleteClickhouseRefsForTraces,
+  traceException,
+} from "@langfuse/shared/src/server";
+import { env, v4WritesToEventsTable } from "../../env";
 import { Prisma, prisma } from "@langfuse/shared/src/db";
 import { chunk } from "lodash";
 
@@ -152,4 +161,40 @@ export const deleteMediaItemsForTraces = async (
       `;
     }
   });
+};
+
+export const processClickhouseTraceDelete = async (
+  projectId: string,
+  traceIds: string[],
+) => {
+  logger.info(
+    `Deleting traces ${JSON.stringify(traceIds)} in project ${projectId} from Clickhouse`,
+  );
+
+  await deleteMediaItemsForTraces(projectId, traceIds);
+
+  try {
+    await Promise.all([
+      env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true"
+        ? removeIngestionEventsFromS3AndDeleteClickhouseRefsForTraces({
+            projectId,
+            traceIds,
+            includeEventsTable: v4WritesToEventsTable(env),
+          })
+        : Promise.resolve(),
+      deleteTraces(projectId, traceIds),
+      deleteObservationsByTraceIds(projectId, traceIds),
+      deleteScoresByTraceIds(projectId, traceIds),
+      v4WritesToEventsTable(env)
+        ? deleteEventsByTraceIds(projectId, traceIds)
+        : Promise.resolve(),
+    ]);
+  } catch (e) {
+    logger.error(
+      `Error deleting trace ${JSON.stringify(traceIds)} in project ${projectId} from Clickhouse`,
+      e,
+    );
+    traceException(e);
+    throw e;
+  }
 };

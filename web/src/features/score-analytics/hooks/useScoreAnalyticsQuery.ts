@@ -310,7 +310,7 @@ export function useScoreAnalyticsQuery(
     // 2. Fill distribution bins (categorical/boolean only)
     // Note: Sort all distributions by binIndex to ensure deterministic ordering
     // fillDistributionBins() already returns sorted data for categorical/boolean
-    // For numeric, we sort to handle non-deterministic Doris row ordering
+    // For numeric, we sort to handle non-deterministic ClickHouse row ordering
     // ========================================================================
     const booleanCategories = categories ?? ["False", "True"];
     const booleanScore2Categories = score2Categories ?? booleanCategories;

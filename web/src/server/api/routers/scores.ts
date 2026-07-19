@@ -53,6 +53,7 @@ import {
   logger,
   getTraceById,
   getScoreById,
+  convertDateToClickhouseDateTime,
   searchExistingAnnotationScore,
   hasAnyScore,
   ScoreDeleteQueue,
@@ -112,7 +113,7 @@ export const scoresRouter = createTRPCRouter({
         orderBy: input.orderBy,
         expectedTimeColumn: "timestamp",
       });
-      const analyticsScoreData = await getScoresUiTable({
+      const clickhouseScoreData = await getScoresUiTable({
         projectId: input.projectId,
         filter: input.filter ?? [],
         orderBy: normalizedOrderBy,
@@ -127,7 +128,7 @@ export const scoresRouter = createTRPCRouter({
           where: {
             projectId: input.projectId,
             jobOutputScoreId: {
-              in: analyticsScoreData.map((score) => score.id),
+              in: clickhouseScoreData.map((score) => score.id),
             },
           },
           select: {
@@ -139,7 +140,7 @@ export const scoresRouter = createTRPCRouter({
         ctx.prisma.user.findMany({
           where: {
             id: {
-              in: analyticsScoreData
+              in: clickhouseScoreData
                 .map((score) => score.authorUserId)
                 .filter((s): s is string => Boolean(s)),
             },
@@ -153,7 +154,7 @@ export const scoresRouter = createTRPCRouter({
       ]);
 
       return {
-        scores: analyticsScoreData.map<AllScoresReturnType>((score) => {
+        scores: clickhouseScoreData.map<AllScoresReturnType>((score) => {
           const jobExecution = jobExecutions.find(
             (je) => je.jobOutputScoreId === score.id,
           );
@@ -182,7 +183,7 @@ export const scoresRouter = createTRPCRouter({
       if (!score) {
         throw new TRPCError({
           code: "NOT_FOUND",
-          message: `No score with id ${input.scoreId} in project ${input.projectId} in Doris`,
+          message: `No score with id ${input.scoreId} in project ${input.projectId} in Clickhouse`,
         });
       }
       return toDomainWithStringifiedMetadata(score);
@@ -194,7 +195,7 @@ export const scoresRouter = createTRPCRouter({
         orderBy: input.orderBy,
         expectedTimeColumn: "timestamp",
       });
-      const analyticsScoreData = await getScoresUiCount({
+      const clickhouseScoreData = await getScoresUiCount({
         projectId: input.projectId,
         filter: input.filter ?? [],
         orderBy: normalizedOrderBy,
@@ -203,7 +204,7 @@ export const scoresRouter = createTRPCRouter({
       });
 
       return {
-        totalCount: analyticsScoreData,
+        totalCount: clickhouseScoreData,
       };
     }),
   /**
@@ -216,7 +217,7 @@ export const scoresRouter = createTRPCRouter({
         orderBy: input.orderBy,
         expectedTimeColumn: "timestamp",
       });
-      const analyticsScoreData = await getScoresUiTableFromEvents({
+      const clickhouseScoreData = await getScoresUiTableFromEvents({
         projectId: input.projectId,
         filter: input.filter ?? [],
         orderBy: normalizedOrderBy,
@@ -229,7 +230,7 @@ export const scoresRouter = createTRPCRouter({
           where: {
             projectId: input.projectId,
             jobOutputScoreId: {
-              in: analyticsScoreData.map((score) => score.id),
+              in: clickhouseScoreData.map((score) => score.id),
             },
           },
           select: {
@@ -241,7 +242,7 @@ export const scoresRouter = createTRPCRouter({
         ctx.prisma.user.findMany({
           where: {
             id: {
-              in: analyticsScoreData
+              in: clickhouseScoreData
                 .map((score) => score.authorUserId)
                 .filter((s): s is string => Boolean(s)),
             },
@@ -255,7 +256,7 @@ export const scoresRouter = createTRPCRouter({
       ]);
 
       return {
-        scores: analyticsScoreData.map<AllScoresFromEventsReturnType>(
+        scores: clickhouseScoreData.map<AllScoresFromEventsReturnType>(
           (score) => {
             const jobExecution = jobExecutions.find(
               (je) => je.jobOutputScoreId === score.id,
@@ -344,13 +345,13 @@ export const scoresRouter = createTRPCRouter({
         await Promise.all([
           getScoreNames(input.projectId, timestampFilter ?? []),
           getEventsGroupedByTraceTags(input.projectId, eventsFilter, {
-            scope: {},
+            scope: "scoredTraces",
           }),
           getEventsGroupedByTraceName(input.projectId, eventsFilter, {
-            scope: {},
+            scope: "scoredTraces",
           }),
           getEventsGroupedByUserId(input.projectId, eventsFilter, {
-            scope: {},
+            scope: "scoredTraces",
           }),
           getScoreStringValues(input.projectId, timestampFilter ?? []),
         ]);
@@ -507,36 +508,38 @@ export const scoresRouter = createTRPCRouter({
           };
 
       if (inflatedParams.traceId) {
-        const analyticsTrace = await getTraceById({
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        const clickhouseTrace = await getTraceById({
           traceId: inflatedParams.traceId,
           projectId: input.projectId,
         });
 
-        if (!analyticsTrace) {
+        if (!clickhouseTrace) {
           logger.error(
-            `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Doris`,
+            `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Clickhouse`,
           );
           throw new LangfuseNotFoundError(
-            `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Doris`,
+            `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Clickhouse`,
           );
         }
       } else if (inflatedParams.sessionId) {
         // We consider no longer writing all sessions into postgres, hence we should search for traces with the session id
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
         const traceIdentifiers = await getTracesIdentifierForSession(
           input.projectId,
           inflatedParams.sessionId,
         );
         if (traceIdentifiers.length === 0) {
           logger.error(
-            `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Doris`,
+            `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Clickhouse`,
           );
           throw new LangfuseNotFoundError(
-            `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Doris`,
+            `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Clickhouse`,
           );
         }
       }
 
-      const analyticsScore = await searchExistingAnnotationScore(
+      const clickhouseScore = await searchExistingAnnotationScore(
         input.projectId,
         inflatedParams.observationId,
         inflatedParams.traceId,
@@ -548,9 +551,9 @@ export const scoresRouter = createTRPCRouter({
 
       const timestamp = input.timestamp ?? new Date();
 
-      const score = !!analyticsScore
+      const score = !!clickhouseScore
         ? {
-            ...analyticsScore,
+            ...clickhouseScore,
             value: input.value,
             stringValue: input.stringValue ?? null,
             comment: input.comment ?? null,
@@ -584,7 +587,7 @@ export const scoresRouter = createTRPCRouter({
 
       await upsertScore({
         id: score.id, // Reuse ID that was generated by Prisma
-        timestamp,
+        timestamp: convertDateToClickhouseDateTime(timestamp),
         project_id: input.projectId,
         environment: input.environment ?? "default",
         trace_id: inflatedParams.traceId,
@@ -599,8 +602,8 @@ export const scoresRouter = createTRPCRouter({
         data_type: input.dataType,
         string_value: input.stringValue,
         queue_id: input.queueId,
-        created_at: score.createdAt,
-        updated_at: score.updatedAt,
+        created_at: convertDateToClickhouseDateTime(score.createdAt),
+        updated_at: convertDateToClickhouseDateTime(score.updatedAt),
         metadata: score.metadata as Record<string, string>,
       });
 
@@ -625,7 +628,7 @@ export const scoresRouter = createTRPCRouter({
 
       let updatedScore: ScoreDomain | null | undefined = null;
 
-      // Fetch the current score from Doris
+      // Fetch the current score from Clickhouse
       const score = await getScoreById({
         projectId: input.projectId,
         scoreId: input.id,
@@ -633,18 +636,18 @@ export const scoresRouter = createTRPCRouter({
       });
 
       if (!score) {
-        // Doris is eventually consistent; if client provided timestamp, we can upsert along the ordering key
+        // Clickhouse is eventually consistent; if client provided timestamp, we can upsert along the ordering key
         if (!input.timestamp) {
           logger.warn(
-            `No annotation score with id ${input.id} in project ${input.projectId} in Doris, and no timestamp provided`,
+            `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse, and no timestamp provided`,
           );
           throw new LangfuseNotFoundError(
-            `No annotation score with id ${input.id} in project ${input.projectId} in Doris`,
+            `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse`,
           );
         }
 
         logger.info(
-          `Score ${input.id} not found in Doris for project ${input.projectId}, upserting with provided timestamp`,
+          `Score ${input.id} not found in ClickHouse for project ${input.projectId}, upserting with provided timestamp`,
         );
 
         // Validate config if provided
@@ -674,31 +677,33 @@ export const scoresRouter = createTRPCRouter({
             };
 
         if (inflatedParams.traceId) {
-          const analyticsTrace = await getTraceById({
+          // eslint-disable-next-line @typescript-eslint/no-deprecated
+          const clickhouseTrace = await getTraceById({
             traceId: inflatedParams.traceId,
             projectId: input.projectId,
           });
 
-          if (!analyticsTrace) {
+          if (!clickhouseTrace) {
             logger.error(
-              `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Doris`,
+              `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Clickhouse`,
             );
             throw new LangfuseNotFoundError(
-              `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Doris`,
+              `No trace with id ${inflatedParams.traceId} in project ${input.projectId} in Clickhouse`,
             );
           }
         } else if (inflatedParams.sessionId) {
           // We consider no longer writing all sessions into postgres, hence we should search for traces with the session id
+          // eslint-disable-next-line @typescript-eslint/no-deprecated
           const traceIdentifiers = await getTracesIdentifierForSession(
             input.projectId,
             inflatedParams.sessionId,
           );
           if (traceIdentifiers.length === 0) {
             logger.error(
-              `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Doris`,
+              `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Clickhouse`,
             );
             throw new LangfuseNotFoundError(
-              `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Doris`,
+              `No trace referencing session with id ${inflatedParams.sessionId} in project ${input.projectId} in Clickhouse`,
             );
           }
         }
@@ -707,7 +712,7 @@ export const scoresRouter = createTRPCRouter({
 
         await upsertScore({
           id: input.id,
-          timestamp,
+          timestamp: convertDateToClickhouseDateTime(timestamp),
           project_id: input.projectId,
           environment: input.environment ?? "default",
           trace_id: inflatedParams.traceId,
@@ -722,8 +727,8 @@ export const scoresRouter = createTRPCRouter({
           data_type: input.dataType,
           string_value: input.stringValue,
           queue_id: input.queueId,
-          created_at: new Date(),
-          updated_at: new Date(),
+          created_at: convertDateToClickhouseDateTime(new Date()),
+          updated_at: convertDateToClickhouseDateTime(new Date()),
           metadata: {},
         });
 
@@ -811,7 +816,7 @@ export const scoresRouter = createTRPCRouter({
         await upsertScore({
           id: input.id,
           project_id: input.projectId,
-          timestamp: score.timestamp,
+          timestamp: convertDateToClickhouseDateTime(score.timestamp),
           value: input.value !== null ? input.value : undefined,
           string_value: input.stringValue,
           comment: input.comment,
@@ -825,8 +830,8 @@ export const scoresRouter = createTRPCRouter({
           observation_id: score.observationId,
           session_id: score.sessionId,
           environment: score.environment,
-          created_at: score.createdAt,
-          updated_at: score.updatedAt,
+          created_at: convertDateToClickhouseDateTime(score.createdAt),
+          updated_at: convertDateToClickhouseDateTime(score.updatedAt),
           metadata: score.metadata as Record<string, string>,
         });
 
@@ -883,18 +888,18 @@ export const scoresRouter = createTRPCRouter({
         scope: "scores:CUD",
       });
 
-      // Fetch the current score from Doris
-      const analyticsScore = await getScoreById({
+      // Fetch the current score from Clickhouse
+      const clickhouseScore = await getScoreById({
         projectId: input.projectId,
         scoreId: input.id,
         source: ScoreSourceEnum.ANNOTATION,
       });
-      if (!analyticsScore) {
+      if (!clickhouseScore) {
         logger.warn(
-          `No annotation score with id ${input.id} in project ${input.projectId} in Doris`,
+          `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse`,
         );
         throw new LangfuseNotFoundError(
-          `No annotation score with id ${input.id} in project ${input.projectId} in Doris`,
+          `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse`,
         );
       }
 
@@ -903,12 +908,12 @@ export const scoresRouter = createTRPCRouter({
         resourceType: "score",
         resourceId: input.id,
         action: "delete",
-        before: analyticsScore,
+        before: clickhouseScore,
       });
 
-      await deleteScores(input.projectId, [analyticsScore.id]);
+      await deleteScores(input.projectId, [clickhouseScore.id]);
 
-      return validateDbScore(analyticsScore);
+      return validateDbScore(clickhouseScore);
     }),
   upsertCorrection: protectedProjectProcedure
     .input(
@@ -930,21 +935,22 @@ export const scoresRouter = createTRPCRouter({
         scope: "scores:CUD",
       });
 
-      const analyticsTrace = await getTraceById({
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
+      const clickhouseTrace = await getTraceById({
         traceId: input.traceId,
         projectId: input.projectId,
       });
 
-      if (!analyticsTrace) {
+      if (!clickhouseTrace) {
         logger.error(
-          `No trace with id ${input.traceId} in project ${input.projectId} in Doris`,
+          `No trace with id ${input.traceId} in project ${input.projectId} in Clickhouse`,
         );
         throw new LangfuseNotFoundError(
-          `No trace with id ${input.traceId} in project ${input.projectId} in Doris`,
+          `No trace with id ${input.traceId} in project ${input.projectId} in Clickhouse`,
         );
       }
 
-      const analyticsScore = await searchExistingAnnotationScore(
+      const clickhouseScore = await searchExistingAnnotationScore(
         input.projectId,
         input.observationId ?? null,
         input.traceId,
@@ -956,9 +962,9 @@ export const scoresRouter = createTRPCRouter({
 
       const timestamp = input.timestamp;
 
-      const score = !!analyticsScore
+      const score = !!clickhouseScore
         ? {
-            ...analyticsScore,
+            ...clickhouseScore,
             value: 0,
             stringValue: null,
             comment: null,
@@ -995,7 +1001,7 @@ export const scoresRouter = createTRPCRouter({
 
       await upsertScore({
         id: score.id, // Reuse ID that was generated by Prisma
-        timestamp,
+        timestamp: convertDateToClickhouseDateTime(timestamp),
         project_id: input.projectId,
         environment: input.environment ?? "default",
         trace_id: input.traceId,
@@ -1010,8 +1016,8 @@ export const scoresRouter = createTRPCRouter({
         data_type: ScoreDataTypeEnum.CORRECTION,
         string_value: null,
         queue_id: input.queueId ?? null,
-        created_at: score.createdAt,
-        updated_at: score.updatedAt,
+        created_at: convertDateToClickhouseDateTime(score.createdAt),
+        updated_at: convertDateToClickhouseDateTime(score.updatedAt),
         metadata: score.metadata as Record<string, string>,
         long_string_value: input.value,
       });

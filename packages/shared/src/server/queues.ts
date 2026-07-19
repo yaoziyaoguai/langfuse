@@ -434,6 +434,7 @@ export enum QueueName {
   DeadLetterRetryQueue = "dead-letter-retry-queue",
   WebhookQueue = "webhook-queue",
   EntityChangeQueue = "entity-change-queue",
+  EventPropagationQueue = "event-propagation-queue",
   NotificationQueue = "notification-queue",
   MonitorQueue = "monitor-queue",
 }
@@ -471,6 +472,7 @@ export enum QueueJobs {
   DeadLetterRetryJob = "dead-letter-retry-job",
   WebhookJob = "webhook-job",
   EntityChangeJob = "entity-change-job",
+  EventPropagationJob = "event-propagation-job",
   NotificationJob = "notification-job",
   MonitorJob = "monitor-job",
 }
@@ -648,6 +650,11 @@ export type TQueueJobTypes = {
     timestamp: Date;
     id: string;
     name: QueueJobs.CloudFreeTierUsageThresholdJob;
+  };
+  [QueueName.EventPropagationQueue]: {
+    timestamp: Date;
+    id: string;
+    name: QueueJobs.EventPropagationJob;
   };
   [QueueName.NotificationQueue]: {
     timestamp: Date;

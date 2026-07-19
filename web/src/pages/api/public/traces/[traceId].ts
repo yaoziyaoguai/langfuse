@@ -1,6 +1,6 @@
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
 import {
-  LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
 import { transformDbToApiObservation } from "@/src/features/public-api/types/observations";
@@ -19,6 +19,7 @@ import {
 } from "@langfuse/shared";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  getObservationsForTrace,
   getObservationsForTraceFromEventsTable,
   getScoresForTraces,
   getTraceById,
@@ -37,6 +38,7 @@ export default withMiddlewares(
       querySchema: GetTraceV1Query,
       responseSchema: GetTraceV1Response,
       rateLimitUpgradePath: legacyPublicApiRateLimitUpgradePaths.traceGet,
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         const { traceId } = query;
 
@@ -58,9 +60,11 @@ export default withMiddlewares(
         const includeScores = requestedFields.includes("scores");
         const includeMetrics = requestedFields.includes("metrics");
 
+        // eslint-disable-next-line @typescript-eslint/no-deprecated -- Legacy public API endpoint reads from the legacy traces table.
         const trace = await getTraceById({
           traceId,
           projectId: auth.scope.projectId,
+          preferredClickhouseService: "ReadOnly",
           excludeInputOutput: !includeIO,
           excludeMetadata: !includeIO,
         });
@@ -73,19 +77,28 @@ export default withMiddlewares(
 
         const [observations, scores] = await Promise.all([
           includeObservations || includeMetrics
-            ? getObservationsForTraceFromEventsTable({
-                traceId,
-                projectId: auth.scope.projectId,
-                timestamp: trace.timestamp,
-                selectIOAndMetadata: includeObservations,
-                selectToolData: includeObservations,
-              }).then(({ observations }) => observations)
+            ? env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+              ? getObservationsForTraceFromEventsTable({
+                  traceId,
+                  projectId: auth.scope.projectId,
+                  timestamp: trace.timestamp,
+                  selectIOAndMetadata: includeObservations,
+                  selectToolData: includeObservations,
+                }).then(({ observations }) => observations)
+              : getObservationsForTrace({
+                  traceId,
+                  projectId: auth.scope.projectId,
+                  timestamp: trace.timestamp,
+                  includeIO: includeObservations,
+                  preferredClickhouseService: "ReadOnly",
+                })
             : Promise.resolve([]),
           includeScores
             ? getScoresForTraces({
                 projectId: auth.scope.projectId,
                 traceIds: [traceId],
                 timestamp: trace?.timestamp,
+                preferredClickhouseService: "ReadOnly",
               })
             : Promise.resolve([]),
         ]);
@@ -231,7 +244,7 @@ export default withMiddlewares(
     }),
   },
   {
-    analyticsResourceErrorMessage:
-      LEGACY_PUBLIC_API_OBSERVATIONS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+    clickHouseResourceErrorMessage:
+      LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   },
 );

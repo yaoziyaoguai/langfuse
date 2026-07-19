@@ -1,14 +1,17 @@
 import z from "zod";
 import { prisma } from "../../db";
 import { singleFilter } from "../../interfaces/filters";
-import { getDorisTelemetryRepositories } from "./telemetry/doris/runtime";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris/runtime";
 
 export const getPublicSessionsFilter = async (
   projectId: string,
   filter: z.infer<typeof singleFilter>[],
 ) => {
   // Theoretically we should also filter the sessions by environment here. As this would return a huge list that's probably not feasible.
-  // I.e. we only perform the environment check on the Doris queries.
+  // I.e. we only perform the environment check on the ClickHouse queries.
 
   const sessionsBookmarkedFilter = filter?.find(
     (f) => f.column === "⭐️" || f.column === "bookmarked",
@@ -76,11 +79,24 @@ export const getPublicSessionsFilter = async (
 };
 
 export const hasAnySession = async (projectId: string) => {
-  return (
-    (await getDorisTelemetryRepositories().sessions.count({
+  if (isDorisAnalyticsBackend()) {
+    return (
+      (await getDorisTelemetryRepositories().sessions.count({
+        projectId,
+        range: { from: new Date(0), to: new Date() },
+        filters: [],
+      })) > 0
+    );
+  }
+
+  const session = await prisma.traceSession.findFirst({
+    where: {
       projectId,
-      range: { from: new Date(0), to: new Date() },
-      filters: [],
-    })) > 0
-  );
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  return session !== null;
 };

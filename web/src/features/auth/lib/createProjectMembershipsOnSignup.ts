@@ -4,6 +4,7 @@ import { logger } from "@langfuse/shared/src/server";
 import { ServerPosthog } from "@/src/features/posthog-analytics/ServerPosthog";
 import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
+import { shouldAutoEnableV4 } from "@/src/features/events/lib/v4Rollout";
 import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
 import { canCreateOrganizations } from "@/src/features/organizations/server/canCreateOrganizations";
 import { provisionStarterOrganizationForNewUser } from "@/src/features/onboarding/server/onboardingService";
@@ -218,6 +219,60 @@ export async function createProjectMembershipsOnSignup(
           email: user.email,
           role: "OWNER",
         });
+      }
+    }
+
+    if (isCloudDeployment && (options?.userWasJustCreated || isNewUser)) {
+      const userRolloutState = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: {
+          createdAt: true,
+          v4BetaEnabled: true,
+          organizationMemberships: {
+            select: {
+              organization: {
+                select: {
+                  id: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (userRolloutState) {
+        const shouldAutoEnableV4ForUser = shouldAutoEnableV4({
+          userCreatedAt: userRolloutState.createdAt,
+          organizations: userRolloutState.organizationMemberships.map(
+            (membership) => ({
+              id: membership.organization.id,
+              createdAt: membership.organization.createdAt,
+            }),
+          ),
+          excludedOrganizationIds: env.NEXT_PUBLIC_DEMO_ORG_ID
+            ? [env.NEXT_PUBLIC_DEMO_ORG_ID]
+            : [],
+        });
+        const shouldInitializeForNewUser =
+          options?.userWasJustCreated &&
+          !userRolloutState.v4BetaEnabled &&
+          shouldAutoEnableV4ForUser;
+        const shouldInitializeForFirstOrganization =
+          !options?.userWasJustCreated &&
+          isNewUser &&
+          !userRolloutState.v4BetaEnabled &&
+          shouldAutoEnableV4ForUser;
+
+        if (
+          shouldInitializeForNewUser ||
+          shouldInitializeForFirstOrganization
+        ) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { v4BetaEnabled: true },
+          });
+        }
       }
     }
 

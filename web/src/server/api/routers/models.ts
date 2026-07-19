@@ -16,7 +16,7 @@ import {
 import { ModelUsageUnit, paginationZod, Prisma } from "@langfuse/shared";
 import {
   clearModelCacheForProject,
-  getDorisTelemetryRepositories,
+  queryClickhouse,
   findModel,
   matchPricingTier,
 } from "@langfuse/shared/src/server";
@@ -203,10 +203,21 @@ export const modelRouter = createTRPCRouter({
 
       if (modelIds.length === 0) return {};
 
+      const lastUsedQuery = `
+        SELECT
+          internal_model_id as modelId,
+          MAX(start_time) as lastUsed
+        FROM observations
+        WHERE project_id = {projectId: String}
+          AND type = 'GENERATION'
+          AND internal_model_id IN ({modelIds: Array(String)})
+        GROUP BY internal_model_id
+      `;
+
       const result = ModelLastUsedQueryResult.safeParse(
-        await getDorisTelemetryRepositories().observations.lastUsedByModelIds({
-          projectId,
-          modelIds,
+        await queryClickhouse({
+          query: lastUsedQuery,
+          params: { projectId, modelIds },
         }),
       );
 

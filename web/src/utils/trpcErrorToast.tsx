@@ -38,9 +38,13 @@ const getErrorTitleAndHttpCode = (error: TRPCClientError<any>) => {
   const httpStatus: number =
     typeof error.data?.httpStatus === "number" ? error.data.httpStatus : 500;
 
-  if (httpStatus === 503 && error.data?.errorName === "DorisError") {
+  if (
+    httpStatus === 422 &&
+    error.data?.errorName === "ClickHouseResourceError"
+  ) {
+    // Handle ClickHouse resource limit errors with specific messaging
     return {
-      errorTitle: "Analytics Unavailable",
+      errorTitle: "Request Timed Out",
       httpStatus,
     };
   }

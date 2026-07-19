@@ -1,5 +1,5 @@
 export default async function teardown() {
-  const { redis, logger, DorisClientManager } =
+  const { redis, logger, ClickHouseClientManager } =
     await import("@langfuse/shared/src/server");
 
   logger.debug(`Redis status ${redis?.status}`);
@@ -7,7 +7,7 @@ export default async function teardown() {
     redis.disconnect();
   }
 
-  await DorisClientManager.getInstance().closeAllConnections();
+  await ClickHouseClientManager.getInstance().closeAllConnections();
 
   logger.debug("Teardown complete");
 }

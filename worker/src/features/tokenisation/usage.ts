@@ -73,7 +73,7 @@ function openAiTokenCount(p: { model: Model; text: unknown }) {
 
   let result = undefined;
   const parsedText =
-    typeof p.text === "string" ? parseJsonPrioritised(p.text) : p.text; // Doris stores ChatMessage array as string
+    typeof p.text === "string" ? parseJsonPrioritised(p.text) : p.text; // Clickhouse stores ChatMessage array as string
 
   if (
     isChatMessageArray(parsedText) &&

@@ -63,6 +63,7 @@ import {
 import { projectRoleAccessRights } from "@/src/features/rbac/constants/projectAccessRights";
 import { getSSOBlockedDomains } from "@/src/features/auth-credentials/server/signupApiHandler";
 import { createSupportEmailHash } from "@/src/features/support-chat/createSupportEmailHash";
+import { canToggleV4 } from "@/src/features/events/lib/v4Rollout";
 import { canCreateOrganizations } from "@/src/features/organizations/server/canCreateOrganizations";
 
 const staticProviders: Provider[] = [
@@ -780,8 +781,10 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
               image: true,
               emailVerified: true,
               password: true,
+              createdAt: true,
               featureFlags: true,
               admin: true,
+              v4BetaEnabled: true,
               organizationMemberships: {
                 // Newest first so demo project is last for the `project/~/` sentinel
                 orderBy: {
@@ -814,6 +817,30 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
 
           span.setAttribute("langfuse.user.email", dbUser?.email ?? "");
           span.setAttribute("langfuse.user.id", dbUser?.id ?? "");
+          // V4 preview availability is governed by the write mode:
+          // - events_only: the legacy traces/observations tables are no longer
+          //   written, so the events-aware UI is the only correct read path —
+          //   force the preview on for everyone and hide the toggle.
+          // - legacy: the events tables are not written, so the preview cannot
+          //   read — keep it off and hide the toggle.
+          // - dual: both table sets are written, so the preview is optional. On
+          //   Cloud we keep the date-based rollout (new orgs are auto-enabled
+          //   and locked on at signup/org-creation, older orgs may toggle).
+          //   Self-hosted dual deployments are opt-in, but only once they have
+          //   also set LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN=true —
+          //   otherwise feature paths still gated on that flag would silently
+          //   fall back to legacy tables while the core UI reads events.
+          const v4WriteMode = env.LANGFUSE_MIGRATION_V4_WRITE_MODE;
+          const isLangfuseCloud = Boolean(
+            env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION,
+          );
+          // In dual mode the preview is available on Cloud (governed by the
+          // rollout below) or on self-hosted deployments that opted into the
+          // preview read path via ALLOW_PREVIEW_OPT_IN.
+          const dualPreviewAvailable =
+            isLangfuseCloud ||
+            env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+
           return {
             ...session,
             environment: {
@@ -822,7 +849,8 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
               // Enables features that are only available under an enterprise license when self-hosting Langfuse
               // If you edit this line, you risk executing code that is not MIT licensed (self-contained in /ee folders otherwise)
               selfHostedInstancePlan: getSelfHostedInstancePlanServerSide(),
-              v4WriteMode: "events_only",
+              v4WriteMode,
+              analyticsBackend: env.LANGFUSE_ANALYTICS_BACKEND,
             },
             user:
               dbUser !== null
@@ -836,8 +864,35 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
                       : undefined,
                     image: dbUser.image,
                     admin: dbUser.admin,
-                    v4BetaEnabled: true,
-                    canToggleV4: false,
+                    v4BetaEnabled:
+                      v4WriteMode === "events_only"
+                        ? true
+                        : v4WriteMode === "dual" && dualPreviewAvailable
+                          ? dbUser.v4BetaEnabled
+                          : false,
+                    canToggleV4:
+                      v4WriteMode === "dual" && dualPreviewAvailable
+                        ? isLangfuseCloud
+                          ? canToggleV4(
+                              {
+                                userCreatedAt: dbUser.createdAt,
+                                organizations:
+                                  dbUser.organizationMemberships.map(
+                                    (orgMembership) => ({
+                                      id: orgMembership.organization.id,
+                                      createdAt:
+                                        orgMembership.organization.createdAt,
+                                    }),
+                                  ),
+                                excludedOrganizationIds:
+                                  env.NEXT_PUBLIC_DEMO_ORG_ID
+                                    ? [env.NEXT_PUBLIC_DEMO_ORG_ID]
+                                    : [],
+                              },
+                              { isLangfuseCloudAdmin: dbUser.admin },
+                            )
+                          : true
+                        : false,
                     canCreateOrganizations: canCreateOrganizations(
                       dbUser.email,
                     ),

@@ -7,11 +7,12 @@ import {
   logger,
   getCurrentSpan,
   contextWithLangfuseProps,
+  eventTypes,
   markProjectIngestFailure,
   createIngestionAttribution,
 } from "@langfuse/shared/src/server";
 import { telemetry } from "@/src/features/telemetry";
-import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
+import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
 import { jsonSchema } from "@langfuse/shared";
 import { isPrismaException } from "@/src/utils/exceptions";
 import {
@@ -19,12 +20,14 @@ import {
   BaseError,
   UnauthorizedError,
   ForbiddenError,
+  NotImplementedError,
 } from "@langfuse/shared";
 import { processEventBatch } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import * as opentelemetry from "@opentelemetry/api";
+import { env } from "@/src/env.mjs";
 
 export const config = {
   api: {
@@ -76,6 +79,11 @@ export default async function handler(
     });
 
     if (req.method !== "POST") throw new MethodNotAllowedError();
+    if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+      throw new NotImplementedError(
+        "The legacy ingestion endpoint is unavailable with the Doris analytics backend. Use the OTLP/v4 ingestion endpoint.",
+      );
+    }
 
     // CHECK AUTH FOR ALL EVENTS
     const authCheck = await new ApiAuthService(
@@ -106,7 +114,11 @@ export default async function handler(
       apiKeyId: authCheck.scope.apiKeyId,
       analytics: {
         surface: "publicapi",
-        route: analyticsRouteForRequest(req),
+        route: clickHouseRouteForRequest(req),
+      },
+      clickhouse: {
+        surface: "publicapi",
+        route: clickHouseRouteForRequest(req),
       },
     });
     // Execute the rest of the handler within the context
@@ -145,16 +157,24 @@ export default async function handler(
 
         await telemetry();
 
-        const result = await processEventBatch(
+        // V4 events_only mode: refuse trace/observation events because their
+        // writes would land in the legacy ClickHouse tables this deployment no
+        // longer reads. Scores and SDK logs are unaffected and pass through.
+        // Reject per-event so a mixed batch still processes its score events.
+        const { batchForProcessing, rejectedErrors } = filterBatchForEventsOnly(
           parsedSchema.data.batch,
-          authCheck,
-          {
-            attribution: createIngestionAttribution({
-              headers: req.headers,
-              authCheck,
-            }),
-          },
+          env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "events_only",
         );
+
+        const result = await processEventBatch(batchForProcessing, authCheck, {
+          attribution: createIngestionAttribution({
+            headers: req.headers,
+            authCheck,
+          }),
+        });
+        if (rejectedErrors.length > 0) {
+          result.errors = [...result.errors, ...rejectedErrors];
+        }
         return res.status(207).json(result);
       } catch (error) {
         if (!(error instanceof BaseError && error.isUserError())) {
@@ -218,4 +238,60 @@ export default async function handler(
   }
 }
 
-// Event types that remain accepted in Doris R1A. Scores keep
+// Event types that may continue to ingest in V4 events_only mode. Scores keep
+// their own ClickHouse table (no legacy traces/observations write); SDK logs
+// are non-persisting.
+const EVENTS_ONLY_ALLOWED_TYPES = new Set<string>([
+  eventTypes.SCORE_CREATE,
+  eventTypes.SDK_LOG,
+  eventTypes.DATASET_RUN_ITEM_CREATE,
+]);
+
+function filterBatchForEventsOnly(
+  batch: unknown[],
+  isEventsOnlyMode: boolean,
+): {
+  batchForProcessing: unknown[];
+  rejectedErrors: {
+    id: string;
+    status: number;
+    message: string;
+    error: string;
+  }[];
+} {
+  if (!isEventsOnlyMode) {
+    return { batchForProcessing: batch, rejectedErrors: [] };
+  }
+
+  const batchForProcessing: unknown[] = [];
+  const rejectedErrors: {
+    id: string;
+    status: number;
+    message: string;
+    error: string;
+  }[] = [];
+
+  for (const event of batch) {
+    const eventObj =
+      typeof event === "object" && event !== null
+        ? (event as { id?: unknown; type?: unknown })
+        : null;
+    const type =
+      eventObj && typeof eventObj.type === "string" ? eventObj.type : null;
+    const id =
+      eventObj && typeof eventObj.id === "string" ? eventObj.id : "unknown";
+
+    if (type && EVENTS_ONLY_ALLOWED_TYPES.has(type)) {
+      batchForProcessing.push(event);
+    } else {
+      rejectedErrors.push({
+        id,
+        status: 400,
+        message: "Event type not accepted",
+        error: `Event type "${type ?? "unknown"}" is not accepted by /api/public/ingestion when LANGFUSE_MIGRATION_V4_WRITE_MODE is events_only. This endpoint only accepts score, log, and dataset-run-item events.`,
+      });
+    }
+  }
+
+  return { batchForProcessing, rejectedErrors };
+}

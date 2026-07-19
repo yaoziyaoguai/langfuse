@@ -17,11 +17,23 @@ import type { Session } from "next-auth";
 import { prisma } from "@langfuse/shared/src/db";
 import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
-import { createEvent, createEventsDoris } from "@langfuse/shared/src/server";
+import { createEvent, createEventsCh } from "@langfuse/shared/src/server";
 import waitForExpect from "wait-for-expect";
 import { randomUUID } from "crypto";
 
-const maybe = describe;
+// The events_full table is created only by the ClickHouse dev-tables setup,
+// which runs in the default deploy-mode where .env.dev.example enables the v4
+// preview opt-in. The -azure and -redis-cluster CI runs skip that setup, so
+// the events table is absent there. Mirrors sessions-trpc-events-only gating.
+const eventsTableAvailable =
+  process.env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true";
+const maybe = eventsTableAvailable ? describe : describe.skip;
+
+// At least one always-running test so the file does not hang on the redis
+// connections opened by the tRPC caller imports when the suite is skipped.
+describe("sessions observations io cap liveness", () => {
+  it("should not hang redis when the events table is unavailable", () => {});
+});
 
 // Keep in sync with the constants in web/src/server/api/routers/sessions.ts.
 const INLINE_LIMIT = 300_000;
@@ -68,6 +80,7 @@ maybe("sessions observations bounded I/O (events)", () => {
         },
       ],
       featureFlags: {
+        excludeClickhouseRead: false,
         templateFlag: true,
         searchBar: false,
         v4BetaToggleVisible: false,
@@ -94,7 +107,7 @@ maybe("sessions observations bounded I/O (events)", () => {
     const traceId = randomUUID();
     const baseTime = Date.now();
 
-    await createEventsDoris(
+    await createEventsCh(
       events.map((event, index) =>
         createEvent({
           span_id: `${traceId}-o${index}`,
@@ -244,7 +257,7 @@ maybe("sessions observations bounded I/O (events)", () => {
     const { sessionId, traceId, baseTime } = await seedObservations(
       Array.from({ length: PER_TRACE_LIMIT }, () => ({})),
     );
-    await createEventsDoris([
+    await createEventsCh([
       createEvent({
         span_id: `t-${traceId}`,
         id: `t-${traceId}`,
@@ -305,7 +318,7 @@ maybe("sessions observations bounded I/O (events)", () => {
       user_id: "user-a",
       start_time: baseTime * 1000,
     } as const;
-    await createEventsDoris([
+    await createEventsCh([
       createEvent({
         ...shared,
         input: "prompt",

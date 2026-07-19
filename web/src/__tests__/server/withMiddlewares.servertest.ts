@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
-  LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
-import { analyticsRouteForRequest } from "@/src/features/public-api/server/analyticsRequestTags";
+import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
 import {
   BaseError,
   InvalidRequestError,
@@ -12,6 +12,7 @@ import {
   ServiceUnavailableError,
 } from "@langfuse/shared";
 import {
+  ClickHouseResourceError,
   DorisError,
   logger,
   traceException,
@@ -19,6 +20,17 @@ import {
 import { createMocks } from "node-mocks-http";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
+import { COMMUNITY_CAPABILITIES } from "@/src/features/capabilities/communityAvailability";
+
+const envState = vi.hoisted(() => ({ backend: "clickhouse" }));
+
+vi.mock("@/src/env.mjs", () => ({
+  env: {
+    get LANGFUSE_ANALYTICS_BACKEND() {
+      return envState.backend;
+    },
+  },
+}));
 
 // Mock the logger and traceException
 vi.mock("@langfuse/shared/src/server", async () => ({
@@ -32,13 +44,13 @@ vi.mock("@langfuse/shared/src/server", async () => ({
   traceException: vi.fn(),
 }));
 
-describe("analyticsRouteForRequest", () => {
+describe("clickHouseRouteForRequest", () => {
   const request = (method: string | undefined, url: string | undefined) =>
     ({ method, url }) as NextApiRequest;
 
   it("uses only the request pathname", () => {
     expect(
-      analyticsRouteForRequest(
+      clickHouseRouteForRequest(
         request(
           "GET",
           "/api/public/v2/traces?projectId=project-1&secret=do-not-log",
@@ -49,7 +61,7 @@ describe("analyticsRouteForRequest", () => {
 
   it("removes search params from malformed urls in the fallback path", () => {
     expect(
-      analyticsRouteForRequest(
+      clickHouseRouteForRequest(
         request("POST", "http://[::1?secret=do-not-log#fragment"),
       ),
     ).toBe("POST http://[::1");
@@ -57,14 +69,33 @@ describe("analyticsRouteForRequest", () => {
 
   it("falls back to UNKNOWN method for missing methods", () => {
     expect(
-      analyticsRouteForRequest(request(undefined, "/api/public/health")),
+      clickHouseRouteForRequest(request(undefined, "/api/public/health")),
     ).toBe("UNKNOWN /api/public/health");
   });
 });
 
 describe("withMiddlewares error handling", () => {
   beforeEach(() => {
+    envState.backend = "clickhouse";
     vi.clearAllMocks();
+  });
+
+  it("fails closed before invoking a Doris-unsupported handler", async () => {
+    envState.backend = "doris";
+    const endpoint = vi.fn();
+    const handler = withMiddlewares({ GET: endpoint });
+    const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+      method: "GET",
+      url: "/api/public/experiments",
+    });
+
+    await handler(req, res);
+
+    expect(res._getStatusCode()).toBe(501);
+    expect(JSON.parse(res._getData())).toEqual(
+      COMMUNITY_CAPABILITIES.experiments,
+    );
+    expect(endpoint).not.toHaveBeenCalled();
   });
 
   describe("BaseError handling", () => {
@@ -263,11 +294,13 @@ describe("withMiddlewares error handling", () => {
     });
   });
 
-  describe("DorisError handling", () => {
-    it("returns a sanitized 503 for retryable failures", async () => {
-      const resourceError = new DorisError("ANALYTICS_TIMEOUT", true, {
-        correlationId: "request-1",
-      });
+  describe("ClickHouseResourceError handling", () => {
+    it("should handle ClickHouseResourceError with 422 status", async () => {
+      const originalError = new Error("Memory limit exceeded: maximum: 10GB");
+      const resourceError = new ClickHouseResourceError(
+        "MEMORY_LIMIT",
+        originalError,
+      );
 
       const handler = withMiddlewares({
         POST: async () => {
@@ -284,18 +317,26 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(503);
+      expect(res._getStatusCode()).toBe(422);
       const jsonData = JSON.parse(res._getData());
+      expect(jsonData["message"]).toBeDefined();
       expect(jsonData["message"]).toContain(
-        "Analytics storage is temporarily unavailable",
+        ClickHouseResourceError.ERROR_ADVICE_MESSAGE,
       );
-      expect(jsonData["error"]).toBe("ANALYTICS_TIMEOUT");
+      expect(jsonData["error"]).toBe("Request timed out");
     });
 
-    it("logs only the safe error envelope", async () => {
-      const resourceError = new DorisError("ANALYTICS_UNAVAILABLE", true, {
-        correlationId: "request-2",
-      });
+    it("should include tags from the error in the warn log", async () => {
+      const originalError = new Error("Memory limit exceeded");
+      const resourceError = new ClickHouseResourceError(
+        "MEMORY_LIMIT",
+        originalError,
+        {
+          tag_schema_version: "1",
+          surface: "publicapi",
+          route: "GET /api/public/test",
+        },
+      );
 
       const handler = withMiddlewares({
         GET: async () => {
@@ -312,20 +353,27 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(503);
+      expect(res._getStatusCode()).toBe(422);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn).toHaveBeenCalledWith(
-        "Analytics storage request failed",
-        {
-          code: "ANALYTICS_UNAVAILABLE",
-          retryable: true,
-          correlationId: "request-2",
-        },
+        "ClickHouse resource limit exceeded",
+        expect.objectContaining({
+          errorType: "MEMORY_LIMIT",
+          tags: {
+            tag_schema_version: "1",
+            surface: "publicapi",
+            route: "GET /api/public/test",
+          },
+        }),
       );
     });
 
-    it("uses custom endpoint guidance", async () => {
-      const resourceError = new DorisError("ANALYTICS_TIMEOUT", true);
+    it("should handle ClickHouseResourceError with custom advice", async () => {
+      const originalError = new Error("Timeout exceeded");
+      const resourceError = new ClickHouseResourceError(
+        "TIMEOUT",
+        originalError,
+      );
 
       const handler = withMiddlewares(
         {
@@ -334,8 +382,8 @@ describe("withMiddlewares error handling", () => {
           },
         },
         {
-          analyticsResourceErrorMessage:
-            LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+          clickHouseResourceErrorMessage:
+            LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
         },
       );
 
@@ -348,14 +396,48 @@ describe("withMiddlewares error handling", () => {
 
       await handler(req, res);
 
-      expect(res._getStatusCode()).toBe(503);
+      expect(res._getStatusCode()).toBe(422);
       const jsonData = JSON.parse(res._getData());
       expect(jsonData["message"]).toBe(
-        LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+        LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
       );
       expect(jsonData["message"]).toContain(
         "https://langfuse.com/docs/metrics/features/metrics-api",
       );
+    });
+  });
+
+  describe("DorisError handling", () => {
+    it("returns a sanitized 503 for retryable failures", async () => {
+      const resourceError = new DorisError("ANALYTICS_TIMEOUT", true, {
+        correlationId: "request-1",
+      });
+      const handler = withMiddlewares({
+        POST: async () => {
+          throw resourceError;
+        },
+      });
+      const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+        method: "POST",
+      });
+
+      await handler(req, res);
+
+      expect(res._getStatusCode()).toBe(503);
+      expect(JSON.parse(res._getData())).toEqual({
+        message:
+          "Analytics storage is temporarily unavailable. Please retry the request.\nSee https://langfuse.com/docs/api-and-data-platform/features/public-api for more details.",
+        error: "ANALYTICS_TIMEOUT",
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Analytics storage request failed",
+        {
+          code: "ANALYTICS_TIMEOUT",
+          retryable: true,
+          correlationId: "request-1",
+        },
+      );
+      expect(traceException).not.toHaveBeenCalled();
     });
   });
 

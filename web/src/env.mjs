@@ -313,6 +313,17 @@ export const env = createEnv({
         s ? s.split(",").map((h) => h.toLowerCase().trim()) : [],
       ),
 
+    // clickhouse
+    CLICKHOUSE_URL: z.url().default("http://127.0.0.1:8123"),
+    CLICKHOUSE_CLUSTER_NAME: z.string().default("default"),
+    CLICKHOUSE_DB: z.string().default("default"),
+    CLICKHOUSE_USER: z.string().default("clickhouse"),
+    CLICKHOUSE_PASSWORD: z.string().default("clickhouse"),
+    CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
+    LANGFUSE_ANALYTICS_BACKEND: z
+      .enum(["clickhouse", "doris"])
+      .default("clickhouse"),
+
     // Doris query-only identity. Stream Load credentials are worker-only.
     DORIS_LOCAL_DEV_MODE: z.enum(["true", "false"]).default("false"),
     DORIS_QUERY_URL: z.string().optional(),
@@ -440,7 +451,7 @@ export const env = createEnv({
     LANGFUSE_AI_FEATURES_PROJECT_ID: z.string().optional(),
 
     // API Performance Flags
-    // Enable Redis-based tracking of projects using the OTEL API.
+    // Enable Redis-based tracking of projects using OTEL API to optimize ClickHouse queries.
     // When enabled, projects ingesting via OTEL API skip the FINAL modifier on some observations queries for better performance.
     LANGFUSE_SKIP_FINAL_FOR_OTEL_PROJECTS: z
       .enum(["true", "false"])
@@ -457,10 +468,23 @@ export const env = createEnv({
     LANGFUSE_API_TRACES_DEFAULT_FIELDS: z.string().optional(),
     LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS: z.string().optional(),
 
+    // V4 preview opt-in. See LFE-9778.
+    LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: z
+      .enum(["true", "false"])
+      .default("false"),
+
     // Legacy tracing search controls
     LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH: z
       .enum(["true", "false"])
       .default("false"),
+    // V4 write mode. Mirrors worker/src/env.ts so the web package can gate
+    // public API routes that rely on the legacy traces/observations tables.
+    // The worker owns the writes; the web only needs to know whether legacy
+    // tables are still being populated to decide whether to serve reads.
+    LANGFUSE_MIGRATION_V4_WRITE_MODE: z
+      .enum(["legacy", "dual", "events_only"])
+      .default("legacy"),
+
     // Temporary kill-switch for the observations v2 subquery-IN rewrite.
     LANGFUSE_OBSERVATIONS_V2_SUBQUERY_REWRITE: z
       .enum(["true", "false"])
@@ -571,9 +595,11 @@ export const env = createEnv({
     LANGFUSE_IN_APP_AGENT_SANDBOX_PROVIDER:
       process.env.LANGFUSE_IN_APP_AGENT_SANDBOX_PROVIDER,
     LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER:
-      process.env.LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER,
+      process.env
+        .LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER,
     LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN:
-      process.env.LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN,
+      process.env
+        .LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN,
     LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_REGION:
       process.env.LANGFUSE_IN_APP_AGENT_SANDBOX_AWS_LAMBDA_MICROVM_REGION,
     LANGFUSE_TEAM_SLACK_WEBHOOK: process.env.LANGFUSE_TEAM_SLACK_WEBHOOK,
@@ -812,6 +838,14 @@ export const env = createEnv({
     PLAIN_AUTHENTICATION_SECRET: process.env.PLAIN_AUTHENTICATION_SECRET,
     PLAIN_CARDS_API_TOKEN: process.env.PLAIN_CARDS_API_TOKEN,
     PYLON_API_KEY: process.env.PYLON_API_KEY,
+    // clickhouse
+    CLICKHOUSE_URL: process.env.CLICKHOUSE_URL,
+    CLICKHOUSE_CLUSTER_NAME: process.env.CLICKHOUSE_CLUSTER_NAME,
+    CLICKHOUSE_DB: process.env.CLICKHOUSE_DB,
+    CLICKHOUSE_USER: process.env.CLICKHOUSE_USER,
+    CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
+    CLICKHOUSE_CLUSTER_ENABLED: process.env.CLICKHOUSE_CLUSTER_ENABLED,
+    LANGFUSE_ANALYTICS_BACKEND: process.env.LANGFUSE_ANALYTICS_BACKEND,
     DORIS_LOCAL_DEV_MODE: process.env.DORIS_LOCAL_DEV_MODE,
     DORIS_QUERY_URL: process.env.DORIS_QUERY_URL,
     DORIS_QUERY_USER: process.env.DORIS_QUERY_USER,
@@ -910,6 +944,10 @@ export const env = createEnv({
       process.env.LANGFUSE_API_TRACES_DEFAULT_FIELDS,
     LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS:
       process.env.LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS,
+    LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN:
+      process.env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN,
+    LANGFUSE_MIGRATION_V4_WRITE_MODE:
+      process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
     // Legacy tracing search controls
     LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH:
       process.env.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH,

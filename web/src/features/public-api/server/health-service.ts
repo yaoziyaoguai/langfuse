@@ -2,10 +2,10 @@ import { VERSION } from "@/src/constants";
 import { env } from "@/src/env.mjs";
 import { prisma } from "@langfuse/shared/src/db";
 import {
-  DorisClientManager,
+  convertDateToClickhouseDateTime,
   logger,
-  parseDorisQueryConfig,
-  resolveDorisNodeEnv,
+  measureAndReturn,
+  queryClickhouse,
   traceException,
 } from "@langfuse/shared/src/server";
 
@@ -43,26 +43,80 @@ export const runHealthCheck = async ({
 
     try {
       if (failIfNoRecentEvents) {
-        const client = DorisClientManager.getInstance().getClient(
-          parseDorisQueryConfig(
-            process.env,
-            resolveDorisNodeEnv(env.NODE_ENV, env.DORIS_LOCAL_DEV_MODE),
-          ),
-        );
-        const events = await client.query<{ span_id: string }>(
-          `SELECT span_id
-           FROM events_current
-           WHERE start_time <= CURRENT_TIMESTAMP(6)
-             AND start_time >= CURRENT_TIMESTAMP(6) - INTERVAL 3 MINUTE
-           LIMIT 1`,
-        );
+        const now = new Date();
+        const clickhouseNow = convertDateToClickhouseDateTime(now);
 
-        if (events.length === 0) {
-          return {
-            isHealthy: false,
-            status: "No events within the last 3 minutes",
-            version,
-          };
+        if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "events_only") {
+          // In events_only mode the legacy traces/observations tables are no
+          // longer written, so they would always look stale. Ingestion
+          // completeness is instead reflected by recent rows in events_core
+          // (the query-optimized projection of events_full).
+          const events = await measureAndReturn({
+            operationName: "healthCheckEvents",
+            projectId: "__CROSS_PROJECT__",
+            input: {
+              now: clickhouseNow,
+            },
+            fn: async (params: { now: string }) =>
+              queryClickhouse<{ span_id: string }>({
+                query: `
+                  SELECT span_id
+                  FROM events_core
+                  WHERE start_time <= {now: DateTime64(3)}
+                  AND start_time >= {now: DateTime64(3)} - INTERVAL 3 MINUTE
+                  LIMIT 1
+                `,
+                params,
+              }),
+          });
+
+          if (events.length === 0) {
+            return {
+              isHealthy: false,
+              status: "No events within the last 3 minutes",
+              version,
+            };
+          }
+        } else {
+          const traces = await measureAndReturn({
+            operationName: "healthCheckTraces",
+            projectId: "__CROSS_PROJECT__",
+            input: {
+              now: clickhouseNow,
+            },
+            fn: async (params: { now: string }) =>
+              queryClickhouse<{ id: string }>({
+                query: `
+                  SELECT id
+                  FROM traces
+                  WHERE timestamp <= {now: DateTime64(3)}
+                  AND timestamp >= {now: DateTime64(3)} - INTERVAL 3 MINUTE
+                  LIMIT 1
+                `,
+                params,
+              }),
+          });
+
+          const observations = await queryClickhouse<{ id: string }>({
+            query: `
+              SELECT id
+              FROM observations
+              WHERE start_time <= {now: DateTime64(3)}
+              AND start_time >= {now: DateTime64(3)} - INTERVAL 3 MINUTE
+              LIMIT 1
+            `,
+            params: {
+              now: clickhouseNow,
+            },
+          });
+
+          if (traces.length === 0 || observations.length === 0) {
+            return {
+              isHealthy: false,
+              status: `No ${traces.length === 0 ? "traces" : "observations"} within the last 3 minutes`,
+              version,
+            };
+          }
         }
       }
     } catch (error) {

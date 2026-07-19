@@ -5,6 +5,7 @@ export const availableFlags = [
   // safe rollback; drop once the GA rollout is confirmed stable.
   "searchBar",
   "templateFlag",
+  "excludeClickhouseRead",
   "v4BetaToggleVisible",
   "observationEvals",
   "experimentsV4Enabled",

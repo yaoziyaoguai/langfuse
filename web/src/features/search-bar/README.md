@@ -57,8 +57,8 @@ Cross-field OR, negated groups, and other shapes the flat contract cannot
 represent are commit-blocking diagnostics, not silent drops. There is no
 FTS `*` operator: the events tRPC filter contract has none.
 
-**Full-text search.** It matches as a **contiguous substring** through the
-Doris event query compiler and is expressed field-style:
+**Full-text search.** It matches as a **contiguous substring** server-side
+(`clickhouse-sql/search.ts`, `ILIKE %query%`) and is expressed field-style:
 
 - **bare text** (`refund policy`) → `searchQuery`, default scope:
   `searchType=['id','content']` — i.e. `id` + `user_id` + `name` (the `id`
@@ -364,8 +364,8 @@ ColumnDefinition[]   (per view — packages/shared/src/tableDefinitions/*,
    ▼
 flat FilterState     (singleFilter — packages/shared/src/interfaces/filters.ts)
    ▼
-logical FilterState compiler → Doris SQL
-   (packages/shared/src/server/queries/doris-sql/eventQueryCompiler.ts)
+createFilterFromFilterState → ClickHouse
+   (packages/shared/src/server/queries/clickhouse-sql/factory.ts)
 ```
 
 The bar's adapter emits that **same `FilterState`** (see the `fields.ts` header:

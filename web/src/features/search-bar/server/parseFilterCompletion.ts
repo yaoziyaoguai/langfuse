@@ -15,7 +15,7 @@ import { filterStateToQueryText } from "../lib/filter-state-to-query";
 import type { ObservedScoreNames } from "../lib/observed-options";
 
 // Mirrors COMPATIBLE_FILTER_TYPES in
-// packages/shared/src/server/queries/Doris-sql/filterTypeCompatibility.ts —
+// packages/shared/src/server/queries/clickhouse-sql/filterTypeCompatibility.ts —
 // the column-type → allowed-filter-type map that `events.all` enforces (and
 // 500s on mismatch, e.g. a plain `number` filter on the `scores_avg`
 // numberObject column). Kept local so this stays free of the heavy server barrel.

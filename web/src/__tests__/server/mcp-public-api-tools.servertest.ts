@@ -1,3 +1,7 @@
+vi.hoisted(() => {
+  process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE = "dual";
+});
+
 process.env.LANGFUSE_DATASET_SERVICE_READ_FROM_VERSIONED_IMPLEMENTATION =
   "true";
 process.env.LANGFUSE_DATASET_SERVICE_WRITE_TO_VERSIONED_IMPLEMENTATION = "true";
@@ -18,6 +22,12 @@ vi.mock("@langfuse/shared/src/server", async () => {
     EntityChangeQueue: {
       getInstance: () => queue,
     },
+    DatasetRunItemUpsertQueue: {
+      getInstance: () => queue,
+    },
+    DatasetDeleteQueue: {
+      getInstance: () => queue,
+    },
   };
 });
 
@@ -25,14 +35,18 @@ import { v4 as uuidv4 } from "uuid";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   createObservation,
-  createObservationsDoris,
+  createObservationsCh,
+  createDatasetRunItem,
+  createDatasetRunItemsCh,
   createTrace,
-  createTracesDoris,
+  createTracesCh,
 } from "@langfuse/shared/src/server";
 import {
   createMcpTestSetup,
   createPromptInDb,
   mockServerContext,
+  verifyAuditLog,
+  waitFor,
 } from "./mcp-helpers";
 import "@/src/features/mcp/server/bootstrap";
 import { config as mcpRouteConfig } from "@/src/pages/api/public/mcp";
@@ -55,10 +69,15 @@ import {
   handleListComments,
 } from "@/src/features/mcp/features/comments/tools";
 import {
+  handleCreateDatasetRunItem,
   handleDeleteDatasetItem,
+  handleDeleteDatasetRun,
   handleGetDataset,
   handleGetDatasetItem,
+  handleGetDatasetRun,
   handleListDatasetItems,
+  handleListDatasetRunItems,
+  handleListDatasetRuns,
   handleListDatasets,
   handleUpsertDataset,
   handleUpsertDatasetItem,
@@ -482,9 +501,31 @@ describe("MCP public API tools", () => {
     ).resolves.toEqual({ message: "Model successfully deleted" });
   });
 
-  it("covers R1A dataset and dataset item public API routes", async () => {
-    const { context } = await createMcpTestSetup();
+  it("covers dataset, dataset item, run item, and run public API routes", async () => {
+    const { context, projectId, apiKeyId } = await createMcpTestSetup();
     const datasetName = `mcp-dataset-100% accuracy %20 ${uuidv4()}`;
+    const traceId = uuidv4();
+    const observationId = uuidv4();
+
+    await createTracesCh([
+      createTrace({
+        id: traceId,
+        name: "mcp-dataset-trace",
+        user_id: "mcp-user",
+        project_id: projectId,
+      }),
+    ]);
+    await createObservationsCh([
+      createObservation({
+        id: observationId,
+        trace_id: traceId,
+        project_id: projectId,
+        type: "GENERATION",
+        name: "mcp-dataset-generation",
+        start_time: new Date("2026-01-01T00:00:00.000Z").getTime(),
+        end_time: new Date("2026-01-01T00:00:01.000Z").getTime(),
+      }),
+    ]);
 
     const datasetInputSchema = {
       type: "object",
@@ -608,6 +649,90 @@ describe("MCP public API tools", () => {
       datasetName: renamedDatasetName,
     });
 
+    const runName = `mcp-run-50% accuracy %20 ${uuidv4()}`;
+    const runItem = (await handleCreateDatasetRunItem(
+      {
+        datasetItemId: datasetItem.id,
+        traceId,
+        observationId,
+        runName,
+        runDescription: "MCP run",
+        metadata: { source: "mcp" },
+      },
+      context,
+    )) as { id: string; datasetRunId: string; datasetItemId: string };
+    expect(runItem.datasetItemId).toBe(datasetItem.id);
+    await expect(
+      verifyAuditLog({
+        projectId,
+        apiKeyId,
+        resourceType: "datasetRunItem",
+        resourceId: runItem.id,
+        action: "create",
+      }),
+    ).resolves.toMatchObject({
+      resourceType: "datasetRunItem",
+      resourceId: runItem.id,
+      action: "create",
+    });
+
+    await createDatasetRunItemsCh([
+      createDatasetRunItem({
+        id: runItem.id,
+        project_id: projectId,
+        trace_id: traceId,
+        observation_id: observationId,
+        dataset_run_id: runItem.datasetRunId,
+        dataset_item_id: datasetItem.id,
+        dataset_id: dataset.id,
+        dataset_run_name: runName,
+      }),
+    ]);
+
+    await waitFor(async () => {
+      const runItems = (await handleListDatasetRunItems(
+        {
+          datasetId: dataset.id,
+          datasetRunId: runItem.datasetRunId,
+          page: 1,
+          limit: 10,
+        },
+        context,
+      )) as { data: Array<{ id: string }> };
+
+      return runItems.data.some((item) => item.id === runItem.id);
+    });
+
+    const datasetRuns = (await handleListDatasetRuns(
+      { datasetId: dataset.id, page: 1, limit: 10 },
+      context,
+    )) as { data: Array<{ id: string; name: string }> };
+    expect(datasetRuns.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: runItem.datasetRunId, name: runName }),
+      ]),
+    );
+
+    await expect(
+      handleGetDatasetRun(
+        { datasetId: dataset.id, datasetRunId: runItem.datasetRunId },
+        context,
+      ),
+    ).resolves.toMatchObject({
+      id: runItem.datasetRunId,
+      name: runName,
+      datasetRunItems: expect.arrayContaining([
+        expect.objectContaining({ id: runItem.id }),
+      ]),
+    });
+
+    await expect(
+      handleDeleteDatasetRun(
+        { datasetId: dataset.id, datasetRunId: runItem.datasetRunId },
+        context,
+      ),
+    ).resolves.toEqual({ message: "Dataset run successfully deleted" });
+
     await expect(
       handleDeleteDatasetItem({ datasetItemId: datasetItem.id }, context),
     ).resolves.toEqual({ message: "Dataset item successfully deleted" });
@@ -629,13 +754,13 @@ describe("MCP public API tools", () => {
     const { projectId: otherProjectId } = await createMcpTestSetup();
     const traceId = uuidv4();
 
-    await createTracesDoris([
+    await createTracesCh([
       createTrace({
         id: traceId,
         project_id: otherProjectId,
       }),
     ]);
-    await createObservationsDoris([
+    await createObservationsCh([
       createObservation({
         id: uuidv4(),
         trace_id: traceId,
@@ -689,6 +814,13 @@ describe("MCP public API tools", () => {
         targetContext,
       ),
     ).rejects.toThrow("Dataset not found");
+    await expect(
+      handleListDatasetRunItems(
+        { datasetId: dataset.id, datasetRunId: uuidv4(), page: 1, limit: 10 },
+        targetContext,
+      ),
+    ).rejects.toThrow("Dataset run not found");
+
     const prompt = await createPromptInDb({
       projectId: sourceProjectId,
       name: `mcp-comment-isolation-${uuidv4()}`,

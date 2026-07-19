@@ -246,6 +246,9 @@ importers:
       '@azure/storage-blob':
         specifier: ^12.26.0
         version: 12.33.0
+      '@clickhouse/client':
+        specifier: 1.23.1
+        version: 1.23.1
       '@google-cloud/storage':
         specifier: ^7.19.0
         version: 7.19.0
@@ -1760,6 +1763,10 @@ packages:
 
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
+
+  '@clickhouse/client@1.23.1':
+    resolution: {integrity: sha512-vs3/Zc1dHvT171btW5nMoPsPCJ6QVJ5pp7obxzO5sjqwFx/jjz9wwCAqcFOdc2DhprugDBaVn+4dVY8hG3A9nw==}
+    engines: {node: '>=20'}
 
   '@codemirror/autocomplete@6.20.3':
     resolution: {integrity: sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g==}
@@ -12902,6 +12909,8 @@ snapshots:
   '@cfworker/json-schema@4.1.1': {}
 
   '@chevrotain/types@11.1.2': {}
+
+  '@clickhouse/client@1.23.1': {}
 
   '@codemirror/autocomplete@6.20.3':
     dependencies:

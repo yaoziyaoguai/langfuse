@@ -1,13 +1,13 @@
 import {
   createObservation,
   createTrace,
-  createTracesDoris,
+  createTracesCh,
   createEvent as createEventBase,
   createOrgProjectAndApiKey,
 } from "@langfuse/shared/src/server";
 import {
-  createObservationsDoris,
-  createEventsDoris,
+  createObservationsCh,
+  createEventsCh,
 } from "@langfuse/shared/src/server";
 import {
   makeAPICall,
@@ -15,6 +15,7 @@ import {
 } from "@/src/__tests__/test-utils";
 import { GetObservationsV1Response } from "@/src/features/public-api/types/observations";
 import { randomUUID } from "crypto";
+import { env } from "@/src/env.mjs";
 
 // The events tables carry metadata as flattened `metadata_names` /
 // `metadata_values` arrays. The fixture below also passes the nested object
@@ -103,16 +104,16 @@ const createAndInsertObservations = async (
   trace: ReturnType<typeof createTrace>,
   observations: ObservationData[],
 ) => {
-  await createTracesDoris([trace]);
+  await createTracesCh([trace]);
 
   const data = observations.map((obs) =>
     createObservationData(useEventsTable, obs, trace),
   );
 
   if (useEventsTable) {
-    await createEventsDoris(data as any);
+    await createEventsCh(data as any);
   } else {
-    await createObservationsDoris(data as any);
+    await createObservationsCh(data as any);
   }
 };
 
@@ -579,7 +580,11 @@ describe("/api/public/observations API Endpoint", () => {
     });
   };
 
-  runTestSuite(true);
+  // Run tests with both implementations
+  if (env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true") {
+    runTestSuite(true); // with events table
+  }
+  runTestSuite(false); // with observations table
 
   // Advanced Filtering Tests
   describe("Advanced Filtering", () => {
@@ -831,7 +836,7 @@ describe("/api/public/observations API Endpoint", () => {
           });
 
           if (useEventsTable) {
-            createEventsDoris([
+            createEventsCh([
               createEvent({
                 ...trace1,
                 span_id: trace1.id,
@@ -919,7 +924,11 @@ describe("/api/public/observations API Endpoint", () => {
       });
     };
 
-    runAdvancedFilterTestSuite(true);
+    // Run all advanced filtering tests for both implementations
+    if (env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true") {
+      runAdvancedFilterTestSuite(true); // with events table
+    }
+    runAdvancedFilterTestSuite(false); // with observations table
   });
 
   // parentObservationId filter tests
@@ -949,10 +958,10 @@ describe("/api/public/observations API Endpoint", () => {
           const childObsId = randomUUID();
 
           // Create parent (root) observation and child observation
-          await createTracesDoris([createdTrace]);
+          await createTracesCh([createdTrace]);
 
           if (useEventsTable) {
-            await createEventsDoris([
+            await createEventsCh([
               createEvent({
                 id: parentObsId,
                 span_id: parentObsId,
@@ -977,7 +986,7 @@ describe("/api/public/observations API Endpoint", () => {
               }),
             ]);
           } else {
-            await createObservationsDoris([
+            await createObservationsCh([
               createObservation({
                 id: parentObsId,
                 trace_id: traceId,
@@ -1042,10 +1051,10 @@ describe("/api/public/observations API Endpoint", () => {
           const parentObsId = randomUUID();
           const childObsId = randomUUID();
 
-          await createTracesDoris([createdTrace]);
+          await createTracesCh([createdTrace]);
 
           if (useEventsTable) {
-            await createEventsDoris([
+            await createEventsCh([
               createEvent({
                 id: parentObsId,
                 span_id: parentObsId,
@@ -1070,7 +1079,7 @@ describe("/api/public/observations API Endpoint", () => {
               }),
             ]);
           } else {
-            await createObservationsDoris([
+            await createObservationsCh([
               createObservation({
                 id: parentObsId,
                 trace_id: traceId,
@@ -1137,10 +1146,10 @@ describe("/api/public/observations API Endpoint", () => {
           const child1Id = randomUUID();
           const child2Id = randomUUID();
 
-          await createTracesDoris([createdTrace]);
+          await createTracesCh([createdTrace]);
 
           if (useEventsTable) {
-            await createEventsDoris([
+            await createEventsCh([
               createEvent({
                 id: parent1Id,
                 span_id: parent1Id,
@@ -1187,7 +1196,7 @@ describe("/api/public/observations API Endpoint", () => {
               }),
             ]);
           } else {
-            await createObservationsDoris([
+            await createObservationsCh([
               createObservation({
                 id: parent1Id,
                 trace_id: traceId,
@@ -1257,6 +1266,10 @@ describe("/api/public/observations API Endpoint", () => {
       });
     };
 
-    runParentObservationIdFilterTestSuite(true);
+    // Run parentObservationId filter tests for both implementations
+    if (env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true") {
+      runParentObservationIdFilterTestSuite(true); // with events table
+    }
+    runParentObservationIdFilterTestSuite(false); // with observations table
   });
 });

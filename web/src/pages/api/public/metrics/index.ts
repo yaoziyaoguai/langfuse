@@ -1,5 +1,5 @@
 import {
-  LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+  LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   withMiddlewares,
 } from "@/src/features/public-api/server/withMiddlewares";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
@@ -18,6 +18,7 @@ export default withMiddlewares(
       responseSchema: GetMetricsV1Response,
       // v1 metrics executes QueryBuilder against the legacy traces/observations
       // tables; the v2 endpoint at /api/public/v2/metrics targets events_full.
+      rejectInEventsOnlyMode: false,
       fn: async ({ query, auth }) => {
         try {
           // Extract the parsed query object
@@ -50,7 +51,7 @@ export default withMiddlewares(
     }),
   },
   {
-    analyticsResourceErrorMessage:
-      LEGACY_PUBLIC_API_METRICS_ANALYTICS_RESOURCE_ERROR_MESSAGE,
+    clickHouseResourceErrorMessage:
+      LEGACY_PUBLIC_API_METRICS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE,
   },
 );

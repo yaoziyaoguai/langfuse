@@ -18,7 +18,7 @@ import { QueryParamProvider } from "use-query-params";
 
 import "@/src/styles/globals.css";
 import { AppLayout } from "@/src/components/layouts/app-layout";
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 
 import posthog from "posthog-js";
@@ -84,6 +84,20 @@ import { InAppAiAgentProvider } from "@/src/ee/features/in-app-agent/components/
 import { useLangfuseCloudRegion } from "@/src/features/organizations/hooks";
 import { ScoreCacheProvider } from "@/src/features/scores/contexts/ScoreCacheContext";
 import { CorrectionCacheProvider } from "@/src/features/corrections/contexts/CorrectionCacheContext";
+import { V4_BETA_ENABLED_POSTHOG_PROPERTY } from "@/src/features/posthog-analytics/usePostHogClientCapture";
+import { UnavailableFeaturePage } from "@/src/components/UnavailableFeaturePage";
+import { capabilityForPagePath } from "@/src/features/capabilities/communityAvailability";
+
+function AnalyticsCapabilityPageGate({ children }: { children: ReactNode }) {
+  const { data: session } = useSession();
+  const router = useRouter();
+  const capability = capabilityForPagePath(router.pathname);
+
+  if (capability && session?.environment?.analyticsBackend === "doris") {
+    return <UnavailableFeaturePage capability={capability} />;
+  }
+  return children;
+}
 
 // Check that PostHog is client-side (used to handle Next.js SSR) and that env vars are set
 if (
@@ -136,7 +150,9 @@ const MyApp: AppType<{ session: Session | null }> = ({
 
   const page = (
     <>
-      <Component {...pageProps} />
+      <AnalyticsCapabilityPageGate>
+        <Component {...pageProps} />
+      </AnalyticsCapabilityPageGate>
       <UserTracking />
     </>
   );
@@ -217,6 +233,12 @@ function UserTracking() {
               })),
             ) ?? undefined,
           LANGFUSE_CLOUD_REGION: region,
+          [V4_BETA_ENABLED_POSTHOG_PROPERTY]:
+            sessionUser.v4BetaEnabled ?? false,
+        });
+        posthog.register({
+          [V4_BETA_ENABLED_POSTHOG_PROPERTY]:
+            sessionUser.v4BetaEnabled ?? false,
         });
       }
 
@@ -227,6 +249,7 @@ function UserTracking() {
       });
     } else if (session.status === "unauthenticated") {
       lastIdentifiedUser.current = null;
+      posthog.unregister(V4_BETA_ENABLED_POSTHOG_PROPERTY);
       // Sentry
       setUser(null);
     }

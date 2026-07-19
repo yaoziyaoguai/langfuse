@@ -83,7 +83,7 @@ export const ExportScheduleFields = ({
             </FormControl>
             <FormDescription>
               {field.value === BlobStorageIntegrationFileType.PARQUET
-                ? "Apache Parquet — a columnar binary format encoded and compressed by Doris. Gzip compression does not apply."
+                ? "Apache Parquet — a columnar binary format encoded and compressed by ClickHouse. Gzip compression does not apply."
                 : "The file format for exported data."}
             </FormDescription>
             <FormMessage />

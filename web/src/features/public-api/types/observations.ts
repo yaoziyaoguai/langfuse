@@ -19,6 +19,7 @@ import {
   type ObservationPriceFields,
 } from "@langfuse/shared/src/server";
 import { z } from "zod";
+import { useEventsTableSchema } from "@langfuse/shared/query";
 
 // Re-export for convenience
 export {
@@ -226,6 +227,7 @@ export const GetObservationsV1Query = z.object({
   environment: z.union([z.array(z.string()), z.string()]).nullish(),
   fromStartTime: stringDateTime,
   toStartTime: stringDateTime,
+  useEventsTable: useEventsTableSchema,
   filter: optionalJsonParam(z.array(singleFilter), "filter"),
 });
 export const GetObservationsV1Response = z
@@ -238,6 +240,7 @@ export const GetObservationsV1Response = z
 // GET /observations/{observationId}
 export const GetObservationV1Query = z.object({
   observationId: z.string(),
+  useEventsTable: useEventsTableSchema,
 });
 export const GetObservationV1Response = APIObservation;
 

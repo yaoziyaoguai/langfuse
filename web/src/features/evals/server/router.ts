@@ -97,7 +97,7 @@ import {
 export { CreateEvalTemplateInputSchema } from "@/src/features/evals/server/evalTemplateCreation";
 
 // Filter columns that used to be backed by the Postgres `traces` and
-// `scores` JOINs.  Those tables now live in Doris, so the eval logs
+// `scores` JOINs.  Those tables now live in ClickHouse, so the eval logs
 // query can no longer resolve them.  Filters referencing these columns are
 // dropped server-side to keep bookmarked URLs from failing.
 const DEPRECATED_FILTER_COLUMNS = new Set(["scoreValue", "sessionId"]);

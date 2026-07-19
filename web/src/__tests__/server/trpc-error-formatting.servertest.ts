@@ -11,7 +11,11 @@ vi.mock("@langfuse/shared/src/server", async () => ({
 import type { Session } from "next-auth";
 import { TRPCError } from "@trpc/server";
 import * as z from "zod";
-import { DorisError, logger } from "@langfuse/shared/src/server";
+import {
+  ClickHouseResourceError,
+  DorisError,
+  logger,
+} from "@langfuse/shared/src/server";
 import {
   createInnerTRPCContext,
   createTRPCRouter,
@@ -25,6 +29,70 @@ import {
 describe("tRPC error formatting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("ClickHouseResourceError", async () => {
+    const session = {
+      user: {
+        id: "user-1",
+      },
+    } as Session;
+
+    const formatterTestRouter = createTRPCRouter({
+      clickhouse: protectedProcedureWithoutTracing
+        .input(z.object({}))
+        .query(() => {
+          throw new ClickHouseResourceError(
+            "MEMORY_LIMIT",
+            new Error("Memory limit exceeded"),
+          );
+        }),
+    });
+
+    const formatter = (formatterTestRouter as any)._def._config
+      .errorFormatter as (args: any) => {
+      data: Record<string, unknown>;
+    };
+
+    const context = createInnerTRPCContext({
+      session,
+      headers: {},
+    });
+    const caller = formatterTestRouter.createCaller(context);
+
+    let error: TRPCError | undefined;
+    try {
+      await caller.clickhouse({});
+    } catch (caught) {
+      error = caught as TRPCError;
+    }
+
+    expect(error).toBeInstanceOf(TRPCError);
+
+    const formatted = formatter({
+      shape: {
+        code: -32603,
+        message: error!.message,
+        data: {
+          code: error!.code,
+          httpStatus: 422,
+        },
+      },
+      error: error!,
+    });
+
+    expect(formatted.data["errorName"]).toBe("ClickHouseResourceError");
+    expect(formatted.data["stack"]).toBeNull();
+    expect(formatted.data["zodError"]).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "ClickHouse resource limit exceeded",
+      expect.objectContaining({
+        errorType: "MEMORY_LIMIT",
+        message: "Memory limit exceeded",
+      }),
+    );
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it("sanitizes DorisError", async () => {
@@ -47,10 +115,7 @@ describe("tRPC error formatting", () => {
       data: Record<string, unknown>;
     };
 
-    const context = createInnerTRPCContext({
-      session,
-      headers: {},
-    });
+    const context = createInnerTRPCContext({ session, headers: {} });
     const caller = formatterTestRouter.createCaller(context);
 
     let error: TRPCError | undefined;
@@ -61,23 +126,17 @@ describe("tRPC error formatting", () => {
     }
 
     expect(error).toBeInstanceOf(TRPCError);
-
     const formatted = formatter({
       shape: {
         code: -32603,
         message: error!.message,
-        data: {
-          code: error!.code,
-          httpStatus: 503,
-        },
+        data: { code: error!.code, httpStatus: 503 },
       },
       error: error!,
     });
 
     expect(formatted.data["errorName"]).toBe("DorisError");
     expect(formatted.data["stack"]).toBeNull();
-    expect(formatted.data["zodError"]).toBeNull();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
       "Analytics storage request failed",
       {
@@ -86,10 +145,9 @@ describe("tRPC error formatting", () => {
         correlationId: "request-1",
       },
     );
-    expect(logger.error).not.toHaveBeenCalled();
   });
 
-  it("preserves the default stack behavior for non-Doris errors", () => {
+  it("preserves the default stack behavior for non-storage errors", () => {
     const formatterTestRouter = createTRPCRouter({});
 
     const formatter = (formatterTestRouter as any)._def._config

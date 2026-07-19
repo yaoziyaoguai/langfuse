@@ -58,11 +58,11 @@ describe("Langfuse context propagation", () => {
     });
   });
 
-  it("adds analytics request metadata to context baggage", () => {
+  it("adds clickhouse request metadata to context baggage", () => {
     opentelemetry.context.with(opentelemetry.ROOT_CONTEXT, () => {
       const ctx = contextWithLangfuseProps({
         projectId: "project-1",
-        analytics: {
+        clickhouse: {
           surface: "publicapi",
           route: "GET /api/public/traces",
         },
@@ -71,10 +71,10 @@ describe("Langfuse context propagation", () => {
       const baggage = opentelemetry.propagation.getBaggage(ctx);
 
       expect(baggage?.getEntry("langfuse.project.id")?.value).toBe("project-1");
-      expect(baggage?.getEntry("langfuse.analytics.surface")?.value).toBe(
+      expect(baggage?.getEntry("langfuse.clickhouse.surface")?.value).toBe(
         "publicapi",
       );
-      expect(baggage?.getEntry("langfuse.analytics.route")?.value).toBe(
+      expect(baggage?.getEntry("langfuse.clickhouse.route")?.value).toBe(
         "GET /api/public/traces",
       );
     });

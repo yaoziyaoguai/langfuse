@@ -11,15 +11,27 @@ x-redis-cluster-healthcheck: &redis-cluster-healthcheck
   start_period: 5s
 
 services:
-  doris-fe:
-    extends:
-      file: docker-compose.dev.yml
-      service: doris-fe
-
-  doris-be:
-    extends:
-      file: docker-compose.dev.yml
-      service: doris-be
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:24.3
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - 127.0.0.1:8123:8123
+      - 127.0.0.1:9000:9000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    depends_on:
+      - postgres
 
   minio:
     image: cgr.dev/chainguard/minio
@@ -158,10 +170,10 @@ services:
 volumes:
   langfuse_postgres_data:
     driver: local
-  langfuse_doris_fe_meta:
-  langfuse_doris_fe_logs:
-  langfuse_doris_be_storage:
-  langfuse_doris_be_logs:
+  langfuse_clickhouse_data:
+    driver: local
+  langfuse_clickhouse_logs:
+    driver: local
   langfuse_minio_data:
     driver: local
   redis-cluster_data-0:
@@ -176,10 +188,3 @@ volumes:
     driver: local
   redis-cluster_data-5:
     driver: local
-
-networks:
-  doris-dev:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.29.0.0/24

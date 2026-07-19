@@ -6,10 +6,10 @@ import { logger } from "./logger";
 import { env } from "../env";
 import { shouldSkipDeletionFor } from "./deletionGuard";
 import {
-  AnalyticsProjectDeletionInProgressError,
   scheduleTraceDeletionOperations,
   type AnalyticsDeletionRequester,
 } from "./repositories/analyticsDeletionOperations";
+import { isDorisAnalyticsBackend } from "./repositories/telemetry/doris/runtime";
 
 export interface TraceDeletionProcessorOptions {
   delayMs?: number; // Default from LANGFUSE_TRACE_DELETE_DELAY_MS env var
@@ -30,7 +30,7 @@ export type TraceDeletionDispatch = {
  * This function:
  * 1. Creates a record in the pending_deletions table for each trace
  * 2. Sends a deletion event to the queue with a configurable delay
- * 3. The worker will batch delete all pending traces from Doris
+ * 3. The worker will batch delete all pending traces from ClickHouse
  * 4. Sets the is_deleted flag to true after successful deletion
  *
  * @param projectId - The project ID
@@ -65,23 +65,23 @@ export async function traceDeletionProcessor(
   }
 
   try {
-    const organizationId =
-      options.organizationId ??
-      (
-        await prisma.project.findUniqueOrThrow({
+    const project = isDorisAnalyticsBackend()
+      ? await prisma.project.findUniqueOrThrow({
           where: { id: projectId },
           select: { orgId: true },
         })
-      ).orgId;
-    const scheduled = await scheduleTraceDeletionOperations({
-      projectId,
-      organizationId,
-      traceIds,
-      requester: options.requester ?? {
-        principalType: "system",
-        principalId: "trace-deletion-processor",
-      },
-    });
+      : null;
+    const scheduled = project
+      ? await scheduleTraceDeletionOperations({
+          projectId,
+          organizationId: options.organizationId ?? project.orgId,
+          traceIds,
+          requester: options.requester ?? {
+            principalType: "system",
+            principalId: "trace-deletion-processor",
+          },
+        })
+      : [];
 
     // Create pending deletion records for all traces
     await prisma.pendingDeletion.createMany({
@@ -134,13 +134,6 @@ export async function traceDeletionProcessor(
       logicallyInvisible: operation.logicallyInvisible,
     }));
   } catch (error) {
-    if (error instanceof AnalyticsProjectDeletionInProgressError) {
-      logger.info("Trace deletion is already covered by project deletion", {
-        projectId,
-        traceIds,
-      });
-      return [];
-    }
     logger.error(`Failed to process trace deletion for project ${projectId}`, {
       projectId,
       traceIds,
