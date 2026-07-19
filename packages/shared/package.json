@@ -82,7 +82,6 @@
     "benchmark:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- tsx scripts/doris-poc-benchmark.ts",
     "doris:migrate": "dotenv -e ../../.env -- tsx doris/scripts/migrate.ts",
     "doris:checkpoint": "tsx scripts/doris-checkpoint.ts",
-    "doris:retire-background-migrations": "tsx scripts/doris-retire-background-migrations.ts",
     "db:migrate": "DISABLE_ERD=false dotenv -e ../../.env -- npx prisma migrate dev",
     "db:push": "DISABLE_ERD=false dotenv -e ../../.env -- npx prisma db push",
     "db:reset": "dotenv -e ../../.env npx -- prisma migrate reset",

@@ -1,19 +1,11 @@
 import { randomUUID } from "crypto";
 import { IBackgroundMigration } from "./IBackgroundMigration";
 import { prisma, Prisma } from "@langfuse/shared/src/db";
-import {
-  CLICKHOUSE_BACKGROUND_MIGRATION_SCRIPTS,
-  heartbeatAnalyticsBackgroundMigrationManager,
-  instrumentAsync,
-  logger,
-} from "@langfuse/shared/src/server";
+import { instrumentAsync, logger } from "@langfuse/shared/src/server";
 import { env } from "../env";
 
 const ENV_GATE_PREFIX = "LANGFUSE_BACKGROUND_MIGRATION_";
 const HEARTBEAT_INTERVAL_MS = 15_000;
-const CLICKHOUSE_MIGRATION_SCRIPTS = new Set<string>(
-  CLICKHOUSE_BACKGROUND_MIGRATION_SCRIPTS,
-);
 
 export class BackgroundMigrationManager {
   private static workerId = randomUUID();
@@ -21,52 +13,36 @@ export class BackgroundMigrationManager {
     | {
         id: string;
         name: string;
-        script: string;
         args: Record<string, unknown>;
         migration: IBackgroundMigration;
       }
     | undefined;
   private static heartbeatTimer: NodeJS.Timeout | undefined;
   private static isClosed = false;
-  private static retirementRequested = false;
 
-  private static async recordHeartbeat(): Promise<boolean> {
+  private static async recordHeartbeat(): Promise<void> {
     const active = BackgroundMigrationManager.activeMigration;
-    if (active) {
-      await prisma.backgroundMigration.updateMany({
-        where: {
-          id: active.id,
-          workerId: BackgroundMigrationManager.workerId,
-          finishedAt: null,
-          failedAt: null,
-        },
-        data: { lockedAt: new Date() },
-      });
-    }
-    const retirement = await heartbeatAnalyticsBackgroundMigrationManager({
-      managerInstanceId: BackgroundMigrationManager.workerId,
-      managerBuildId: env.BUILD_ID ?? "development",
-      activeMigrationName: active?.script ?? null,
+    if (!active) return;
+    await prisma.backgroundMigration.updateMany({
+      where: {
+        id: active.id,
+        workerId: BackgroundMigrationManager.workerId,
+        finishedAt: null,
+        failedAt: null,
+      },
+      data: { lockedAt: new Date() },
     });
-    const shouldAbortActive =
-      retirement.shouldDrain &&
-      active !== undefined &&
-      CLICKHOUSE_MIGRATION_SCRIPTS.has(active.script);
-    if (shouldAbortActive && !BackgroundMigrationManager.retirementRequested) {
-      BackgroundMigrationManager.retirementRequested = true;
-      await active.migration.abort();
-      logger.info(
-        `[Background Migration] Retirement fence requested cooperative abort for ${active.name}`,
-      );
-    }
-    return retirement.shouldDrain;
   }
 
   private static async heartBeat(): Promise<void> {
+    BackgroundMigrationManager.heartbeatTimer = undefined;
     try {
       await BackgroundMigrationManager.recordHeartbeat();
     } finally {
-      if (!BackgroundMigrationManager.isClosed) {
+      if (
+        !BackgroundMigrationManager.isClosed &&
+        BackgroundMigrationManager.activeMigration
+      ) {
         BackgroundMigrationManager.heartbeatTimer = setTimeout(
           BackgroundMigrationManager.heartBeat,
           HEARTBEAT_INTERVAL_MS,
@@ -77,7 +53,6 @@ export class BackgroundMigrationManager {
 
   public static async run(): Promise<void> {
     BackgroundMigrationManager.isClosed = false;
-    await BackgroundMigrationManager.heartBeat();
     await instrumentAsync({ name: "background-migration-run" }, async () => {
       // A migration row may declare `args.envGate = "<ENV_VAR>"` to remain dormant
       // until the operator sets that env var to "true" (e.g. ship dormant on v3,
@@ -96,8 +71,6 @@ export class BackgroundMigrationManager {
       let migrationToRun = true;
 
       while (migrationToRun) {
-        const retirementActive =
-          await BackgroundMigrationManager.recordHeartbeat();
         await prisma.$transaction(
           async (tx) => {
             // Read background migrations from database, ignoring any row whose
@@ -106,13 +79,6 @@ export class BackgroundMigrationManager {
               where: {
                 finishedAt: null,
                 failedAt: null,
-                ...(retirementActive
-                  ? {
-                      script: {
-                        notIn: [...CLICKHOUSE_BACKGROUND_MIGRATION_SCRIPTS],
-                      },
-                    }
-                  : {}),
                 OR: [
                   { args: { path: ["envGate"], equals: Prisma.AnyNull } },
                   ...activeGates.map((gate) => ({
@@ -158,7 +124,6 @@ export class BackgroundMigrationManager {
             BackgroundMigrationManager.activeMigration = {
               id: migration.id,
               name: migration.name,
-              script: migration.script,
               args: migration.args as any,
               migration: new (require(`./${migration.script}`).default)(),
             };
@@ -172,6 +137,8 @@ export class BackgroundMigrationManager {
         if (!BackgroundMigrationManager.activeMigration) {
           continue;
         }
+
+        await BackgroundMigrationManager.heartBeat();
 
         // Capture a local reference so the catch handler stays type-safe even if
         // close() concurrently nulls activeMigration during shutdown.
@@ -200,10 +167,7 @@ export class BackgroundMigrationManager {
         try {
           await migration.run(args);
 
-          if (
-            BackgroundMigrationManager.activeMigration !== undefined &&
-            !BackgroundMigrationManager.retirementRequested
-          ) {
+          if (BackgroundMigrationManager.activeMigration !== undefined) {
             // Only mark as complete if still active. Otherwise, it was aborted.
             await prisma.backgroundMigration.update({
               where: {
@@ -218,46 +182,26 @@ export class BackgroundMigrationManager {
             logger.info(
               `[Background Migration] Finished background migration ${active.name}`,
             );
-          } else if (BackgroundMigrationManager.retirementRequested) {
-            await prisma.backgroundMigration.updateMany({
-              where: {
-                id: active.id,
-                workerId: BackgroundMigrationManager.workerId,
-              },
-              data: { lockedAt: null, workerId: null },
-            });
           }
         } catch (err) {
           logger.error(
             `[Background Migration] Failed to run background migration ${active.name}: ${err}`,
           );
-          if (BackgroundMigrationManager.retirementRequested) {
-            await prisma.backgroundMigration.updateMany({
-              where: {
-                id: active.id,
-                workerId: BackgroundMigrationManager.workerId,
-              },
-              data: { lockedAt: null, workerId: null },
-            });
-          } else {
-            await prisma.backgroundMigration.update({
-              where: {
-                id: active.id,
-                workerId: BackgroundMigrationManager.workerId,
-              },
-              data: {
-                lockedAt: null,
-                failedAt: new Date(),
-                failedReason:
-                  err instanceof Error ? err.message : "Unknown error",
-              },
-            });
-          }
+          await prisma.backgroundMigration.update({
+            where: {
+              id: active.id,
+              workerId: BackgroundMigrationManager.workerId,
+            },
+            data: {
+              lockedAt: null,
+              failedAt: new Date(),
+              failedReason:
+                err instanceof Error ? err.message : "Unknown error",
+            },
+          });
         }
         BackgroundMigrationManager.activeMigration = undefined;
-        BackgroundMigrationManager.retirementRequested = false;
       }
-      await BackgroundMigrationManager.recordHeartbeat();
     });
   }
 
