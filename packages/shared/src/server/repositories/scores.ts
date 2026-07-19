@@ -73,9 +73,95 @@ import {
   findUiColumnMapping,
   matchesUiColumnMapping,
 } from "../../tableDefinitions";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris";
 
 const FILTER_OPTION_SCORE_NAME_LIMIT = 200;
 const FILTER_OPTION_CATEGORICAL_VALUE_LIMIT = 20;
+
+const DORIS_SCORE_RANGE_START = new Date(0);
+const DORIS_TRACE_SCORE_SCAN_LIMIT = 10_000;
+const DORIS_TRACE_LOOKUP_CONCURRENCY = 25;
+
+async function readDorisScores(input: {
+  projectId: string;
+  filters: FilterState;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  offset?: number;
+  excludeMetadata?: boolean;
+  includeHasMetadata?: boolean;
+  orderBy?: OrderByState;
+}) {
+  const repository = getDorisTelemetryRepositories().scores;
+  const range = {
+    from: input.from ?? DORIS_SCORE_RANGE_START,
+    to: input.to ?? new Date(Date.now() + 1),
+  };
+  const applyProjection = (scores: readonly ScoreDomain[]) =>
+    scores.map((score) => ({
+      ...score,
+      ...(input.excludeMetadata ? { metadata: {} } : {}),
+      ...(input.includeHasMetadata
+        ? { hasMetadata: Object.keys(score.metadata).length > 0 }
+        : {}),
+    }));
+  if (input.limit !== undefined && input.limit <= 999) {
+    const page = await repository.list({
+      projectId: input.projectId,
+      range,
+      filters: input.filters,
+      limit: Math.max(1, input.limit),
+      offset: input.offset,
+      orderBy: input.orderBy ?? undefined,
+    });
+    return applyProjection(page.items);
+  }
+  const scores: ScoreDomain[] = [];
+  const target =
+    input.limit === undefined
+      ? Number.POSITIVE_INFINITY
+      : (input.offset ?? 0) + input.limit;
+  if (input.orderBy) {
+    let pageOffset = 0;
+    let pageSize: number;
+    do {
+      const page = await repository.list({
+        projectId: input.projectId,
+        range,
+        filters: input.filters,
+        limit: 999,
+        offset: pageOffset,
+        orderBy: input.orderBy,
+      });
+      scores.push(...page.items);
+      pageSize = page.items.length;
+      pageOffset += pageSize;
+    } while (pageSize === 999 && scores.length < target);
+  } else {
+    let cursor: string | undefined;
+    do {
+      const page = await repository.list({
+        projectId: input.projectId,
+        range,
+        filters: input.filters,
+        limit: 999,
+        cursor,
+      });
+      scores.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor && scores.length < target);
+  }
+  const offset = input.offset ?? 0;
+  const selected =
+    input.limit === undefined
+      ? scores.slice(offset)
+      : scores.slice(offset, offset + input.limit);
+  return applyProjection(selected);
+}
 
 export const searchExistingAnnotationScore = async (
   projectId: string,
@@ -134,6 +220,13 @@ export const getScoreById = async ({
   scoreId: string;
   source?: ScoreSourceType;
 }): Promise<ScoreDomain | undefined> => {
+  if (isDorisAnalyticsBackend()) {
+    const score = await getDorisTelemetryRepositories().scores.get({
+      projectId,
+      scoreId,
+    });
+    return score && (!source || score.source === source) ? score : undefined;
+  }
   return _handleGetScoreById({
     projectId,
     scoreId,
@@ -147,6 +240,20 @@ export const getScoresByIds = async (
   scoreId: string[],
   source?: ScoreSourceType,
 ): Promise<ScoreDomain[]> => {
+  if (isDorisAnalyticsBackend()) {
+    const scores = await Promise.all(
+      scoreId.map((id) =>
+        getDorisTelemetryRepositories().scores.get({
+          projectId,
+          scoreId: id,
+        }),
+      ),
+    );
+    return scores.filter(
+      (score): score is ScoreDomain =>
+        Boolean(score) && (!source || score?.source === source),
+    );
+  }
   return _handleGetScoresByIds({
     projectId,
     scoreId,
@@ -243,6 +350,30 @@ export const getScoresForSessions = async <
     excludeMetadata = false,
     includeHasMetadata = false,
   } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    return readDorisScores({
+      projectId,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "sessionId",
+          operator: "any of",
+          value: sessionIds,
+        },
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "any of",
+          value: [...LISTABLE_SCORE_TYPES],
+        },
+      ],
+      limit,
+      offset,
+      excludeMetadata,
+      includeHasMetadata,
+    });
+  }
 
   const select = formatMetadataSelect(excludeMetadata, includeHasMetadata);
 
@@ -504,6 +635,46 @@ const getScoresForTracesInternal = async <
     preferredClickhouseService,
   } = props;
 
+  if (isDorisAnalyticsBackend()) {
+    const filters: FilterState = [
+      {
+        type: "stringOptions",
+        column: "traceId",
+        operator: "any of",
+        value: traceIds,
+      },
+      ...(dataTypes
+        ? [
+            {
+              type: "stringOptions" as const,
+              column: "dataType",
+              operator: "any of" as const,
+              value: [...dataTypes],
+            },
+          ]
+        : []),
+    ];
+    if (level !== "all") {
+      filters.push({
+        type: "null",
+        column: "observationId",
+        operator: level === "trace" ? "is null" : "is not null",
+        value: "",
+      });
+    }
+    return readDorisScores({
+      projectId,
+      filters,
+      from: timestamp
+        ? new Date(timestamp.getTime() - 60 * 60 * 1_000)
+        : undefined,
+      limit,
+      offset,
+      excludeMetadata,
+      includeHasMetadata,
+    });
+  }
+
   const select = formatMetadataSelect(excludeMetadata, includeHasMetadata);
   const levelFilter =
     level === "trace"
@@ -637,6 +808,33 @@ export const getScoresForObservations = async <
     excludeMetadata = false,
     includeHasMetadata = false,
   } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    return readDorisScores({
+      projectId,
+      filters: [
+        {
+          type: "stringOptions",
+          column: "observationId",
+          operator: "any of",
+          value: observationIds,
+        },
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "any of",
+          value: [...LISTABLE_SCORE_TYPES],
+        },
+      ],
+      from: minTimestamp
+        ? new Date(minTimestamp.getTime() - 60 * 60 * 1_000)
+        : undefined,
+      limit,
+      offset,
+      excludeMetadata,
+      includeHasMetadata,
+    });
+  }
 
   const select = [
     !excludeMetadata ? "*" : "* EXCEPT (metadata)",
@@ -905,6 +1103,51 @@ export const getScoresGroupedByNameSourceType = async ({
   fromTimestamp?: Date;
   toTimestamp?: Date;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(filter);
+    const filters: FilterState = [
+      ...(filter as FilterState),
+      {
+        type: "stringOptions",
+        column: "dataType",
+        operator: "any of",
+        value: [...LISTABLE_SCORE_TYPES],
+      },
+    ];
+    if (fromTimestamp) {
+      filters.push({
+        type: "datetime",
+        column: "timestamp",
+        operator: ">=",
+        value: fromTimestamp,
+      });
+    }
+    if (toTimestamp) {
+      filters.push({
+        type: "datetime",
+        column: "timestamp",
+        operator: "<=",
+        value: toTimestamp,
+      });
+    }
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: fromTimestamp ?? DORIS_SCORE_RANGE_START,
+        to: toTimestamp
+          ? new Date(toTimestamp.getTime() + 1)
+          : new Date(Date.now() + 1),
+      },
+      filters,
+      columns: ["name", "source", "dataType"],
+      limit: FILTER_OPTION_SCORE_NAME_LIMIT,
+    });
+    return rows.map((row) => ({
+      name: String(row.name),
+      source: String(row.source) as ScoreSourceType,
+      dataType: String(row.dataType) as ListableScoreDataType,
+    }));
+  }
   const scoresFilter = new FilterList();
   scoresFilter.push(
     ...createFilterFromFilterState(
@@ -1014,6 +1257,28 @@ export const getNumericScoresGroupedByName = async (
   projectId: string,
   filter?: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(filter ?? []);
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: DORIS_SCORE_RANGE_START,
+        to: new Date(Date.now() + 1),
+      },
+      filters: [
+        ...(filter ?? []),
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "any of",
+          value: ["NUMERIC", "BOOLEAN"],
+        },
+      ],
+      columns: ["name"],
+      limit: FILTER_OPTION_SCORE_NAME_LIMIT,
+    });
+    return rows.map((row) => ({ name: String(row.name) }));
+  }
   // Despite the historical name of some callers, this accepts any score-table
   // compatible filter. Trace tables use this to scope discovery to scores that
   // roll up into trace aggregates, not just direct trace-level scores.
@@ -1060,6 +1325,28 @@ export const getBooleanScoresGroupedByName = async (
   projectId: string,
   filter?: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(filter ?? []);
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: DORIS_SCORE_RANGE_START,
+        to: new Date(Date.now() + 1),
+      },
+      filters: [
+        ...(filter ?? []),
+        {
+          type: "string",
+          column: "dataType",
+          operator: "=",
+          value: "BOOLEAN",
+        },
+      ],
+      columns: ["name"],
+      limit: FILTER_OPTION_SCORE_NAME_LIMIT,
+    });
+    return rows.map((row) => ({ name: String(row.name) }));
+  }
   const chFilter = filter
     ? createFilterFromFilterState(
         filter,
@@ -1103,6 +1390,68 @@ export const getCategoricalScoresGroupedByName = async (
   projectId: string,
   filter?: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(filter ?? []);
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: DORIS_SCORE_RANGE_START,
+        to: new Date(Date.now() + 1),
+      },
+      filters: [
+        ...(filter ?? []),
+        {
+          type: "string",
+          column: "dataType",
+          operator: "=",
+          value: "CATEGORICAL",
+        },
+      ],
+      columns: ["name", "stringValue"],
+      limit:
+        FILTER_OPTION_SCORE_NAME_LIMIT * FILTER_OPTION_CATEGORICAL_VALUE_LIMIT,
+    });
+    const byName = new Map<string, string[]>();
+    for (const row of rows) {
+      const name = String(row.name);
+      const value = row.stringValue == null ? "" : String(row.stringValue);
+      if (!value) continue;
+      const values = byName.get(name) ?? [];
+      if (
+        !values.includes(value) &&
+        values.length < FILTER_OPTION_CATEGORICAL_VALUE_LIMIT
+      ) {
+        values.push(value);
+      }
+      byName.set(name, values);
+    }
+    const scoreConfigs =
+      byName.size > 0
+        ? await prisma.scoreConfig.findMany({
+            where: {
+              projectId,
+              name: { in: [...byName.keys()] },
+              dataType: "CATEGORICAL",
+              isArchived: false,
+            },
+            select: { name: true, categories: true },
+          })
+        : [];
+    for (const config of scoreConfigs) {
+      if (!Array.isArray(config.categories)) continue;
+      const values = byName.get(config.name) ?? [];
+      for (const category of config.categories as Array<{ label: string }>) {
+        if (
+          !values.includes(category.label) &&
+          values.length < FILTER_OPTION_CATEGORICAL_VALUE_LIMIT
+        ) {
+          values.push(category.label);
+        }
+      }
+      byName.set(config.name, values);
+    }
+    return [...byName].map(([label, values]) => ({ label, values }));
+  }
   // Mirrors `getNumericScoresGroupedByName`: callers can provide any score
   // scope filters, not just timestamp predicates.
   const chFilter = filter
@@ -1202,6 +1551,9 @@ export const getScoresUiCount = async (props: {
   limit?: number;
   offset?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return (await readDorisScoresUiFromEvents(props)).count;
+  }
   const rows = await getScoresUiGeneric<{ count: string }>({
     select: "count",
     excludeMetadata: true,
@@ -1236,6 +1588,32 @@ export async function getScoresUiTable<
     clickhouseConfigs,
     ...rest
   } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    const { items } = await readDorisScoresUiFromEvents({
+      ...rest,
+      excludeMetadata,
+    });
+    return Promise.all(
+      items.map(async (score) => {
+        const trace = score.traceId
+          ? await getDorisTelemetryRepositories().traces.get({
+              projectId: rest.projectId,
+              traceId: score.traceId,
+            })
+          : null;
+        return {
+          ...score,
+          traceUserId: trace?.userId ?? null,
+          traceName: trace?.name ?? null,
+          traceTags: trace?.tags ? [...trace.tags] : null,
+          hasMetadata: (includeHasMetadataFlag
+            ? score.hasMetadata
+            : undefined) as IncludeHasMetadata extends true ? boolean : never,
+        };
+      }),
+    );
+  }
 
   const rows = await getScoresUiGeneric<{
     id: string;
@@ -1631,6 +2009,9 @@ export const getScoresUiCountFromEvents = async (props: {
   limit?: number;
   offset?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return (await readDorisScoresUiFromEvents(props)).count;
+  }
   const rows = await getScoresUiGenericFromEvents<{ count: string }>({
     select: "count",
     excludeMetadata: true,
@@ -1656,6 +2037,15 @@ export async function getScoresUiTableFromEvents(props: {
   excludeMetadata?: boolean;
 }) {
   const { clickhouseConfigs, excludeMetadata = true, ...rest } = props;
+
+  if (isDorisAnalyticsBackend()) {
+    return (
+      await readDorisScoresUiFromEvents({
+        ...rest,
+        excludeMetadata,
+      })
+    ).items;
+  }
 
   const rows = await getScoresUiGenericFromEvents<{
     id: string;
@@ -1709,10 +2099,276 @@ export async function getScoresUiTableFromEvents(props: {
   });
 }
 
+const DORIS_SCORE_TRACE_FILTER_COLUMNS = new Set([
+  "traceName",
+  "userId",
+  "trace_tags",
+  "tags",
+]);
+
+const DORIS_R1B_SCORE_FILTER_COLUMNS = new Set([
+  "datasetRunIds",
+  "datasetRunItemRunIds",
+  "datasetId",
+  "datasetItemIds",
+  "experimentIds",
+]);
+
+function assertDorisR1AScoreFilters(filters: FilterState): void {
+  const deferred = filters.find((filter) =>
+    DORIS_R1B_SCORE_FILTER_COLUMNS.has(filter.column),
+  );
+  if (deferred) {
+    throw new InvalidRequestError(
+      `Score filter ${deferred.column} is not available on the Doris R1A backend`,
+    );
+  }
+}
+
+function matchesStringFilter(
+  actual: string | null,
+  operator: string,
+  expected: string,
+): boolean {
+  const value = actual ?? "";
+  switch (operator) {
+    case "=":
+      return value === expected;
+    case "contains":
+    case "matches":
+      return value.includes(expected);
+    case "does not contain":
+      return !value.includes(expected);
+    case "starts with":
+      return value.startsWith(expected);
+    case "ends with":
+      return value.endsWith(expected);
+    default:
+      throw new InvalidRequestError(
+        `Unsupported Doris trace score filter operator: ${operator}`,
+      );
+  }
+}
+
+function matchesDorisTraceScoreFilter(
+  filter: FilterState[number],
+  trace: {
+    readonly name?: string | null;
+    readonly userId?: string | null;
+    readonly tags?: readonly string[];
+  } | null,
+): boolean {
+  const scalar =
+    filter.column === "traceName"
+      ? (trace?.name ?? null)
+      : filter.column === "userId"
+        ? (trace?.userId ?? null)
+        : null;
+  switch (filter.type) {
+    case "string":
+      return matchesStringFilter(scalar, filter.operator, filter.value);
+    case "stringOptions":
+      return filter.operator === "any of"
+        ? filter.value.includes(scalar ?? "")
+        : !filter.value.includes(scalar ?? "");
+    case "arrayOptions": {
+      const tags = trace?.tags ?? [];
+      if (filter.operator === "all of") {
+        return filter.value.every((value) => tags.includes(value));
+      }
+      const any = filter.value.some((value) => tags.includes(value));
+      return filter.operator === "any of" ? any : !any;
+    }
+    case "null":
+      return filter.operator === "is null" ? scalar === null : scalar !== null;
+    default:
+      throw new InvalidRequestError(
+        `Unsupported Doris trace-backed score filter: ${filter.column}`,
+      );
+  }
+}
+
+async function readDorisScoresUiFromEvents(props: {
+  projectId: string;
+  filter: FilterState;
+  orderBy: OrderByState;
+  limit?: number;
+  offset?: number;
+  excludeMetadata?: boolean;
+}): Promise<{
+  items: Array<ScoreDomain & { hasMetadata: boolean }>;
+  count: number;
+}> {
+  assertDorisR1AScoreFilters(props.filter);
+  const traceFilters = props.filter.filter((filter) =>
+    DORIS_SCORE_TRACE_FILTER_COLUMNS.has(filter.column),
+  );
+  const scoreFilters: FilterState = [
+    ...props.filter.filter(
+      (filter) => !DORIS_SCORE_TRACE_FILTER_COLUMNS.has(filter.column),
+    ),
+    {
+      type: "stringOptions",
+      column: "dataType",
+      operator: "any of",
+      value: [...LISTABLE_SCORE_TYPES],
+    },
+  ];
+  const traceOrder =
+    props.orderBy && DORIS_SCORE_TRACE_FILTER_COLUMNS.has(props.orderBy.column)
+      ? props.orderBy
+      : null;
+  if (traceFilters.length === 0 && !traceOrder) {
+    const range = {
+      from: DORIS_SCORE_RANGE_START,
+      to: new Date(Date.now() + 1),
+    };
+    const [items, count] = await Promise.all([
+      readDorisScores({
+        projectId: props.projectId,
+        filters: scoreFilters,
+        limit: props.limit,
+        offset: props.offset,
+        excludeMetadata: props.excludeMetadata,
+        includeHasMetadata: true,
+        orderBy: props.orderBy,
+      }),
+      getDorisTelemetryRepositories().scores.count({
+        projectId: props.projectId,
+        range,
+        filters: scoreFilters,
+      }),
+    ]);
+    return {
+      items: items.map((score) => ({
+        ...score,
+        hasMetadata:
+          (score as ScoreDomain & { hasMetadata?: boolean }).hasMetadata ??
+          Object.keys(score.metadata).length > 0,
+      })),
+      count,
+    };
+  }
+
+  const scores = await readDorisScores({
+    projectId: props.projectId,
+    filters: scoreFilters,
+    limit: DORIS_TRACE_SCORE_SCAN_LIMIT + 1,
+    excludeMetadata: props.excludeMetadata,
+    includeHasMetadata: true,
+  });
+  if (scores.length > DORIS_TRACE_SCORE_SCAN_LIMIT) {
+    throw new InvalidRequestError(
+      `Doris trace-backed score filters and ordering are limited to ${DORIS_TRACE_SCORE_SCAN_LIMIT} candidate scores`,
+    );
+  }
+  const traceIds = [
+    ...new Set(scores.flatMap(({ traceId }) => (traceId ? [traceId] : []))),
+  ];
+  const traces = new Map<
+    string,
+    Awaited<
+      ReturnType<
+        ReturnType<typeof getDorisTelemetryRepositories>["traces"]["get"]
+      >
+    >
+  >();
+  for (
+    let offset = 0;
+    offset < traceIds.length;
+    offset += DORIS_TRACE_LOOKUP_CONCURRENCY
+  ) {
+    const batch = traceIds.slice(
+      offset,
+      offset + DORIS_TRACE_LOOKUP_CONCURRENCY,
+    );
+    const resolved = await Promise.all(
+      batch.map(
+        async (traceId) =>
+          [
+            traceId,
+            await getDorisTelemetryRepositories().traces.get({
+              projectId: props.projectId,
+              traceId,
+            }),
+          ] as const,
+      ),
+    );
+    resolved.forEach(([traceId, trace]) => traces.set(traceId, trace));
+  }
+  const matching = scores.filter((score) => {
+    const trace = score.traceId ? (traces.get(score.traceId) ?? null) : null;
+    return traceFilters.every((filter) =>
+      matchesDorisTraceScoreFilter(filter, trace),
+    );
+  });
+  if (traceOrder) {
+    matching.sort((left, right) => {
+      const leftTrace = left.traceId ? traces.get(left.traceId) : undefined;
+      const rightTrace = right.traceId ? traces.get(right.traceId) : undefined;
+      const leftValue =
+        traceOrder.column === "traceName"
+          ? leftTrace?.name
+          : traceOrder.column === "userId"
+            ? leftTrace?.userId
+            : leftTrace?.tags?.join(",");
+      const rightValue =
+        traceOrder.column === "traceName"
+          ? rightTrace?.name
+          : traceOrder.column === "userId"
+            ? rightTrace?.userId
+            : rightTrace?.tags?.join(",");
+      const comparison = String(leftValue ?? "").localeCompare(
+        String(rightValue ?? ""),
+      );
+      return traceOrder.order === "ASC" ? comparison : -comparison;
+    });
+  }
+  const offset = props.offset ?? 0;
+  const selected =
+    props.limit === undefined
+      ? matching.slice(offset)
+      : matching.slice(offset, offset + props.limit);
+  return {
+    items: selected.map((score) => ({
+      ...score,
+      hasMetadata:
+        (score as ScoreDomain & { hasMetadata?: boolean }).hasMetadata ??
+        Object.keys(score.metadata).length > 0,
+    })),
+    count: matching.length,
+  };
+}
+
 export const getScoreNames = async (
   projectId: string,
   timestampFilter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(timestampFilter);
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: DORIS_SCORE_RANGE_START,
+        to: new Date(Date.now() + 1),
+      },
+      filters: [
+        ...timestampFilter,
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "any of",
+          value: [...LISTABLE_SCORE_TYPES],
+        },
+      ],
+      columns: ["name"],
+      limit: 1_000,
+    });
+    return rows.map((row) => ({
+      name: String(row.name),
+      count: row.count,
+    }));
+  }
   const chFilter = new FilterList(
     createFilterFromFilterState(
       timestampFilter,
@@ -1760,6 +2416,37 @@ export const getScoreStringValues = async (
   projectId: string,
   timestampFilter: FilterState,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    assertDorisR1AScoreFilters(timestampFilter);
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: DORIS_SCORE_RANGE_START,
+        to: new Date(Date.now() + 1),
+      },
+      filters: [
+        ...timestampFilter,
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "none of",
+          value: ["TEXT"],
+        },
+        {
+          type: "null",
+          column: "stringValue",
+          operator: "is not null",
+          value: "",
+        },
+      ],
+      columns: ["stringValue"],
+      limit: 1_000,
+    });
+    return rows.flatMap((row) => {
+      const value = row.stringValue == null ? "" : String(row.stringValue);
+      return value ? [{ value, count: row.count }] : [];
+    });
+  }
   const chFilter = new FilterList(
     createFilterFromFilterState(
       timestampFilter,
@@ -3103,6 +3790,111 @@ export async function listScoresV3ForPublicApi(
     fields: ScoreFieldGroupV3[];
   } & ListFilterParams,
 ): Promise<{ data: APIScoreV3[]; cursor?: string }> {
+  if (isDorisAnalyticsBackend()) {
+    if (params.experimentId?.length) {
+      throw new InvalidRequestError(
+        "Experiment score reads are not available on the Doris R1A backend",
+      );
+    }
+    const filters: FilterState = [];
+    const addOptions = (
+      column: string,
+      values: readonly string[] | undefined,
+    ) => {
+      if (values?.length) {
+        filters.push({
+          type: "stringOptions",
+          column,
+          operator: "any of",
+          value: [...values],
+        });
+      }
+    };
+    addOptions("scoreId", params.id);
+    addOptions("name", params.name);
+    addOptions("source", params.source);
+    addOptions("dataType", params.dataType);
+    addOptions("environment", params.environment);
+    addOptions("configId", params.configId);
+    addOptions("queueId", params.queueId);
+    addOptions("authorUserId", params.authorUserId);
+    addOptions("traceId", params.traceId);
+    addOptions("sessionId", params.sessionId);
+    addOptions("observationId", params.observationId);
+    if (params.valueMin !== undefined) {
+      filters.push({
+        type: "number",
+        column: "value",
+        operator: ">=",
+        value: params.valueMin,
+      });
+    }
+    if (params.valueMax !== undefined) {
+      filters.push({
+        type: "number",
+        column: "value",
+        operator: "<=",
+        value: params.valueMax,
+      });
+    }
+    if (params.value?.length && params.dataType?.length === 1) {
+      const dataType = params.dataType[0];
+      if (dataType === "NUMERIC") {
+        const values = params.value.map(Number);
+        if (values.some((value) => !Number.isFinite(value))) {
+          throw new InvalidRequestError(
+            "Invalid numeric Doris score value filter",
+          );
+        }
+        addOptions("value", values.map(String));
+      } else if (dataType === "BOOLEAN") {
+        const values = params.value.map((value) =>
+          value === "true" ? "1" : value === "false" ? "0" : value,
+        );
+        addOptions("value", values);
+      } else {
+        addOptions("stringValue", params.value);
+      }
+    }
+    const from = params.fromTimestamp ?? new Date(0);
+    const to = params.toTimestamp ?? new Date(Date.now() + 1);
+    if (from >= to) {
+      throw new InvalidRequestError("Invalid Doris score timestamp range");
+    }
+    const cursor = params.cursor
+      ? Buffer.from(
+          JSON.stringify({
+            version: 1,
+            timestamp: params.cursor.lastTimestamp.toISOString(),
+            scoreId: params.cursor.lastId,
+          }),
+          "utf8",
+        ).toString("base64url")
+      : undefined;
+    const page = await getDorisTelemetryRepositories().scores.list({
+      projectId: params.projectId,
+      range: { from, to },
+      filters,
+      limit: params.limit,
+      cursor,
+    });
+    const data = filterAndValidateV3GetScoreList(
+      page.items.map((score) => scoreDomainToV3(score, params.fields)),
+    );
+    const last = page.items[page.items.length - 1];
+    return {
+      data,
+      ...(page.nextCursor && last
+        ? {
+            cursor: encodeCursorV3({
+              v: 1,
+              lastTimestamp: last.timestamp,
+              lastId: last.id,
+            }),
+          }
+        : {}),
+    };
+  }
   const { query: filterClause, params: filterParams } =
     buildDynamicFilters(params);
 

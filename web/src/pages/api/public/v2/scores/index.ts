@@ -13,7 +13,7 @@ export default withMiddlewares({
     name: "/api/public/scores",
     querySchema: GetScoresQueryV2,
     responseSchema: GetScoresResponseV2,
-    rejectInEventsOnlyMode: true,
+    rejectInEventsOnlyMode: false,
     fn: async ({ query, auth }) => {
       // Validate that trace filters are not used when trace field is excluded
       const requestedFields = query.fields ?? ["score", "trace"];

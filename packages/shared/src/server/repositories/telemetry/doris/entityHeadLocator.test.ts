@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   findObservationHeadLocators,
+  findScoreHeadLocators,
   findTraceEventHeadLocators,
 } from "./entityHeadLocator";
 
@@ -89,6 +90,37 @@ describe("Doris entity-head locators", () => {
           entityType: "EVENT",
           owningTraceId: "trace-1",
         },
+      }),
+    );
+  });
+});
+
+describe("findScoreHeadLocators", () => {
+  it("finds the immutable score partition by project and lookup ID", async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+        lookupId: "score-1",
+      },
+    ]);
+    const client = {
+      analyticsEntityHead: { findMany },
+    } as unknown as Parameters<typeof findScoreHeadLocators>[0]["client"];
+
+    await expect(
+      findScoreHeadLocators({
+        client,
+        projectId: "project-1",
+        scoreId: "score-1",
+      }),
+    ).resolves.toEqual([{ partitionDate: "2026-07-17", scoreId: "score-1" }]);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          projectId: "project-1",
+          entityType: "SCORE",
+          lookupId: "score-1",
+        }),
       }),
     );
   });

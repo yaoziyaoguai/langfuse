@@ -26,6 +26,9 @@ import {
   StringFilter,
   StringOptionsFilter,
   type FilterList,
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+  readDorisScoresForPublicApi,
   deriveFilters,
   convertApiProvidedFilterToClickhouseFilter,
   scoresTableUiColumnDefinitions,
@@ -218,7 +221,20 @@ function determineTraceJoinRequirement(
 }
 
 export class ScoresApiService {
+  private readonly dorisReads = new WeakMap<
+    object,
+    ReturnType<typeof readDorisScoresForPublicApi>
+  >();
+
   constructor(private readonly apiVersion: "v1" | "v2") {}
+
+  private readDorisScores(props: ScoreQueryType) {
+    const existing = this.dorisReads.get(props);
+    if (existing) return existing;
+    const read = readDorisScoresForPublicApi(props, this.apiVersion);
+    this.dorisReads.set(props, read);
+    return read;
+  }
 
   async createScore({
     body,
@@ -332,6 +348,25 @@ export class ScoresApiService {
     scoreId: string;
     source?: ScoreSourceType;
   }) {
+    if (isDorisAnalyticsBackend()) {
+      const score = await getDorisTelemetryRepositories().scores.get({
+        projectId,
+        scoreId,
+      });
+      if (
+        !score ||
+        (source && score.source !== source) ||
+        (this.apiVersion === "v1" &&
+          (!LISTABLE_SCORE_TYPES.some(
+            (dataType) => dataType === score.dataType,
+          ) ||
+            !score.traceId ||
+            score.sessionId))
+      ) {
+        return undefined;
+      }
+      return convertScoreToPublicApi(score);
+    }
     const score = await _handleGetScoreById({
       projectId,
       scoreId,
@@ -356,6 +391,13 @@ export class ScoresApiService {
    * v2: Returns all score types including CORRECTION and TEXT
    */
   async generateScoresForPublicApi(props: ScoreQueryType) {
+    if (isDorisAnalyticsBackend()) {
+      const { items } = await this.readDorisScores(props);
+      return items.map(({ trace, ...score }) => ({
+        ...convertScoreToPublicApi(score),
+        trace,
+      }));
+    }
     const scoreDataTypes =
       this.apiVersion === "v1" ? LISTABLE_SCORE_TYPES : undefined;
     const { scoresFilter, tracesFilter } = buildScoreFilters(
@@ -392,6 +434,9 @@ export class ScoresApiService {
    * v2: Counts all score types including CORRECTION and TEXT
    */
   async getScoresCountForPublicApi(props: ScoreQueryType) {
+    if (isDorisAnalyticsBackend()) {
+      return (await this.readDorisScores(props)).count;
+    }
     const scoreDataTypes =
       this.apiVersion === "v1" ? LISTABLE_SCORE_TYPES : undefined;
     const { scoresFilter, tracesFilter } = buildScoreFilters(

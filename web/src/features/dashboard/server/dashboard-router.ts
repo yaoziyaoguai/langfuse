@@ -16,6 +16,7 @@ import {
   logger,
   getObservationCostByTypeByTime,
   getObservationUsageByTypeByTime,
+  isDorisAnalyticsBackend,
   DashboardService,
   DashboardDefinitionSchema,
 } from "@langfuse/shared/src/server";
@@ -350,7 +351,7 @@ export const dashboardRouter = createTRPCRouter({
 
       switch (input.queryName) {
         case "score-aggregate":
-          if (input.version === "v2") {
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
             return getScoreAggregateV2({
               projectId: input.projectId,
               filter: input.filter ?? [],
@@ -368,7 +369,7 @@ export const dashboardRouter = createTRPCRouter({
             countScoreId: Number(row.count),
           })) as DatabaseRow[];
         case "observations-usage-by-type-timeseries":
-          if (input.version === "v2") {
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
             return getObservationsByTypeV2({
               projectId: input.projectId,
               filter: input.filter ?? [],
@@ -382,7 +383,7 @@ export const dashboardRouter = createTRPCRouter({
           );
           return rowsObsType as DatabaseRow[];
         case "observations-cost-by-type-timeseries":
-          if (input.version === "v2") {
+          if (input.version === "v2" || isDorisAnalyticsBackend()) {
             return getObservationsByTypeV2({
               projectId: input.projectId,
               filter: input.filter ?? [],
@@ -411,7 +412,7 @@ export const dashboardRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input }) => {
-      if (input.version === "v2") {
+      if (input.version === "v2" || isDorisAnalyticsBackend()) {
         // v2: ClickHouse histogram() aggregates all matching rows server-side.
         // `input.limit` is ignored — no row-level cap is needed.
         const { fromIso, toIso, mappedFilters } = prepareScoresNumericV2Params(

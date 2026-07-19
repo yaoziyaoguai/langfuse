@@ -78,7 +78,7 @@
     "test": "dotenv -e ../../.env -- vitest run",
     "doris:up": "docker-compose -f ../../docker-compose.doris-poc.yml up -d",
     "doris:down": "docker-compose -f ../../docker-compose.doris-poc.yml down -v",
-    "test:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- vitest run --no-file-parallelism --testTimeout=180000 --hookTimeout=120000 src/server/doris/__tests__/DorisPoC.integration.test.ts src/server/doris/__tests__/migration.integration.test.ts src/server/queries/doris-sql/__tests__/querySemantics.integration.test.ts",
+    "test:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- vitest run --no-file-parallelism --testTimeout=180000 --hookTimeout=120000 src/server/doris/__tests__/DorisPoC.integration.test.ts src/server/doris/__tests__/migration.integration.test.ts src/server/queries/doris-sql/__tests__/querySemantics.integration.test.ts src/server/doris/__tests__/DorisTelemetryRepositories.integration.test.ts src/server/doris/__tests__/DorisScoresRepository.integration.test.ts src/features/query/server/adapters/doris/DorisAnalyticsQueryEngine.integration.test.ts",
     "benchmark:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- tsx scripts/doris-poc-benchmark.ts",
     "doris:migrate": "dotenv -e ../../.env -- tsx doris/scripts/migrate.ts",
     "db:migrate": "DISABLE_ERD=false dotenv -e ../../.env -- npx prisma migrate dev",

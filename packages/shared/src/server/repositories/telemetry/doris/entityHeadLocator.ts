@@ -10,6 +10,11 @@ export type EventHeadLocator = {
   readonly observationId: string;
 };
 
+export type ScoreHeadLocator = {
+  readonly partitionDate: string;
+  readonly scoreId: string;
+};
+
 function requireId(value: string, label: string): void {
   if (!value.trim()) {
     throw new InvalidRequestError(`${label} is required`);
@@ -84,5 +89,37 @@ export async function findTraceEventHeadLocators(input: {
     client,
     projectId: input.projectId,
     where: { owningTraceId: input.traceId },
+  });
+}
+
+export async function findScoreHeadLocators(input: {
+  readonly client?: EntityHeadLocatorClient;
+  readonly projectId: string;
+  readonly scoreId: string;
+}): Promise<readonly ScoreHeadLocator[]> {
+  requireId(input.projectId, "projectId");
+  requireId(input.scoreId, "scoreId");
+  const client = input.client ?? (await import("../../../../db.js")).prisma;
+  const rows = await client.analyticsEntityHead.findMany({
+    where: {
+      projectId: input.projectId,
+      entityType: "SCORE" satisfies AnalyticsEntityType,
+      lookupId: input.scoreId,
+    },
+    select: {
+      partitionDate: true,
+      lookupId: true,
+    },
+    orderBy: [{ partitionDate: "desc" }, { entityKey: "asc" }],
+  });
+
+  return rows.map((row) => {
+    if (!row.lookupId) {
+      throw new Error("Analytics entity head is missing its score locator");
+    }
+    return {
+      partitionDate: dateOnly(row.partitionDate),
+      scoreId: row.lookupId,
+    };
   });
 }

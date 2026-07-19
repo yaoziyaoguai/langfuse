@@ -7,6 +7,11 @@ import { type PreferredClickhouseService } from "../../../server/clickhouse/clie
 import { QueryBuilder } from "./queryBuilder";
 import { type QueryType, type ViewVersion } from "../types";
 import { env } from "../../../env";
+import {
+  getDorisQueryExecutor,
+  isDorisAnalyticsBackend,
+} from "../../../server/repositories/telemetry/doris/runtime";
+import { executeDorisAnalyticsQuery } from "./adapters/doris/DorisAnalyticsQueryEngine";
 
 export type PreparedQuery = {
   compiledQuery: string;
@@ -94,6 +99,14 @@ export async function executeQuery(
   version: ViewVersion = "v1",
   enableSingleLevelOptimization = false,
 ): Promise<Array<Record<string, unknown>>> {
+  if (isDorisAnalyticsBackend()) {
+    return executeDorisAnalyticsQuery({
+      executor: getDorisQueryExecutor(),
+      projectId,
+      query,
+      version,
+    });
+  }
   const prepared = await prepareExecuteQuery({
     projectId,
     query,
