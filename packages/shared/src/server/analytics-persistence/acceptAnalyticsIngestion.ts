@@ -16,7 +16,12 @@ const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export type RawAnalyticsIngestionEnvelope = {
   readonly formatVersion: typeof RAW_FORMAT_VERSION;
-  readonly source: "otlp" | "score" | "annotation-score" | "internal-event";
+  readonly source:
+    | "otlp"
+    | "score"
+    | "annotation-score"
+    | "internal-event"
+    | "legacy-event";
   readonly payload: unknown;
   readonly isLangfuseInternal?: boolean;
   readonly attribution: {
@@ -51,9 +56,13 @@ export function encodeRawAnalyticsIngestionEnvelope(
 ): string {
   if (
     envelope.formatVersion !== RAW_FORMAT_VERSION ||
-    !["otlp", "score", "annotation-score", "internal-event"].includes(
-      envelope.source,
-    ) ||
+    ![
+      "otlp",
+      "score",
+      "annotation-score",
+      "internal-event",
+      "legacy-event",
+    ].includes(envelope.source) ||
     !("payload" in envelope) ||
     (envelope.isLangfuseInternal !== undefined &&
       typeof envelope.isLangfuseInternal !== "boolean") ||
@@ -117,7 +126,8 @@ export function decodeRawAnalyticsIngestionEnvelope(
       (envelope.source !== "otlp" &&
         envelope.source !== "score" &&
         envelope.source !== "annotation-score" &&
-        envelope.source !== "internal-event") ||
+        envelope.source !== "internal-event" &&
+        envelope.source !== "legacy-event") ||
       (envelope.isLangfuseInternal !== undefined &&
         typeof envelope.isLangfuseInternal !== "boolean") ||
       typeof attribution !== "object" ||
@@ -265,7 +275,7 @@ export async function acceptAnalyticsIngestion(input: {
   }
 
   const sourceOperationId = input.sourceOperationId ?? operationId;
-  const body = encodeRawAnalyticsIngestionEnvelope(input.envelope, {
+  let receiptSeed: RawAnalyticsIngestionReceiptSeed = {
     operationId,
     projectId: input.projectId,
     sourceOperationId,
@@ -273,9 +283,10 @@ export async function acceptAnalyticsIngestion(input: {
     acceptedAtNanos,
     canonicalizerVersion: input.canonicalizerVersion,
     schemaVersion: input.schemaVersion,
-  });
+  };
+  const body = encodeRawAnalyticsIngestionEnvelope(input.envelope, receiptSeed);
   assertRawAnalyticsBodySize(body);
-  const sourceChecksum = sha256(body);
+  let persistedBody = body;
   const rawObjectKey = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/${safeBlobKeySegment(input.projectId)}/${safeBlobKeySegment(operationId)}.json`;
   const uploadResult = await input.storageService.uploadFileIfAbsent({
     fileName: rawObjectKey,
@@ -289,27 +300,62 @@ export async function acceptAnalyticsIngestion(input: {
         tags: { operationId, phase: "raw_reconciliation" },
       });
     }
-    if (sha256(existing) !== sourceChecksum) {
+    let decoded: DecodedRawAnalyticsIngestionEnvelope;
+    try {
+      decoded = decodeRawAnalyticsIngestionEnvelope(existing);
+    } catch {
       throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
         tags: { operationId, phase: "raw_reconciliation" },
       });
     }
+    const existingSeed = decoded.receipt;
+    const existingEnvelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: decoded.formatVersion,
+      source: decoded.source,
+      payload: decoded.payload,
+      ...(decoded.isLangfuseInternal === true
+        ? { isLangfuseInternal: true }
+        : {}),
+      attribution: decoded.attribution,
+    };
+    if (
+      !existingSeed ||
+      existingSeed.operationId !== operationId ||
+      existingSeed.projectId !== input.projectId ||
+      existingSeed.sourceOperationId !== sourceOperationId ||
+      existingSeed.canonicalizerVersion !== input.canonicalizerVersion ||
+      existingSeed.schemaVersion !== input.schemaVersion ||
+      encodeRawAnalyticsIngestionEnvelope(existingEnvelope, existingSeed) !==
+        existing ||
+      sha256(encodeRawAnalyticsIngestionEnvelope(existingEnvelope)) !==
+        sha256(encodeRawAnalyticsIngestionEnvelope(input.envelope))
+    ) {
+      throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
+        tags: { operationId, phase: "raw_reconciliation" },
+      });
+    }
+    receiptSeed = existingSeed;
+    persistedBody = existing;
   }
 
   const createReceipt = input.createReceipt ?? createAnalyticsIngestionReceipt;
   await createReceipt({
     client: input.client,
-    operationId,
-    projectId: input.projectId,
-    sourceOperationId,
-    sourceChecksum,
+    operationId: receiptSeed.operationId,
+    projectId: receiptSeed.projectId,
+    sourceOperationId: receiptSeed.sourceOperationId,
+    sourceChecksum: sha256(persistedBody),
     rawObjectKey,
-    acceptedAt,
-    acceptedAtNanos,
-    canonicalizerVersion: input.canonicalizerVersion,
-    schemaVersion: input.schemaVersion,
-    recoverableUntil: new Date(acceptedAt.getTime() + REPLAY_HORIZON_MS),
-    statusExpiresAt: new Date(acceptedAt.getTime() + STATUS_RETENTION_MS),
+    acceptedAt: receiptSeed.acceptedAt,
+    acceptedAtNanos: receiptSeed.acceptedAtNanos,
+    canonicalizerVersion: receiptSeed.canonicalizerVersion,
+    schemaVersion: receiptSeed.schemaVersion,
+    recoverableUntil: new Date(
+      receiptSeed.acceptedAt.getTime() + REPLAY_HORIZON_MS,
+    ),
+    statusExpiresAt: new Date(
+      receiptSeed.acceptedAt.getTime() + STATUS_RETENTION_MS,
+    ),
   });
   return { operationId, status: "ACCEPTED" };
 }

@@ -174,6 +174,176 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     });
   });
 
+  it("canonicalizes a legacy trace into a stable synthetic root event", async () => {
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "legacy-event",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "javascript",
+        ingestionSdkVersion: "2.9.0",
+      },
+      payload: [
+        {
+          id: "trace-event-1",
+          type: "trace-create",
+          timestamp: "2026-07-18T14:00:00.123456789Z",
+          body: {
+            id: "trace-1",
+            timestamp: "2026-07-18T13:59:59.000000000Z",
+            name: "legacy trace",
+            input: { question: "why?" },
+            metadata: { tenant: "acme" },
+            environment: "production",
+          },
+        },
+      ],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+
+    const batch = await canonicalizer(body, {
+      loadCurrentEvent: vi.fn(async () => null),
+    } as never).canonicalize(operation(body));
+
+    expect(batch.children).toHaveLength(1);
+    expect(batch.children[0]).toMatchObject({
+      expectedSourceVersion: null,
+      entity: {
+        kind: "event",
+        traceId: "trace-1",
+        spanId: "t-trace-1",
+        parentSpanId: "",
+        name: "legacy trace",
+        traceName: "legacy trace",
+        environment: "production",
+        input: { question: "why?" },
+        metadata: { tenant: "acme" },
+        sourceVersion: 1_784_383_200_123_456_789n,
+      },
+    });
+  });
+
+  it("merges a legacy partial observation update with the visible Doris snapshot", async () => {
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "legacy-event",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "python",
+        ingestionSdkVersion: "2.8.1",
+      },
+      payload: [
+        {
+          id: "span-update-event-1",
+          type: "span-update",
+          timestamp: "2026-07-18T14:00:01.000000001Z",
+          body: {
+            id: "span-1",
+            traceId: "trace-1",
+            output: { answer: 42 },
+            metadata: { updated: true },
+            environment: "production",
+          },
+        },
+      ],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const loadCurrentEvent = vi.fn(async () => ({
+      sourceVersion: 1_753_190_400_000_000_000n,
+      eventData: {
+        projectId: "project-1",
+        traceId: "trace-1",
+        spanId: "span-1",
+        parentSpanId: "t-trace-1",
+        type: "SPAN",
+        name: "existing span",
+        environment: "production",
+        startTimeISO: "2026-07-18T13:59:58.000Z",
+        endTimeISO: "2026-07-18T13:59:59.000Z",
+        input: { question: "life" },
+        output: null,
+        metadata: { kept: "yes" },
+        providedUsageDetails: { input: 3 },
+        source: "ingestion-api-legacy",
+      },
+    }));
+
+    const batch = await canonicalizer(body, {
+      loadCurrentEvent,
+    } as never).canonicalize(operation(body));
+
+    expect(loadCurrentEvent).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceId: "trace-1",
+      spanId: "span-1",
+    });
+    expect(batch.children[0]).toMatchObject({
+      expectedSourceVersion: 1_753_190_400_000_000_000n,
+      entity: {
+        traceId: "trace-1",
+        spanId: "span-1",
+        name: "existing span",
+        startTime: 1_784_383_198_000_000_000n,
+        endTime: 1_784_383_199_000_000_000n,
+        input: { question: "life" },
+        output: { answer: 42 },
+        metadata: { kept: "yes", updated: true },
+        providedUsageDetails: { input: 3 },
+      },
+    });
+  });
+
+  it("resolves a legacy partial update whose SDK omitted traceId", async () => {
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "legacy-event",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "javascript",
+        ingestionSdkVersion: "2.9.0",
+      },
+      payload: [
+        {
+          id: "span-update-event-1",
+          type: "span-update",
+          timestamp: "2026-07-18T14:00:00.123456789Z",
+          body: { id: "span-1", output: { answer: 42 } },
+        },
+      ],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const loadCurrentEvent = vi.fn(async () => ({
+      sourceVersion: 1_753_190_400_000_000_000n,
+      eventData: {
+        projectId: "project-1",
+        traceId: "trace-1",
+        spanId: "span-1",
+        type: "SPAN",
+        name: "existing span",
+        environment: "production",
+        startTimeISO: "2026-07-18T13:59:58.000Z",
+        endTimeISO: "2026-07-18T13:59:59.000Z",
+        metadata: {},
+        source: "ingestion-api-legacy",
+      },
+    }));
+
+    const batch = await canonicalizer(body, {
+      loadCurrentEvent,
+    } as never).canonicalize(operation(body));
+
+    expect(loadCurrentEvent).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceId: undefined,
+      spanId: "span-1",
+    });
+    expect(batch.children[0]?.entity).toMatchObject({
+      traceId: "trace-1",
+      spanId: "span-1",
+      output: { answer: 42 },
+    });
+  });
+
   it("rejects raw content that does not match the durable receipt checksum", async () => {
     const body = encodeRawAnalyticsIngestionEnvelope({
       formatVersion: 1,

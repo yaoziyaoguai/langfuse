@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { z } from "zod";
 
 import { env } from "../../env";
@@ -52,13 +52,13 @@ import {
 import { markProjectIngestFailure } from "../redis/ingestionFailureTracking";
 import { getS3EventStorageClient } from "../s3";
 
-export const DORIS_LEGACY_INGESTION_UNAVAILABLE = {
+export const DORIS_EXPERIMENT_INGESTION_UNAVAILABLE = {
   error: "UnsupportedFeature",
-  code: "R2_LEGACY_INGESTION_UNAVAILABLE",
+  code: "R1B_EXPERIMENTS_UNAVAILABLE",
   message:
-    "This ingestion event type is not available in the Doris R1A release.",
+    "Dataset-run ingestion is not available with the Doris analytics backend.",
   recovery:
-    "Use the OTLP traces endpoint for tracing data. Dataset-run analytics requires a separately approved R1B adoption.",
+    "Use the ClickHouse analytics backend until the Doris experiment projection is enabled.",
 } as const;
 
 type BatchError = {
@@ -478,6 +478,7 @@ async function processDorisEventBatch(
     options.isLangfuseInternal ?? false,
   );
   const scores: IngestionEventType[] = [];
+  const legacyGroups = new Map<string, IngestionEventType[]>();
   const successes: AnalyticsEventBatchResult["successes"] = [];
   const errors: AnalyticsEventBatchResult["errors"] = [];
 
@@ -514,11 +515,30 @@ async function processDorisEventBatch(
       scores.push(parsed.data);
       continue;
     }
-    errors.push({
-      id: parsed.data.id,
-      status: 501,
-      ...DORIS_LEGACY_INGESTION_UNAVAILABLE,
-    });
+    if (parsed.data.type === eventTypes.DATASET_RUN_ITEM_CREATE) {
+      errors.push({
+        id: parsed.data.id,
+        status: 501,
+        ...DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
+      });
+      continue;
+    }
+    const entityId = parsed.data.body.id;
+    if (!entityId) {
+      errors.push({
+        id: parsed.data.id,
+        status: 400,
+        message: "Invalid request data",
+        error: "Tracing event body.id is required",
+      });
+      continue;
+    }
+    const entityType =
+      parsed.data.type === eventTypes.TRACE_CREATE ? "trace" : "observation";
+    const groupKey = `${entityType}\0${entityId}`;
+    const group = legacyGroups.get(groupKey);
+    if (group) group.push(parsed.data);
+    else legacyGroups.set(groupKey, [parsed.data]);
   }
 
   if (scores.length > 0) {
@@ -537,7 +557,43 @@ async function processDorisEventBatch(
       ),
       rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
     });
-    successes.push(...scores.map(({ id }) => ({ id, status: 201 })));
+    for (const { id } of scores) successes.push({ id, status: 201 });
+  }
+
+  for (const [groupKey, events] of legacyGroups) {
+    const orderedEvents = sortBatch(events);
+    const entityLockId = createHash("sha256")
+      .update(
+        [
+          "langfuse-doris-legacy-entity-v1",
+          auth.scope.projectId,
+          groupKey,
+        ].join("\0"),
+      )
+      .digest("hex");
+    const operationHash = createHash("sha256").update(
+      ["langfuse-doris-legacy-v1", auth.scope.projectId, groupKey].join("\0"),
+    );
+    for (const { id } of orderedEvents) operationHash.update("\0").update(id);
+    const operationId = operationHash.digest("hex");
+    await acceptAnalyticsIngestion({
+      projectId: auth.scope.projectId,
+      operationId,
+      sourceOperationId: `legacy:${entityLockId}:${operationId}`,
+      envelope: {
+        formatVersion: 1,
+        source: "legacy-event",
+        payload: orderedEvents,
+        attribution: options.attribution,
+      },
+      canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+      schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+      storageService: getS3EventStorageClient(
+        env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+      ),
+      rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+    });
+    for (const { id } of orderedEvents) successes.push({ id, status: 201 });
   }
 
   if (errors.length > 0) {

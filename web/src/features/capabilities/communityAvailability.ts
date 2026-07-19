@@ -64,9 +64,9 @@ export const COMMUNITY_CAPABILITIES: Readonly<
 };
 
 export const isCommunityCapabilityAvailable = (
-  _capability: CommunityCapability,
+  capability: CommunityCapability,
   backend: AnalyticsBackend = "doris",
-): boolean => backend === "clickhouse";
+): boolean => backend === "clickhouse" || capability === "monitors";
 
 export class CommunityCapabilityUnavailableError extends Error {
   readonly body: UnsupportedFeatureBody;

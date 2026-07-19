@@ -4,6 +4,13 @@ The V2 ingestion delivery protocol uses `analytics_ingestion_outbox_v2` and
 `analytics-ingestion-v2-queue`. The legacy table and queue remain isolated so
 adjacent versions never deserialize each other's delivery payloads.
 
+In Doris mode, OTLP/v4, scores, and supported legacy trace/observation events
+all publish raw envelopes through this delivery protocol. “Legacy” here names
+the SDK/API contract only: the worker canonicalizes those events into the same
+`events_current` model and never starts the ClickHouse legacy ingestion queue.
+Experiment dataset-run children remain explicitly unsupported and are rejected
+before publication.
+
 ## Rollout
 
 1. Apply the expand migrations before starting new application instances.

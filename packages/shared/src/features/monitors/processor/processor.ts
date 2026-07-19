@@ -255,7 +255,7 @@ function evaluationWindow(
   return { fromTimestamp, toTimestamp };
 }
 
-/** parseNumericValue coerces a ClickHouse cell to number | null, mapping missing or non-finite values to null. */
+/** parseNumericValue coerces an analytics cell to number | null, mapping missing or non-finite values to null. */
 function parseNumericValue(raw: unknown): number | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;

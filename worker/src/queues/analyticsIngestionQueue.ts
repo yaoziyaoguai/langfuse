@@ -126,6 +126,7 @@ type CanonicalizationOperation = Pick<
   AnalyticsIngestionOperation,
   | "id"
   | "projectId"
+  | "sourceOperationId"
   | "sourceChecksum"
   | "rawObjectKey"
   | "acceptedAtNanos"
@@ -147,6 +148,10 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
     readonly projectId: string;
   }) => Promise<boolean>;
   readonly assertReady?: () => Promise<void>;
+  readonly withOperationLock?: (
+    operation: CanonicalizationOperation,
+    run: () => Promise<void>,
+  ) => Promise<void>;
 }): Processor<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]> {
   return async (
     job: Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>,
@@ -184,22 +189,29 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
 
     try {
       await input.assertReady?.();
-      if (
-        await input.reconcileUnresolved?.({
-          operationId: operation.id,
-          projectId: operation.projectId,
-        })
-      ) {
+      const run = async () => {
+        if (
+          await input.reconcileUnresolved?.({
+            operationId: operation.id,
+            projectId: operation.projectId,
+          })
+        ) {
+          recordIncrement("langfuse.analytics.ingestion.queue", 1, {
+            status: "terminal",
+          });
+          return;
+        }
+        const batch = await input.canonicalize(operation);
+        await input.sink.persist(batch);
         recordIncrement("langfuse.analytics.ingestion.queue", 1, {
           status: "terminal",
         });
-        return;
+      };
+      if (input.withOperationLock) {
+        await input.withOperationLock(operation, run);
+      } else {
+        await run();
       }
-      const batch = await input.canonicalize(operation);
-      await input.sink.persist(batch);
-      recordIncrement("langfuse.analytics.ingestion.queue", 1, {
-        status: "terminal",
-      });
     } catch (error) {
       const persistenceError =
         error instanceof AnalyticsPersistenceError

@@ -2,8 +2,14 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 
 import type { PrismaClient } from "@prisma/client";
+import { LangfuseConflictError } from "@langfuse/shared";
+import {
+  AnalyticsPersistenceError,
+  encodeEventIdentity,
+} from "@langfuse/shared/analytics-persistence";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  getDorisTelemetryRepositories,
   DorisStreamLoadClient,
   getS3EventStorageClient,
   PromptService,
@@ -12,6 +18,7 @@ import {
   resolveDorisNodeEnv,
   type ResourceSpan,
   type StorageService,
+  type DorisObservation,
 } from "@langfuse/shared/src/server";
 
 import { env } from "../env";
@@ -33,6 +40,11 @@ import {
 } from "./AnalyticsGenerationUsageResolver";
 import { RawAnalyticsIngestionCanonicalizer } from "./RawAnalyticsIngestionCanonicalizer";
 import { assertDorisAnalyticsReady } from "./dorisAnalyticsReadiness";
+import {
+  type LegacyEventData,
+  type LoadCurrentLegacyEvent,
+} from "./LegacyEventCanonicalizer";
+import { RedisLock } from "../utils/RedisLock";
 
 type RuntimeEnvironment = {
   readonly NODE_ENV?: "development" | "test" | "production";
@@ -63,6 +75,163 @@ export interface DorisAnalyticsPersistence {
     typeof analyticsIngestionQueueProcessorBuilder
   >;
   readonly workerId: string;
+}
+
+function stringRecord(
+  value: Readonly<Record<string, unknown>> | undefined,
+): Record<string, string> | undefined {
+  if (!value) return undefined;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, String(item)]),
+  );
+}
+
+function toLegacyEventData(observation: DorisObservation): LegacyEventData {
+  return {
+    projectId: observation.projectId,
+    traceId: observation.traceId,
+    spanId: observation.id,
+    ...(observation.parentObservationId !== null && {
+      parentSpanId: observation.parentObservationId,
+    }),
+    type: observation.type,
+    name: observation.name ?? undefined,
+    environment: observation.environment,
+    version: observation.version ?? undefined,
+    release: observation.release ?? undefined,
+    traceName: observation.traceName ?? undefined,
+    userId: observation.userId ?? undefined,
+    sessionId: observation.sessionId ?? undefined,
+    level: observation.level ?? undefined,
+    statusMessage: observation.statusMessage ?? undefined,
+    isAppRoot: observation.isAppRoot,
+    bookmarked: observation.bookmarked,
+    public: observation.public,
+    tags: observation.tags.concat(),
+    startTimeISO: observation.startTime.toISOString(),
+    ...(observation.endTime && {
+      endTimeISO: observation.endTime.toISOString(),
+    }),
+    ...(observation.completionStartTime && {
+      completionStartTime: observation.completionStartTime.toISOString(),
+    }),
+    promptId: observation.promptId ?? undefined,
+    promptName: observation.promptName ?? undefined,
+    promptVersion:
+      observation.promptVersion === null
+        ? undefined
+        : String(observation.promptVersion),
+    modelId: observation.internalModelId ?? undefined,
+    modelName: observation.providedModelName ?? undefined,
+    modelParameters: observation.modelParameters
+      ? { ...observation.modelParameters }
+      : undefined,
+    providedUsageDetails: { ...observation.providedUsageDetails },
+    usageDetails: { ...observation.usageDetails },
+    providedCostDetails: { ...observation.providedCostDetails },
+    costDetails: { ...observation.costDetails },
+    toolDefinitions: stringRecord(observation.toolDefinitions),
+    toolCalls: observation.toolCalls
+      ? observation.toolCalls.concat()
+      : undefined,
+    toolCallNames: observation.toolCallNames
+      ? observation.toolCallNames.concat()
+      : undefined,
+    input: observation.input,
+    output: observation.output,
+    metadata: { ...(observation.metadata ?? {}) },
+    source: "ingestion-api-legacy",
+  };
+}
+
+export function createLegacyCurrentEventLoader(input: {
+  readonly client: PrismaClient;
+  readonly getObservation?: (query: {
+    readonly projectId: string;
+    readonly traceId?: string;
+    readonly observationId: string;
+  }) => Promise<DorisObservation | null>;
+}): LoadCurrentLegacyEvent {
+  const getObservation =
+    input.getObservation ??
+    ((query) => getDorisTelemetryRepositories().observations.get(query));
+  return async ({ projectId, traceId, spanId }) => {
+    const loadHead = (resolvedTraceId: string) =>
+      input.client.analyticsEntityHead.findUnique({
+        where: {
+          projectId_entityType_entityKey: {
+            projectId,
+            entityType: "EVENT",
+            entityKey: encodeEventIdentity({
+              projectId,
+              traceId: resolvedTraceId,
+              spanId,
+            }),
+          },
+        },
+        select: { sourceVersion: true },
+      });
+    const knownHead = traceId ? await loadHead(traceId) : null;
+    if (traceId && !knownHead) return null;
+    let observation: DorisObservation | null;
+    try {
+      observation = await getObservation({
+        projectId,
+        ...(traceId ? { traceId } : {}),
+        observationId: spanId,
+      });
+    } catch (error) {
+      if (error instanceof LangfuseConflictError) {
+        throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
+          tags: { phase: "legacy_current_state" },
+        });
+      }
+      throw error;
+    }
+    if (!observation) {
+      if (!knownHead) return null;
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: { phase: "legacy_current_state" },
+      });
+    }
+    const head = knownHead ?? (await loadHead(observation.traceId));
+    if (!head) {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+        tags: { phase: "legacy_current_state" },
+      });
+    }
+    return {
+      sourceVersion: head.sourceVersion,
+      eventData: toLegacyEventData(observation),
+    };
+  };
+}
+
+const LEGACY_SOURCE_OPERATION = /^legacy:([a-f0-9]{64}):[a-f0-9]{64}$/;
+
+async function withLegacyOperationLock(
+  operation: { readonly sourceOperationId: string },
+  run: () => Promise<void>,
+): Promise<void> {
+  const match = LEGACY_SOURCE_OPERATION.exec(operation.sourceOperationId);
+  if (!match) {
+    await run();
+    return;
+  }
+  const lock = new RedisLock(`analytics:legacy-event:${match[1]}`, {
+    ttlSeconds: 30 * 60,
+    name: "Doris legacy event canonicalization",
+    onUnavailable: "fail",
+  });
+  const result = await lock.withLock(run);
+  if (result === null) {
+    throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+      tags: {
+        phase: "legacy_entity_lock",
+        reasonCode: "LEGACY_ENTITY_LOCK_HELD",
+      },
+    });
+  }
 }
 
 /**
@@ -138,6 +307,7 @@ export function createDorisAnalyticsPersistence(input: {
     storageService,
     eventCanonicalizer,
     maskOtlp: input.maskOtlp,
+    loadCurrentEvent: createLegacyCurrentEventLoader({ client }),
   });
 
   return {
@@ -150,6 +320,7 @@ export function createDorisAnalyticsPersistence(input: {
       reconcileUnresolved: (operation) =>
         writer.reconcileUnresolvedOperation(operation),
       canonicalize: (operation) => canonicalizer.canonicalize(operation),
+      withOperationLock: withLegacyOperationLock,
     }),
     workerId,
   };

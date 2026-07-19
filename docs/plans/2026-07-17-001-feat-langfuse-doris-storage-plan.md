@@ -19,12 +19,12 @@ delivery_boundary: R1A-core / R1B-adoption-gated
 
 | Field | Contract |
 |---|---|
-| Objective | Deliver an internal, self-hosted Langfuse Community fork whose analytics runtime uses Apache Doris instead of ClickHouse. R1A preserves core ingest/observe/debug/score, home-dashboard, prompt/dataset regression, Public API/MCP, deletion, and recovery; R1B adds evaluator/experiment and global retention only after adoption evidence. |
+| Objective | Deliver an internal, self-hosted Langfuse Community fork whose analytics runtime uses Apache Doris instead of ClickHouse. The active scope preserves core ingest/observe/debug/score, legacy tracing compatibility, home-dashboard, product monitors, prompt/dataset regression, Public API/MCP, deletion, recovery, and optional global retention; evaluator/experiment execution remains adoption-gated. |
 | Product authority | The Product Contract in this file and `docs/product/2026-07-17-langfuse-doris-storage-prd.md`; where they differ, stop and reconcile the PRD before implementation. |
 | Engineering authority | This plan's KTDs and U-IDs, then repository `AGENTS.md` and scoped instructions, then existing code patterns. |
 | Execution profile | Deep, cross-package storage rewrite; characterization-first and PoC-gated; no production dual-write or historical ClickHouse migration. |
-| Active delivery boundary | R1A is the launch boundary and must not wait for R1B. R1B is a separately gated extension unit in this program. R2 legacy ingestion, custom dashboards, product monitors, batch export, strict per-trace raw erasure, and future upstream parity require separate follow-up plans. |
-| Tail ownership | The implementation executor owns code, migrations, tests, operational docs, browser verification, and final ClickHouse-runtime removal. Product-scope changes remain user-owned. |
+| Active delivery boundary | The launch boundary includes legacy tracing canonicalization and Community product monitors. Deployment-wide retention is implemented but disabled by default. Evaluator/experiment execution remains a separately gated extension; custom dashboards, batch export, strict per-trace raw erasure, and future upstream parity require follow-up plans. |
+| Tail ownership | The implementation executor owns code, migrations, tests, operational docs, browser verification, backend isolation, and preservation of the ClickHouse default path. Product-scope changes remain user-owned. |
 | Stop conditions | Stop if Doris cannot pass correctness/durability gates; a required solution needs Enterprise-licensed code; an implementation would reintroduce v3 storage or production ClickHouse; or real scale/compliance requirements invalidate the declared assumptions. |
 
 ---
@@ -177,7 +177,7 @@ Canonical publication is a fixed protocol: Postgres CAS first records `canonical
 - AE9. A declared failure of the U1-frozen topology causes explicit retry/backpressure but no silent drop; HA passes FE/BE failover while non-HA proves restart/restore within its accepted RTO without claiming failover.
 - AE10. Ingestion accepted while the checkpoint fence is held remains queued; a sealed high-watermark restore reconciles later ledger without reviving trace/project-tombstoned or R1B-purged data. Partial checkpoints, unknown/rotated-away keys, broken predecessor chains, and an older validly signed manifest below the external latest anchor fail before mutation.
 - AE11. Home dashboard, Public metrics, and MCP metrics return exact matching count/token/cost and compatible approximate aggregates.
-- AE12. Final runtime/dependencies/compose/env contain no ClickHouse analytics client or service while unrelated `AUTH_CLICKHOUSE_CLOUD_*` identity-provider names remain intact.
+- AE12. A Doris-selected process does not initialize or call the ClickHouse analytics runtime, while a ClickHouse-selected process preserves the existing client, service, and behavior; unrelated `AUTH_CLICKHOUSE_CLOUD_*` identity-provider names remain intact.
 - AE13. Two workers concurrently processing the same eligible entity/source-version token with different canonical payloads produce exactly one atomic entity-head winner and one durable quarantine, with the same result after restart and compaction.
 - AE14. The same raw object processed across UTC midnight, an adjacent app version, and restore/replay reconstructs identical immutable partition keys and winners. Pinned v4 create/update bodies may omit both body times and multiple updates may share `endTime`: their mandatory envelope timestamps deterministically derive missing starts and order mutations. Invalid OTLP source time and cross-day partition mutation quarantine rather than using processing time or creating a second current row.
 - AE15. Project deletion racing an accepted-but-not-loaded operation leaves a durable project generation and visible Doris barrier; manifest-pending/post-CAS/sealed/load-unknown children converge to visible, prior failure, or `cancelled_by_deletion` after reconciliation, claim/load/DLQ/replay cannot recreate scoped data, and the final sweep retains only the 30-day organization status plus permanent barrier evidence.
@@ -193,22 +193,23 @@ Canonical publication is a fixed protocol: Postgres CAS first records `canonical
 
 **In R1A launch**
 
-- Modern v4 SDK/OTLP ingestion, canonical events, scores, and blob reference lifecycle; dataset-run analytics remains R1B-only.
+- Modern v4 SDK/OTLP ingestion, legacy tracing canonicalization, canonical events, scores, and blob reference lifecycle; dataset-run analytics remains R1B-only.
 - Trace/observation/session/user reads, search/filter, costs, tokens, latency, Public API, MCP, and current home presets.
+- Community product monitors through the unified analytics query engine.
 - Basic scores plus regression of Postgres-backed prompts/datasets/comments/annotations; evaluator/experiment execution remains unavailable until R1B.
 - Manual trace/project deletion, anti-resurrection, Doris operational health, authenticated common-checkpoint backup/restore/replay.
-- Complete removal of ClickHouse analytics runtime, dependency, compose service, storage env, queues, and dormant mode switches.
+- Optional deployment-wide global retention, disabled by default and protected by a monotonic anti-resurrection cutoff.
+- One deployment-level backend selector with isolated Doris and ClickHouse runtimes; no dual-write, per-project mix, or silent fallback.
 
 **R1B adoption-gated extension**
 
 - Evaluator/basic experiment execution and experiment MCP/UI/API surfaces.
-- Optional deployment-wide global retention with monotonic purge watermark.
-- Each capability requires a named internal owner, current usage signal, acceptance owner, and its own enablement evidence; neither is a dependency of R1A cutover.
+- This capability requires a named internal owner, current usage signal, acceptance owner, and its own enablement evidence; it is not a dependency of R1A cutover.
 
 **Deferred to follow-up work**
 
-- Legacy trace/observation batch and REST write adapters, future upstream-version parity, and new producer protocols.
-- Custom dashboard/widget authoring, Community product monitors, batch export, analytics integrations, and new MCP workflow tools.
+- Future upstream-version parity and new producer protocols.
+- Custom dashboard/widget authoring, batch export, analytics integrations, and new MCP workflow tools.
 - Per-trace immediate physical deletion of multi-trace raw OTLP objects.
 - Performance projections such as Doris-managed `trace_summaries` unless U1 demonstrates they are required.
 
@@ -408,7 +409,7 @@ There is no production dual-write phase. A local/CI ClickHouse reference may pro
 - **Web/API:** OTLP and batch ingestion status semantics, events/traces/observations/sessions/scores routers, metrics endpoints, MCP tool transport, backend error mapping, readiness, and unsupported legacy responses.
 - **Worker:** canonicalization, durable writer, ingestion/OTLP queues, internal tracing, shutdown, trace/project deletion, replay, and operational metrics; R1B separately owns evaluation execution and global retention.
 - **Shared:** Doris clients/migrations, Prisma receipt/manifest/entity-head/ledger/trace-and-project-tombstone/control state, the minimal batch/lifecycle boundaries, concrete entity repositories, filter/search compiler, one analytics query engine, canonical decoders, queue contracts, and seed/test utilities; R1B adds retention state only when adopted.
-- **Infrastructure:** Doris local services, migration init, health checks, env examples, image pinning, backup/restore runbooks, Prometheus/Grafana integration, and removal of ClickHouse volumes/services.
+- **Infrastructure:** Doris local services, migration init, health checks, env examples, image pinning, backup/restore runbooks, Prometheus/Grafana integration, and backend-selective ClickHouse/Doris service startup.
 - **Security:** project scope at every repository layer, parameter binding, bounded query/search cost, sanitized errors, allowlisted Stream Load redirects, separate least-privilege Doris users/workload groups, verified TLS, encrypted disks/backups, secret/payload log redaction, and no Enterprise code drift. Inputs/outputs/metadata may contain PII or credentials even after masking, so backup and quarantine payloads inherit the same access/retention policy.
 - **Data lifecycle:** multi-table eventual convergence is explicit; per-table loads are atomic but cross-table writes are reconciled by ledger/job retry. Tombstones precede all destructive work.
 - **Agent/API parity:** MCP names, schemas, annotations, cursor/projection behavior, expensive-query guards, and project context remain frozen; no new agent workflow is introduced.
@@ -439,8 +440,8 @@ There is no production dual-write phase. A local/CI ClickHouse reference may pro
 - Doris version: official Stable `4.0.7` is the R1A baseline as of 2026-07-17 and is revalidated at implementation start; 4.1.x canary/soak is post-cutover upgrade work.
 - Tracing model: one application-written event fact table `events_current`; lifecycle barrier `trace_tombstones` holds no duplicate event payload. There is no `events_full/events_core` dual write, synthetic root, or initial `traces_current` application table.
 - Migration: fresh deployment, no ClickHouse data backfill or production shadow writes. Offline differential fixtures replace live dual-read.
-- Legacy API: unsupported with actionable errors in R1A; a later adapter may translate to canonical events only.
-- Retention: no custom scheduler on the R1A path; optional global Community implementation is R1B-only and never reuses Enterprise per-project retention code.
+- Legacy API: implemented through a canonical-event adapter; it never restores v3 storage. Dataset-run experiment children remain explicitly unavailable.
+- Retention: optional deployment-wide Community retention is disabled by default, uses durable global cutoffs and bounded Stream Load delete batches, and never reuses Enterprise per-project retention code.
 - Raw deletion: materialized deletion is prompt; raw multi-trace objects expire by required seven-day lifecycle.
 - Rollback: Doris-compatible versions only after first production ingest.
 
@@ -766,7 +767,7 @@ retention remains disabled and belongs only to adoption-gated U9.
 - **Verification:** Lifecycle integration tests pass against real Doris/Postgres/object storage, trace/project tombstone and replay behavior survives restart, and user-visible status never overclaims barrier state or raw/canonical deletion. No global-retention implementation exists on the R1A path.
 - **Dependencies:** U4, U5, U6. Lifecycle code may begin earlier, but cross-table closure and all-surface invisibility cannot pass until U6 score/metric paths exist.
 
-### U8. Remove ClickHouse Runtime and Prove the Complete Cutover
+### U8. Isolate Analytics Runtimes and Prove the Doris Cutover
 
 - **Goal:** Delete obsolete ClickHouse analytics runtime/config/dependencies and v3/v4 migration machinery, finish R1A operational/support/producer tooling, and verify a fresh Doris-only core deployment end to end without waiting for R1B.
 - **Covers:** R1–R22, R23 inactive-gate only, R24–R29, R31–R35; F1, F2, F4–F6; AE1–AE22; KTD1–KTD20.
@@ -811,7 +812,7 @@ retention remains disabled and belongs only to adoption-gated U9.
   - Run a fresh-install drill, mixed-version rolling upgrade including oldest non-expired recoverable canonical payload gates, failure injection, skewed Postgres/Doris authenticated backup restore/replay drill, full R1A parity matrix, MCP registry snapshot, and real-browser review.
 - **Test scenarios:**
   - Fresh clone/config starts web/worker/Postgres/Redis/object storage/Doris, migrates both databases, seeds data, and completes F1, F2, F4, and F5. The separate producer gate proves F6; F3 belongs only to adoption-gated U9.
-  - Runtime audit finds no ClickHouse analytics driver/config/service/query/writer. Authentication variables named for ClickHouse Cloud remain if still used by auth.
+  - Runtime audit proves Doris-selected processes never initialize or call a ClickHouse analytics driver/query/writer, while ClickHouse-selected processes retain their existing path. Authentication variables named for ClickHouse Cloud remain if still used by auth.
   - Mixed adjacent app versions process queue payloads safely; contract migration remains blocked by the oldest recoverable queue/DLQ/quarantine/raw receipt and schema incompatibility fails readiness before ingest.
   - A pre-A worker that already loaded a targeted migration blocks retirement. After Release A fully rolls out, the fence causes the active migration to drain/abort at its bounded checkpoint; Release B rejects a recent `locked_at`, terminalizes only after the 60-second TTL and no active heartbeat, and never lets an old process continue ClickHouse writes. Zero-to-head leaves every removed row terminal before manager startup and never `require()`s a removed script.
   - FE/BE failure, queue backlog, quarantine growth/age/expiry, connection exhaustion, backup failure, restore, and replay emit expected health/alerts; an expired only source is reported as unrecoverable rather than silently cleared.
@@ -905,16 +906,16 @@ retention remains disabled and belongs only to adoption-gated U9.
 ### R1A Core Launch
 
 - [ ] U1–U8 are complete in dependency order, and the Doris PoC never weakened a correctness or durability requirement to pass or changed the frozen production topology after benchmarking.
-- [ ] A fresh internal deployment runs web/worker with Postgres, Redis/Valkey, S3-compatible storage, and pinned Doris, with no ClickHouse analytics service/client/config/runtime path.
+- [ ] A fresh internal deployment runs web/worker with Postgres, Redis/Valkey, S3-compatible storage, and pinned Doris without initializing or calling ClickHouse; selecting ClickHouse instead preserves the existing analytics runtime.
 - [ ] OTLP JSON/protobuf/gzip and pinned-baseline v4 SDK data reach `visible` durably; scoped operation status, raw→canonical artifact, source-specific Version Contract including nullable v4 body times, atomic entity head, complete child/cancellation manifest, fenced ledger, enabled-hook idempotency, queue terminal state, retry/quarantine/expiry/shutdown/replay match R6–R10.
 - [ ] Trace/observation/session/user/score reads, bounded filters/search interaction, costs/tokens/latency, metrics, and home presets satisfy the R1A parity matrix across UI/Public API/MCP; evaluator/experiment execution remains explicitly unavailable.
 - [ ] Counts/token/cost are exact, declared approximations stay within tolerance, stable pagination has no gaps/duplicates, and every telemetry scan is project/date bounded through caller input or the frozen ID locator strategy.
 - [ ] Tenant isolation and sanitized failure behavior pass across UI/tRPC/REST/MCP; MCP registry names, schemas, annotations, project context, and expensive-query guards are unchanged.
-- [ ] Manual trace/project deletion is resumable, status does not overclaim barrier/raw state, affected ingestion reaches truthful cancellation/visible/failure outcomes, project status survives under organization authorization, durable barriers protect against unseen in-flight keys, and Postgres dataset/run control history follows policy; no global retention is active on R1A.
+- [ ] Manual trace/project deletion is resumable, status does not overclaim barrier/raw state, affected ingestion reaches truthful cancellation/visible/failure outcomes, project status survives under organization authorization, durable barriers protect against unseen in-flight keys, and Postgres dataset/run control history follows policy; global retention creates no purge work unless explicitly configured.
 - [ ] Doris schema/app/canonicalizer compatibility across the oldest non-expired recoverable operation, readiness, exact private-network/credential boundaries, rolling revocation, monitoring, alerts, fenced high-watermark checkpoint backup/restore, key rotation/hash-chain/external anti-rollback verification, canonical replay, explicit RPO breach, and Doris-compatible rollback are proven by drills.
 - [ ] Postgres-backed prompts, model connections, playground, datasets, comments, and annotations pass regression against Doris-backed telemetry.
 - [ ] Authoritative census and manual inventory have no unexplained producer delta; every required producer has owner/migration date and Doris-only E2E evidence. Release A drains live ClickHouse background work, and Release B terminalizes rows before scripts disappear.
-- [ ] Inactive R1B and deferred legacy ingestion, custom dashboards, monitors, exports, strict raw erasure, future upstream parity, historical migration, Enterprise/Cloud, and Ask/Understand Anything follow the declared channel matrix with no half-working UI/API/MCP/tRPC/queue path; R1A enqueues/registers no evaluator/experiment work.
+- [ ] Inactive evaluator/experiment execution and deferred custom dashboards, exports, strict raw erasure, future upstream parity, historical migration, Enterprise/Cloud, and Ask/Understand Anything follow the declared channel matrix with no half-working UI/API/MCP/tRPC/queue path; R1A enqueues/registers no evaluator/experiment work.
 - [ ] `pnpm run lint`, `pnpm run typecheck`, `pnpm run db:generate`, targeted shared/worker/web tests, real-Doris integration/benchmark, build checks, browser review, license audit, runtime audit, and `git diff --check` all have recorded successful summaries.
 - [ ] No secrets, generated-file hand edits, widened ESLint disables, unrelated refactors, or changes under `ee/`, `web/src/ee/`, or `worker/src/ee/` are present.
 

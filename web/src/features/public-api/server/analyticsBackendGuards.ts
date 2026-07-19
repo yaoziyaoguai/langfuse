@@ -4,8 +4,8 @@ export function legacyIngestionRejection(input: {
   rejectLegacyRoute: boolean;
   backend: AnalyticsBackend;
   clickhouseWriteMode: string;
-}): "doris" | "events_only" | null {
+}): "events_only" | null {
   if (!input.rejectLegacyRoute) return null;
-  if (input.backend === "doris") return "doris";
+  if (input.backend === "doris") return null;
   return input.clickhouseWriteMode === "events_only" ? "events_only" : null;
 }

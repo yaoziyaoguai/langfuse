@@ -52,4 +52,29 @@ describe("executeQuery Doris composition", () => {
     });
     expect(queryClickhouse).not.toHaveBeenCalled();
   });
+
+  it("routes the scalar v2 query shape used by product monitors to Doris", async () => {
+    const monitorQuery: QueryType = {
+      ...query,
+      dimensions: [],
+      metrics: [
+        { measure: "latency", aggregation: "p95" },
+        { measure: "count", aggregation: "count" },
+      ],
+      timeDimension: null,
+    };
+    executeDoris.mockResolvedValueOnce([{ p95_latency: 250, count_count: 4 }]);
+
+    await expect(
+      executeQuery("project-1", monitorQuery, "v2", true),
+    ).resolves.toEqual([{ p95_latency: 250, count_count: 4 }]);
+
+    expect(executeDoris).toHaveBeenCalledWith({
+      executor,
+      projectId: "project-1",
+      query: monitorQuery,
+      version: "v2",
+    });
+    expect(queryClickhouse).not.toHaveBeenCalled();
+  });
 });

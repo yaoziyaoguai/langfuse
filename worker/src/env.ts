@@ -497,6 +497,29 @@ const EnvSchema = z.object({
     .positive()
     .default(3_600_000), // 1 hour for DELETE operations
 
+  // Doris deployment-wide retention. Omit DAYS to keep retention disabled.
+  LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS: z.coerce
+    .number()
+    .int()
+    .min(3)
+    .optional(),
+  LANGFUSE_DORIS_GLOBAL_RETENTION_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .default(60_000),
+  LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .default(120_000),
+  LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(5_000)
+    .default(1_000),
+
   // ClickHouse deleted-mask cleaner configuration
   LANGFUSE_CLICKHOUSE_DELETED_MASK_CLEANER_ENABLED: z
     .enum(["true", "false"])

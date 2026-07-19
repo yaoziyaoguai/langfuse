@@ -5,7 +5,7 @@ import { legacyIngestionRejection } from "./analyticsBackendGuards";
 describe("legacyIngestionRejection", () => {
   it.each([
     [false, "doris", "legacy", null],
-    [true, "doris", "legacy", "doris"],
+    [true, "doris", "legacy", null],
     [true, "clickhouse", "events_only", "events_only"],
     [true, "clickhouse", "legacy", null],
   ] as const)(

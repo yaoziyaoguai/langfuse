@@ -15,7 +15,6 @@ describe("Doris R1A community capability contract", () => {
   it.each([
     ["evaluations", "R1B_EVALUATIONS_UNAVAILABLE"],
     ["experiments", "R1B_EXPERIMENTS_UNAVAILABLE"],
-    ["monitors", "R2_MONITORS_UNAVAILABLE"],
     ["batchExports", "R2_BATCH_EXPORTS_UNAVAILABLE"],
     ["customDashboards", "R2_CUSTOM_DASHBOARDS_UNAVAILABLE"],
   ] as const)("keeps %s inactive with stable code", (capability, code) => {
@@ -25,6 +24,11 @@ describe("Doris R1A community capability contract", () => {
       error: "UnsupportedFeature",
       code,
     });
+  });
+
+  it("makes monitors available on both analytics backends", () => {
+    expect(isCommunityCapabilityAvailable("monitors", "doris")).toBe(true);
+    expect(isCommunityCapabilityAvailable("monitors", "clickhouse")).toBe(true);
   });
 
   it("maps every inactive server channel to the same capability", () => {

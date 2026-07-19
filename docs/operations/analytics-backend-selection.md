@@ -39,13 +39,49 @@ deletion lifecycle, and schema readiness checks. Configure:
   maps `DORIS_WORKER_QUERY_USER/PASSWORD` into its query identity);
 - one-shot migrator: `DORIS_MIGRATION_*` only.
 
-The Doris adapter currently exposes the R1A core surface: OTLP/v4 telemetry,
-scores, trace/observation/session reads, core metrics, and analytics deletion.
-ClickHouse-only R1B/R2 workers (evaluators, experiments, monitors, exports,
-third-party analytics integrations, legacy ingestion, and global retention) are
-not registered in Doris mode. The legacy `/api/public/ingestion` route returns
-HTTP 501 instead of accepting work that no Doris consumer can finish. Choose
-ClickHouse when those capabilities or an older SDK producer are required.
+The Doris adapter exposes OTLP/v4 telemetry, legacy trace/observation ingestion,
+scores, trace/observation/session reads, core metrics, analytics deletion, and
+Community product monitors. Legacy ingestion is converted into canonical events;
+it never restores or writes the ClickHouse v3 trace/observation tables. Partial
+legacy updates merge against the current visible Doris snapshot and are
+serialized per entity so concurrent updates cannot overwrite one another from a
+stale read.
+
+Evaluator execution, experiments/dataset-run analytics, batch exports,
+third-party analytics integrations, and custom dashboard authoring remain
+unavailable in Doris mode. Their UI/API/MCP entry points fail with a structured
+`UnsupportedFeature` response before enqueuing work, and their ClickHouse-backed
+workers remain unregistered. Dataset-run items sent through the legacy ingestion
+endpoint receive child-level HTTP 501 while supported tracing and score children
+continue normally. These capabilities are deferred, not impossible: each needs
+its ClickHouse-specific repositories, queue producers, and recovery semantics
+replaced at the analytics boundary before its gate can be removed.
+
+### Optional global retention
+
+Deployment-wide Doris analytics retention is disabled unless
+`LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS` is set. It is intentionally global, not
+per-project, and accepts a minimum of three days. The worker publishes an
+immutable cutoff in Postgres before deletion, waits for all older
+`LOADING`/`UNKNOWN` batches to settle, then removes at most
+`LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE` entity heads per interval through
+the existing least-privilege Stream Load delete identity. Doris deletion must be
+visible before the corresponding Postgres head is removed; stable labels make a
+crash between those steps retryable. The active and completed cutoff remain an
+anti-resurrection barrier for delayed or replayed ingestion.
+
+```text
+LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS=30
+LANGFUSE_DORIS_GLOBAL_RETENTION_INTERVAL_MS=60000
+LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS=120000
+LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE=1000
+```
+
+This policy removes Doris analytics projections and their entity heads. Raw and
+canonical ingestion objects, media, Postgres control/status records, and backups
+retain their separate lifecycle; enabling this option must not be represented as
+immediate raw-object erasure. Take and verify a backup before first enablement,
+because advancing a completed cutoff is intentionally irreversible.
 
 Apply Doris migrations before starting or promoting web/worker:
 

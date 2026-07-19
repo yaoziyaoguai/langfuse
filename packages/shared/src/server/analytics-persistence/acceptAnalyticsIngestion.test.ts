@@ -107,7 +107,7 @@ describe("acceptAnalyticsIngestion", () => {
       projectId: "project-1",
       operationId: "operation-1",
       envelope,
-      acceptedAt,
+      acceptedAt: new Date("2026-07-19T14:00:00.123Z"),
       canonicalizerVersion: "r1a-v1",
       schemaVersion: 3,
       storageService: {
@@ -122,6 +122,9 @@ describe("acceptAnalyticsIngestion", () => {
       status: "ACCEPTED",
     });
     expect(createReceipt).toHaveBeenCalledOnce();
+    expect(createReceipt).toHaveBeenCalledWith(
+      expect.objectContaining({ acceptedAt }),
+    );
 
     await expect(
       acceptAnalyticsIngestion({

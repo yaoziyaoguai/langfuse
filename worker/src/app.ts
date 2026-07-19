@@ -108,6 +108,7 @@ import { resolveAnalyticsWorkerTopology } from "./analyticsBackendTopology";
 import { assertDorisAnalyticsReady } from "./services/dorisAnalyticsReadiness";
 import { AnalyticsDeletionRecoveryRunner } from "./features/analytics-deletion-recovery-runner";
 import { processAnalyticsDeletionRecoveryOperation } from "./features/analytics-deletion-recovery-runner/processOperation";
+import { DorisGlobalRetentionRunner } from "./features/doris-global-retention";
 
 const app = express();
 
@@ -127,6 +128,8 @@ app.use(middlewares.errorHandler);
 
 const { clickhouseAnalyticsEnabled, dorisAnalyticsEnabled } =
   resolveAnalyticsWorkerTopology(env.LANGFUSE_ANALYTICS_BACKEND);
+const analyticsBackendEnabled =
+  clickhouseAnalyticsEnabled || dorisAnalyticsEnabled;
 
 if (
   clickhouseAnalyticsEnabled &&
@@ -507,6 +510,22 @@ if (dorisAnalyticsEnabled) {
   }
 }
 
+export let dorisGlobalRetentionRunner: DorisGlobalRetentionRunner | null = null;
+
+if (
+  dorisAnalyticsEnabled &&
+  env.LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS !== undefined
+) {
+  dorisGlobalRetentionRunner = new DorisGlobalRetentionRunner({
+    intervalMs: env.LANGFUSE_DORIS_GLOBAL_RETENTION_INTERVAL_MS,
+    retentionDays: env.LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS,
+    drainMs: env.LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS,
+    batchSize: env.LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE,
+    assertReady: assertDorisAnalyticsReady,
+  });
+  dorisGlobalRetentionRunner.start();
+}
+
 if (
   clickhouseAnalyticsEnabled &&
   env.QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED === "true" &&
@@ -530,7 +549,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_MONITOR_QUEUE_IS_ENABLED === "true"
 ) {
   WorkerManager.register(QueueName.MonitorQueue, monitorQueueProcessor, {
@@ -901,7 +920,7 @@ if (env.LANGFUSE_QUEUE_METRICS_ENABLED === "true") {
 export const monitorRunners: MonitorRunner[] = [];
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.LANGFUSE_MONITOR_SCHEDULER_ENABLED === "true"
 ) {
   for (let i = 0; i < env.LANGFUSE_MONITOR_SCHEDULERS; i++) {

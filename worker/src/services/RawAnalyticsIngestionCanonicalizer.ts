@@ -26,6 +26,10 @@ import {
 import type { StorageService } from "@langfuse/shared/src/server";
 
 import { EventCanonicalizer, toCanonicalRecord } from "./EventCanonicalizer";
+import {
+  LegacyEventCanonicalizer,
+  type LoadCurrentLegacyEvent,
+} from "./LegacyEventCanonicalizer";
 
 type RawAnalyticsOperation = Pick<
   AnalyticsIngestionOperation,
@@ -98,6 +102,7 @@ export class RawAnalyticsIngestionCanonicalizer {
   private readonly getProjectGeneration: typeof getProjectDeletionGeneration;
   private readonly getTraceGeneration: typeof getTraceDeletionGeneration;
   private readonly validateScore: typeof validateAndInflateScore;
+  private readonly legacyEventCanonicalizer: LegacyEventCanonicalizer;
 
   constructor(
     private readonly dependencies: {
@@ -111,6 +116,7 @@ export class RawAnalyticsIngestionCanonicalizer {
       readonly getProjectDeletionGeneration?: typeof getProjectDeletionGeneration;
       readonly getTraceDeletionGeneration?: typeof getTraceDeletionGeneration;
       readonly validateAndInflateScore?: typeof validateAndInflateScore;
+      readonly loadCurrentEvent?: LoadCurrentLegacyEvent;
     },
   ) {
     this.getProjectGeneration =
@@ -119,6 +125,15 @@ export class RawAnalyticsIngestionCanonicalizer {
       dependencies.getTraceDeletionGeneration ?? getTraceDeletionGeneration;
     this.validateScore =
       dependencies.validateAndInflateScore ?? validateAndInflateScore;
+    this.legacyEventCanonicalizer = new LegacyEventCanonicalizer({
+      loadCurrentEvent:
+        dependencies.loadCurrentEvent ??
+        (async () => {
+          throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+            tags: { phase: "legacy_current_state" },
+          });
+        }),
+    });
   }
 
   async canonicalize(
@@ -203,6 +218,16 @@ export class RawAnalyticsIngestionCanonicalizer {
         children = await this.canonicalizeInternalEvents({
           operation,
           payload: envelope.payload,
+          projectDeletionGeneration,
+          traceDeletionGeneration,
+        });
+        break;
+      case "legacy-event":
+        children = await this.canonicalizeLegacyEvents({
+          operation,
+          payload: envelope.payload,
+          attribution: envelope.attribution,
+          isLangfuseInternal: envelope.isLangfuseInternal === true,
           projectDeletionGeneration,
           traceDeletionGeneration,
         });
@@ -461,5 +486,48 @@ export class RawAnalyticsIngestionCanonicalizer {
       });
     }
     return claims;
+  }
+
+  private async canonicalizeLegacyEvents(input: {
+    operation: RawAnalyticsOperation;
+    payload: unknown;
+    attribution: {
+      ingestionApiKey: string;
+      ingestionSdkName: string;
+      ingestionSdkVersion: string;
+    };
+    isLangfuseInternal: boolean;
+    projectDeletionGeneration: bigint;
+    traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
+  }): Promise<CanonicalAnalyticsEntityClaim[]> {
+    const legacy = await this.legacyEventCanonicalizer.canonicalize({
+      projectId: input.operation.projectId,
+      payload: input.payload,
+      attribution: input.attribution,
+      isLangfuseInternal: input.isLangfuseInternal,
+    });
+    const event = await this.dependencies.eventCanonicalizer.canonicalize({
+      eventData: legacy.eventData,
+      rawObjectKey: input.operation.rawObjectKey,
+      sourceTime: deriveV4SourceTime({
+        envelopeTimestamp: legacy.envelopeTimestamp,
+        bodyStartTime: legacy.eventData.startTimeISO,
+        bodyEndTime: legacy.eventData.endTimeISO,
+      }),
+      systemTimestamp: input.operation.acceptedAtNanos,
+      canonicalizerVersion: input.operation.canonicalizerVersion,
+      schemaVersion: input.operation.schemaVersion,
+    });
+    return [
+      {
+        entity: event,
+        expectedSourceVersion: legacy.expectedSourceVersion,
+        fenceGeneration: 1n,
+        traceDeletionGeneration: await input.traceDeletionGeneration(
+          event.traceId,
+        ),
+        projectDeletionGeneration: input.projectDeletionGeneration,
+      },
+    ];
   }
 }

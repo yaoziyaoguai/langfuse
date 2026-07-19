@@ -73,6 +73,7 @@ export * from "./clickhouse/queryTags";
 export * from "./repositories/definitions";
 export * from "./repositories/analyticsIngestionOperations";
 export * from "./repositories/analyticsLoadBatches";
+export * from "./repositories/analyticsRetention";
 export * from "./repositories/analyticsCheckpoints";
 export * from "./repositories/analyticsBackgroundMigrationRetirement";
 export * from "./repositories/telemetry/doris";

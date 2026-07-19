@@ -86,7 +86,7 @@ describe("processEventBatch", () => {
     );
   });
 
-  it("rejects legacy tracing with the stable R1A capability response", async () => {
+  it("accepts legacy tracing through the durable Doris canonical pipeline", async () => {
     const event = {
       id: "trace-event-1",
       type: "trace-create",
@@ -95,18 +95,51 @@ describe("processEventBatch", () => {
     };
 
     await expect(processEventBatch([event], auth, options)).resolves.toEqual({
+      successes: [{ id: event.id, status: 201 }],
+      errors: [],
+    });
+    expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        operationId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        sourceOperationId: expect.stringMatching(
+          /^legacy:[a-f0-9]{64}:[a-f0-9]{64}$/,
+        ),
+        envelope: expect.objectContaining({
+          source: "legacy-event",
+          payload: [expect.objectContaining({ id: event.id })],
+        }),
+      }),
+    );
+  });
+
+  it("keeps unsupported dataset-run ingestion fail-closed in Doris mode", async () => {
+    const event = {
+      id: "dataset-event-1",
+      type: "dataset-run-item-create",
+      timestamp: "2026-07-18T14:00:00.123Z",
+      body: {
+        id: "dataset-run-item-1",
+        traceId: "trace-1",
+        datasetId: "dataset-1",
+        runId: "run-1",
+        datasetItemId: "item-1",
+      },
+    };
+
+    await expect(
+      processEventBatch([event], auth, {
+        ...options,
+        isLangfuseInternal: true,
+      }),
+    ).resolves.toMatchObject({
       successes: [],
       errors: [
-        {
+        expect.objectContaining({
           id: event.id,
           status: 501,
-          error: "UnsupportedFeature",
-          code: "R2_LEGACY_INGESTION_UNAVAILABLE",
-          message:
-            "This ingestion event type is not available in the Doris R1A release.",
-          recovery:
-            "Use the OTLP traces endpoint for tracing data. Dataset-run analytics requires a separately approved R1B adoption.",
-        },
+          code: "R1B_EXPERIMENTS_UNAVAILABLE",
+        }),
       ],
     });
     expect(mocks.acceptAnalyticsIngestion).not.toHaveBeenCalled();

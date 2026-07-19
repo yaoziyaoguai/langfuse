@@ -12,9 +12,9 @@ delivery_boundary: R1A-core / R1B-adoption-gated
 
 ## 1. 改造目标
 
-将 Langfuse Community Edition 改造成供内部团队自托管使用的稳定分支：保留 Postgres、Redis/Valkey 和 S3-compatible object storage 的现有职责，仅用 Apache Doris 替换 ClickHouse 分析数据面，并优先保留团队实际需要的 tracing、debugging、evaluation、prompt、dataset 和基础 analytics 能力。
+将 Langfuse Community Edition 改造成供内部团队自托管使用的稳定分支：保留 Postgres、Redis/Valkey 和 S3-compatible object storage 的现有职责，通过部署级 selector 选择 ClickHouse 或 Apache Doris 分析数据面，并优先保留团队实际需要的 tracing、debugging、evaluation、prompt、dataset 和基础 analytics 能力。
 
-本项目不是建设通用可插拔数据库平台，也不是重新实现 Langfuse Cloud/Enterprise。R1A 先交付可长期维护、运行时完全不依赖 ClickHouse、行为可验收的内部核心版本；R1B 只在内部有明确 owner 和使用信号后启用 evaluator/experiment 与 global retention，不阻塞 R1A 上线。
+本项目不是建设通用可插拔数据库平台，也不是重新实现 Langfuse Cloud/Enterprise。当前实现保留 ClickHouse 默认路径，并允许部署级切换到 Doris；Doris 已支持 legacy tracing canonicalization、Community product monitors 和默认关闭的 global retention。Evaluator/experiment 只有在内部有明确 owner 和使用信号后才启用，不阻塞核心版本上线。
 
 ## 2. 背景与问题
 
@@ -56,7 +56,7 @@ ClickHouse 并不是一个可以通过替换连接字符串移除的依赖。现
 | Basic org/project/member/auth/API key | 保留并做回归 | - | - | Enterprise fine-grained RBAC、SCIM、SSO |
 | OTLP tracing ingestion | JSON、protobuf、gzip；v4 canonical events | - | 扩展兼容矩阵 | - |
 | 现代 Langfuse SDK | 支持冻结基线的 v4 ingestion contract | - | 新版本按需求评审 | 永久自动跟随上游 |
-| Legacy trace/observation write APIs | 明确 unsupported，不静默降级 | - | `LegacyEventCanonicalizer` 写 canonical events | 恢复 v3 storage |
+| Legacy trace/observation write APIs | `LegacyEventCanonicalizer` 写 canonical events，不恢复 v3 storage | - | 扩展兼容语料 | 恢复 v3 storage |
 | Trace/observation/session/user | list、detail、stable pagination、filters、search | - | 低频 legacy read parity | - |
 | Token/cost/latency/model usage | 精确 totals、时间序列、p50–p99 | - | 高级 attribution | Cloud billing/metering |
 | Scores/feedback/evals | numeric/boolean/categorical score 与基础 score 视图 | LLM/code evaluator 自动执行闭环 | 高级 score analytics | Enterprise evaluator features |
@@ -68,7 +68,7 @@ ClickHouse 并不是一个可以通过替换连接字符串移除的依赖。现
 | Manual trace/project deletion | materialized 可见性、幂等、进度和 anti-resurrection | - | strict raw-object erasure | 假装 raw S3 已立即删除 |
 | Retention | raw/canonical prefix 最长 7 天 lifecycle | 可选 deployment-wide global retention | 需求出现后另做 retention classes | 复制 Enterprise per-project retention |
 | Batch export | - | - | JSON/CSV/JSONL；Parquet direct-to-S3 | ClickHouse native export compatibility |
-| Product monitors | - | - | Community monitor parity | Cloud alerts |
+| Product monitors | Community monitor parity（统一 query engine） | - | 扩展告警能力 | Cloud alerts |
 | Operational monitoring | Doris/queue/load/query/backup health | global-retention health | 持续完善 | - |
 | Historical ClickHouse migration | - | - | 另立项目且需真实数据需求 | 本 PRD 内 backfill/dual-run |
 | Ask/Understand Anything plugin | - | - | - | 全部排除 |
@@ -144,7 +144,7 @@ Canonical publication protocol 固定为：Postgres CAS 先写 `canonicalization
 - R27. Trace/project tombstone generation/fence 在 entity-head claim、batch seal 与 Stream Load commit 前被重新验证；Doris trace/project barrier 与行级终止 sequence 共同防止已通过早期检查的 in-flight write、延迟 job、旧 version 或 client retry 复活数据。删除只有在 barrier 已 `VISIBLE`、barrier 前 operation 已终结且各 surface 已不可见后才能报告完成。
 - R28. 删除请求幂等返回不可猜测的 `deletionOperationId`。Trace deletion operation 保持 project-scoped；project deletion operation 在 tombstone 写入时固定为 `(organization_id, deleted_project_id, generation)` scope，并独立于之后删除的 Project row、membership 与 API key。Project 删除后，其无 payload safe status 至少保留 30 天，只允许当前 organization 中仍满足 Community project-delete 授权的已登录用户通过 organization-scoped UI/tRPC 查询；已撤销 project API key、其他 organization 与猜测 ID 统一失败且不泄露存在性，UI 提供返回 organization project list/operations 的退出路径。只有 Postgres tombstone 与 Doris visibility barrier 都可靠落盘后才返回 `scheduled`，从该时刻起各 surface 必须 logical invisible；barrier 暂不可用时状态为 `retrying`、phase=`visibility_barrier`、`logicallyInvisible=false`，不能声称已隐藏。后续统一状态为 `scheduled`、`retrying`、`needs_attention`、`completed`；completed 表示 Doris/可识别 media 已清理，不表示多 trace raw object 已逐 trace 擦除。确认文案必须同时说明 logical invisibility、materialized/media completion 和最长 7 天 raw/canonical lifecycle；R1B experiment result 对已删 trace 显示 unavailable 并提供可退出路径。
 - R29. Production 必须对专用 raw-ingestion 与 canonical-ingestion prefix 配置相同的最长 7 天 object lifecycle。Quarantine 只保存 safe metadata/hash 与这些 pointer，不复制出更长寿命的 shadow payload；每个 operation 持久化 expiry，未在 expiry 前解决时明确进入 terminal unrecoverable/data-loss，schema contract gate 只等待尚未过期的 recoverable set。若业务未来要求单 trace 立即物理删除 payload，必须先实现 file↔trace manifest/refcount 或按 trace 拆分对象，再提升删除承诺。
-- R30. **[R1B]** Global Doris retention 默认关闭且不阻塞 R1A cutover；只有在 named owner、使用信号与恢复验收人存在后才实施和启用。每次 run 使用不可变 generation/cutoff，并持久化不可回退的 `purged-before` watermark 及跨 event/score/run-link/blob/head 的清理进度。关闭或延长 retention 不能让 replay 恢复已 purge 数据；不提供 per-project retention UI 或语义。
+- R30. Global Doris retention 已实现但默认关闭且不阻塞 cutover；生产启用前仍需 named owner、使用信号、备份与恢复验收人。每次 run 使用不可变 cutoff，并持久化不可回退的 `purged-before` watermark 及跨 event/score/blob/head 的清理阶段。关闭或延长 retention 不能让 replay 恢复已 purge 数据；不提供 per-project retention UI 或语义，experiment run-link 仍属于未启用能力。
 
 ### 6.7 运维、升级与恢复
 
@@ -152,7 +152,7 @@ Canonical publication protocol 固定为：Postgres CAS 先写 `canonicalization
 - R32. Rolling deploy 期间相邻 app versions 的 queue payload、canonicalizer 和 Doris schema 必须兼容；破坏性 schema change 拆成 expand → migrate → contract。Contract gate 不仅等待旧 app 退出，还必须覆盖 BullMQ、DLQ、quarantine 与最长 7 天 raw/canonical replay horizon 中最老的、尚未过期的可恢复 canonicalizer/schema version。ClickHouse-only background migration 使用两版本退役：Release A 仍携带脚本，但为 manager 增加 durable retirement fence、build heartbeat 与 chunk-boundary cooperative abort/drain；只有所有 pre-A worker 已消失、已加载内存的目标 migration 已 drain/abort 后，fence 才能进入 retired。Release B 的 forward migration 对 active-lock TTL 内的已知 row 必须失败，不能仅清 DB lock；确认 fence/heartbeat 后才 terminalize stale row、移除脚本与 ClickHouse 并完成 Doris cutover。数据库 `finished_at`/lock 变化本身不能停止旧进程内的 `run()`。
 - R33. 本项目不支持回滚到 stock Langfuse/ClickHouse。Rollback 仅指回滚到上一个 Doris-compatible app/schema 版本；生产接流前必须完成 Doris PoC 与恢复演练。
 - R34. Recovery 组合 Doris backup/restore、Postgres backup、S3 canonical replay 和 load ledger/DLQ，但必须使用共同 checkpoint manifest。U8-owned checkpoint coordinator 获取单一 lease/fence 后记录 checkpoint generation 与 operation/load-ledger high-watermark；高水位之后的新 ingestion 仍可 accepted 并持久化排队，但 load、deletion barrier/cleanup 与可选 purge 等 Doris mutation 不得越过 fence。Coordinator 等待高水位内所有已 dispatch mutation `VISIBLE` 或 durable terminal，记录 Postgres exported-snapshot/backup identity 与 WAL LSN、trace/project generation、可选 purge watermark 和 Doris schema/version，再在 fence 内取得 Doris backup/snapshot ID；只有两端 artifact digest 均可验证后才原子 seal manifest，超时或任一失败只产生 aborted checkpoint 并释放 fence。Signed envelope 必须包含 `keyId`、creation time、单调 generation、predecessor-manifest hash、所有 artifact digest 与 deletion/purge high-watermark；旧 verification key 保留完整 backup horizon，最新 accepted generation/hash 锚定在 backup repository 之外的 append-only authority。默认 restore 在任何 unknown/expired key、chain/digest/authentication failure、unsealed checkpoint 或低于 external latest anchor 的旧但有效签名上，都必须在 mutation 前拒绝。该 high-watermark 是恢复契约，不宣称跨数据库 ACID snapshot：restore 先恢复 control/tombstone/purge gate 和 Doris snapshot，再将 Postgres 高水位后 ledger 视为待 reconcile/replay，不能因 `success` 字段直接信任。不存在可验证共同 checkpoint 或 replay window 已失效时必须报告 RPO breach，不得宣称恢复成功。
-- R35. Operational health 覆盖 FE/BE availability、replica/disk/compaction、Stream Load visible latency/filtered rows/retry、queue backlog age、DLQ/quarantine age/expiry、Postgres receipt/ledger/control-row growth 与 cleanup watermark、query latency/error、connection pools、backup/restore。Production Doris 仅部署在 private network：web 只到 FE MySQL query endpoint，worker 分别持有 query 与 Stream Load 身份并只到 FE query/HTTP 与 allowlisted BE redirect endpoint，migrator/backup/restore 为无常驻 one-shot workload，monitor 只读 metrics endpoint；cluster-internal 端口在 U1 对选定 topology 冻结并默认拒绝其他 ingress。Local compose 仅绑定 `127.0.0.1`/private bridge。Query/load/migration/backup/restore credentials 分离，通过 runtime secret injection 提供；privileged credentials 不进入 web/worker image，并用双凭据滚动轮换后撤销旧身份。Product monitors 延期不影响这些告警。
+- R35. Operational health 覆盖 FE/BE availability、replica/disk/compaction、Stream Load visible latency/filtered rows/retry、queue backlog age、DLQ/quarantine age/expiry、Postgres receipt/ledger/control-row growth 与 cleanup watermark、query latency/error、connection pools、backup/restore。Production Doris 仅部署在 private network：web 只到 FE MySQL query endpoint，worker 分别持有 query 与 Stream Load 身份并只到 FE query/HTTP 与 allowlisted BE redirect endpoint，migrator/backup/restore 为无常驻 one-shot workload，monitor 只读 metrics endpoint；cluster-internal 端口在 U1 对选定 topology 冻结并默认拒绝其他 ingress。Local compose 仅绑定 `127.0.0.1`/private bridge。Query/load/migration/backup/restore credentials 分离，通过 runtime secret injection 提供；privileged credentials 不进入 web/worker image，并用双凭据滚动轮换后撤销旧身份。Product monitors 与这些运维告警使用不同执行路径。
 
 ## 7. 关键用户流程
 
@@ -288,9 +288,9 @@ Canonical publication protocol 固定为：Postgres CAS 先写 `canonicalization
 
 ## 13. 风险与明确接受的限制
 
-- R1A 不兼容 legacy trace/observation write endpoint；调用方必须升级 SDK/OTLP，接口返回可行动的 unsupported error。
+- Legacy trace/observation write endpoint 经 canonical adapter 写入 Doris；dataset-run/experiment child 仍返回可行动的 unsupported error。
 - R1A 不提供单 trace raw OTLP 立即物理删除；raw/canonical ingestion prefix 最长保留 7 天。
-- R1A 不提供 evaluator/experiment execution、global/per-project retention、自定义 dashboard、product monitors 或 batch export；前两项只有满足 R1B adoption gate 后才启用。
+- 当前 Doris 不提供 evaluator/experiment execution、per-project retention、自定义 dashboard 或 batch export；deployment-wide global retention 默认关闭、需显式配置，Community product monitors 已通过统一 query engine 启用。
 - fresh deployment 一旦接收 Doris 数据，不能回滚为 stock ClickHouse build；恢复依赖 Doris-compatible app、backup 和 S3 replay。
 - 上游 Langfuse 会继续改变 v4 schema/query semantics；本 PRD 只承诺冻结基线。内部 fork 合并任何上游变更前必须完成 demand review、更新 corpus，再改 adapter。
 

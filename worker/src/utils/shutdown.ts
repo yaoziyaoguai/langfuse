@@ -27,6 +27,7 @@ import {
   monitorRunners,
   analyticsIngestionOutboxRunner,
   analyticsDeletionRecoveryRunner,
+  dorisGlobalRetentionRunner,
 } from "../app";
 import { env } from "../env";
 import { isAnalyticsBackend } from "@langfuse/shared/analytics-backend";
@@ -78,6 +79,8 @@ export const onShutdown: NodeJS.SignalsListener = async (signal) => {
   analyticsIngestionOutboxRunner?.stop();
 
   analyticsDeletionRecoveryRunner?.stop();
+
+  dorisGlobalRetentionRunner?.stop();
 
   // Before closeWorkers(), while the registry is still populated (LFE-10388).
   logInFlightBlobExportsOnShutdown();

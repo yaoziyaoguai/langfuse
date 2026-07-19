@@ -12,10 +12,12 @@ import {
   claimAnalyticsEntityHead,
   claimAnalyticsLoadBatch,
   cancelAnalyticsLoadBatchIfDeleted,
+  cancelAnalyticsLoadBatchIfRetained,
   completeAnalyticsIngestionOperation,
   findAnalyticsIngestionOperationForProject,
   freezeAnalyticsIngestionManifest,
   getProjectDeletionGeneration,
+  getAnalyticsRetentionBarrier,
   getTraceDeletionGeneration,
   initializeTraceControlState,
   publishCanonicalArtifact,
@@ -479,8 +481,24 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
     const descriptors = describeCanonicalCandidates(batch);
     const dispositionResults: FrozenCandidateDisposition[] = [];
     const requiredKeys = new Set<string>();
+    const retentionBarrier = await getAnalyticsRetentionBarrier({
+      client: this.dependencies.client,
+    });
 
     for (const descriptor of descriptors) {
+      if (
+        retentionBarrier &&
+        partitionDate(descriptor.partitionDate) < retentionBarrier
+      ) {
+        dispositionResults.push({
+          candidateKey: descriptor.candidateKey,
+          disposition: "CANCELLED_BY_DELETION" as const,
+          loadBatchId: null,
+          reasonCode: "RETENTION_BARRIER",
+          quarantineExpiresAt: null,
+        });
+        continue;
+      }
       const projectGeneration = await getProjectDeletionGeneration({
         client: this.dependencies.client,
         projectId: operation.projectId,
@@ -696,6 +714,26 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         throw new AnalyticsPersistenceError("ANALYTICS_QUARANTINED", false);
       }
 
+      const retentionRevalidation = await cancelAnalyticsLoadBatchIfRetained({
+        client: this.dependencies.client,
+        loadBatchId: ledger.id,
+        projectId: operation.projectId,
+      });
+      if (
+        retentionRevalidation.outcome === "cancelled" ||
+        retentionRevalidation.outcome === "terminal"
+      ) {
+        continue;
+      }
+      if (retentionRevalidation.outcome !== "current") {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: operation.id,
+            phase: "pre_load_retention_revalidation",
+          },
+        });
+      }
+
       const deletionRevalidation = await cancelAnalyticsLoadBatchIfDeleted({
         client: this.dependencies.client,
         loadBatchId: ledger.id,
@@ -783,6 +821,24 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
             },
           },
         );
+      }
+
+      const claimedRetentionRevalidation =
+        await cancelAnalyticsLoadBatchIfRetained({
+          client: this.dependencies.client,
+          loadBatchId: ledger.id,
+          projectId: operation.projectId,
+          claimedFence: claimed.fence,
+          leaseOwner: this.dependencies.workerId,
+        });
+      if (claimedRetentionRevalidation.outcome === "cancelled") continue;
+      if (claimedRetentionRevalidation.outcome !== "current") {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: operation.id,
+            phase: "claimed_load_retention_revalidation",
+          },
+        });
       }
 
       try {

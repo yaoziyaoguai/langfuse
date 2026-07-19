@@ -190,6 +190,54 @@ describe("analytics ingestion durable queue", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it("holds an operation-scoped lock across canonicalization and persistence", async () => {
+    const order: string[] = [];
+    const canonicalBatch = {
+      operationId: "operation-1",
+      projectId: "project-1",
+    } as CanonicalAnalyticsBatch;
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: {
+        persist: vi.fn(async () => {
+          order.push("persist");
+          return { operationId: "operation-1", status: "VISIBLE" as const };
+        }),
+      },
+      canonicalize: vi.fn(async () => {
+        order.push("canonicalize");
+        return canonicalBatch;
+      }),
+      withOperationLock: vi.fn(async (_operation, run) => {
+        order.push("lock-start");
+        await run();
+        order.push("lock-end");
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        sourceOperationId: "legacy:entity-digest:operation-digest",
+        rawObjectKey: "raw/operation-1.json",
+        acceptedAtNanos: 1n,
+        canonicalizerVersion: "1",
+        schemaVersion: 3,
+        terminalAt: null,
+        status: "QUEUED",
+        outboxV2: { generation: 1 },
+      })) as never,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).resolves.toBeUndefined();
+    expect(order).toEqual([
+      "lock-start",
+      "canonicalize",
+      "persist",
+      "lock-end",
+    ]);
+  });
+
   it("terminalizes non-retryable persistence errors on the current delivery", async () => {
     const markTerminalFailure = vi.fn(async () => true);
     const processor = analyticsIngestionQueueProcessorBuilder({

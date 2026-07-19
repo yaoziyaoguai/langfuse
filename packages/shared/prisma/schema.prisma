@@ -2075,6 +2075,7 @@ model AnalyticsLoadBatch {
   @@index([operationId, status])
   @@index([projectId, status, updatedAt])
   @@index([status, updatedAt])
+  @@index([status, partitionDate])
   @@map("analytics_load_batches")
 }
 
@@ -2102,6 +2103,7 @@ model AnalyticsEntityHead {
   @@index([projectId, entityType, lookupId])
   @@index([projectId, owningTraceId, entityType])
   @@index([projectId, entityType, partitionDate])
+  @@index([entityType, partitionDate, id])
   @@index([operationId])
   @@map("analytics_entity_heads")
 }
@@ -2231,6 +2233,35 @@ model AnalyticsBackgroundMigrationRetirement {
   @@unique([fenceName, managerInstanceId])
   @@index([fenceName, status, managerHeartbeatAt])
   @@map("analytics_background_migration_retirement")
+}
+
+model AnalyticsRetentionRun {
+  id            String   @id @default(cuid())
+  cutoffDate    DateTime @map("cutoff_date") @db.Date
+  phase         String   @default("DRAIN")
+  status        String   @default("RUNNING")
+  lastErrorCode String?  @map("last_error_code")
+  startedAt     DateTime @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  activeState AnalyticsRetentionState? @relation("ActiveAnalyticsRetentionRun")
+
+  @@index([status, updatedAt])
+  @@map("analytics_retention_runs")
+}
+
+model AnalyticsRetentionState {
+  id             String   @id
+  purgedBefore   DateTime? @map("purged_before") @db.Date
+  activeCutoff   DateTime? @map("active_cutoff") @db.Date
+  activeRunId    String?  @unique @map("active_run_id")
+  activeRun      AnalyticsRetentionRun? @relation("ActiveAnalyticsRetentionRun", fields: [activeRunId], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("analytics_retention_state")
 }
 
 // Pending Deletions: Tracks objects (like traces) that are scheduled for batch deletion

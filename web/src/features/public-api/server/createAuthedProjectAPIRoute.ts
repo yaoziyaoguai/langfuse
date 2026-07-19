@@ -9,7 +9,6 @@ import {
   type ApiAccessLevel,
   traceException,
   logger,
-  DORIS_LEGACY_INGESTION_UNAVAILABLE,
 } from "@langfuse/shared/src/server";
 import { PayloadTooLargeError, type RateLimitResource } from "@langfuse/shared";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
@@ -76,9 +75,8 @@ export type AuthedProjectAPIRouteConfig<
    */
   allowInAppAgentKey?: boolean;
   /**
-   * Marks a legacy tracing write route. Such routes return 501 with Doris and
-   * 404 when ClickHouse runs in events_only mode, because neither topology has
-   * a consumer for legacy trace/observation writes.
+   * Marks a legacy tracing write route. ClickHouse events_only deployments
+   * return 404; Doris routes enter the durable canonical ingestion pipeline.
    */
   rejectInEventsOnlyMode?: boolean;
   fn: (params: {
@@ -310,14 +308,6 @@ export const createAuthedProjectAPIRoute = <
       backend: env.LANGFUSE_ANALYTICS_BACKEND,
       clickhouseWriteMode: env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
     });
-
-    // These routes write only to the legacy ClickHouse ingestion queue. Doris
-    // deliberately has no consumer for that queue, so accepting the request
-    // would acknowledge work that can never complete.
-    if (legacyRejection === "doris") {
-      res.status(501).json(DORIS_LEGACY_INGESTION_UNAVAILABLE);
-      return;
-    }
 
     // Short-circuit legacy routes in ClickHouse events_only mode because the
     // legacy tables are no longer populated.
