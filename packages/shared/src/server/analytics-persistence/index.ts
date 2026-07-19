@@ -1,4 +1,5 @@
 export * from "./AnalyticsBatchSink";
+export * from "./AnalyticsCheckpointCoordinator";
 export * from "./AnalyticsLifecycleStore";
 export * from "./DorisAnalyticsLifecycleStore";
 export * from "./acceptAnalyticsIngestion";

@@ -20,7 +20,19 @@
     "DORIS_DATABASE",
     "DORIS_MIGRATOR_USER",
     "DORIS_MIGRATOR_PASSWORD",
-    "DORIS_CONTROL_TEST_DATABASE_URL"
+    "DORIS_CONTROL_TEST_DATABASE_URL",
+    "LANGFUSE_CHECKPOINT_POSTGRES_CAPTURE_ARGV_JSON",
+    "LANGFUSE_CHECKPOINT_DORIS_CAPTURE_ARGV_JSON",
+    "LANGFUSE_CHECKPOINT_SIGNING_PRIVATE_KEY_FILE",
+    "LANGFUSE_CHECKPOINT_SIGNING_KEY_ID",
+    "LANGFUSE_CHECKPOINT_ANCHOR_URL",
+    "LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE",
+    "LANGFUSE_CHECKPOINT_LEASE_MS",
+    "LANGFUSE_CHECKPOINT_TIMEOUT_MS",
+    "LANGFUSE_CHECKPOINT_POLL_INTERVAL_MS",
+    "LANGFUSE_RETIREMENT_MINIMUM_MANAGER_BUILD_ID",
+    "LANGFUSE_RETIREMENT_DRAIN_TIMEOUT_MS",
+    "LANGFUSE_RETIREMENT_POLL_INTERVAL_MS"
   ],
   "envMode": "loose",
   "tasks": {
@@ -93,6 +105,14 @@
     },
     "lint": {
       "dependsOn": ["@repo/eslint-plugin#build", "^build"],
+      "env": ["LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE"],
+      "cache": true,
+      "outputLogs": "errors-only",
+      "outputs": []
+    },
+    "@langfuse/shared#lint": {
+      "dependsOn": ["@repo/eslint-plugin#build", "^build"],
+      "env": ["LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE"],
       "cache": true,
       "outputLogs": "errors-only",
       "outputs": []

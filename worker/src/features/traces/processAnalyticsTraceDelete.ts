@@ -2,6 +2,7 @@ import type { AnalyticsDeletionOperation } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  acquireAnalyticsMutationPermit,
   completeDeletionOperation,
   claimDeletionOperation,
   findDeletionOperationForProject,
@@ -65,6 +66,16 @@ export async function processAnalyticsTraceDelete(
   if (!operation) throw new Error("Trace deletion operation is already leased");
   const lease = { owner, fence: operation.workerFence };
   try {
+    const mutationPermit = await acquireAnalyticsMutationPermit({
+      mutation: {
+        kind: "deletion",
+        checkpointGeneration: operation.checkpointGeneration,
+        createdAt: operation.createdAt,
+      },
+    });
+    if (mutationPermit.outcome === "held") {
+      throw new Error("Trace deletion is held by the analytics checkpoint");
+    }
     if (!operation.logicallyInvisible) {
       const barrier = await lifecycle.store.publishTraceTombstone({
         operationId: operation.id,

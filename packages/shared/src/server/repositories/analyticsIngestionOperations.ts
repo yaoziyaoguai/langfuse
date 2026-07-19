@@ -7,6 +7,7 @@ import type {
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+import { getActiveCheckpointGenerationForAcceptance } from "./analyticsCheckpoints";
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 
@@ -86,6 +87,11 @@ export async function createAnalyticsIngestionReceipt(
 
   try {
     const operation = await client.$transaction(async (transaction) => {
+      const checkpointGeneration =
+        await getActiveCheckpointGenerationForAcceptance({
+          transaction,
+          now: input.acceptedAt,
+        });
       const created = await transaction.analyticsIngestionOperation.create({
         data: {
           id: input.operationId,
@@ -97,6 +103,7 @@ export async function createAnalyticsIngestionReceipt(
           acceptedAtNanos: input.acceptedAtNanos,
           canonicalizerVersion: input.canonicalizerVersion,
           schemaVersion: input.schemaVersion,
+          checkpointGeneration,
           recoverableUntil: input.recoverableUntil,
           statusExpiresAt: input.statusExpiresAt,
         },

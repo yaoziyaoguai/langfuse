@@ -9,6 +9,7 @@ import {
   type CanonicalAnalyticsBatch,
 } from "@langfuse/shared/analytics-persistence";
 import {
+  acquireAnalyticsMutationPermit,
   claimAnalyticsEntityHead,
   claimAnalyticsLoadBatch,
   cancelAnalyticsLoadBatchIfDeleted,
@@ -630,6 +631,25 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
             },
           },
         );
+      }
+
+      const mutationPermit = await acquireAnalyticsMutationPermit({
+        client: this.dependencies.client,
+        mutation: {
+          kind: "ingestion",
+          checkpointGeneration: operation.checkpointGeneration,
+          operationAcceptedAtNanos: operation.acceptedAtNanos,
+        },
+        now: this.now(),
+      });
+      if (mutationPermit.outcome === "held") {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: operation.id,
+            phase: "checkpoint_fence",
+            reasonCode: "CHECKPOINT_FENCE",
+          },
+        });
       }
 
       const now = this.now();

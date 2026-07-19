@@ -9,6 +9,7 @@ import type {
 
 import { prisma } from "../../db";
 import type { AnalyticsDeletionProgress } from "../analytics-persistence";
+import { getActiveCheckpointGenerationForAcceptance } from "./analyticsCheckpoints";
 
 type AnalyticsControlClient = PrismaClient | Prisma.TransactionClient;
 
@@ -156,6 +157,8 @@ export async function scheduleTraceDeletionOperations(input: {
   const now = input.now ?? new Date();
 
   return serializable(client, async (transaction) => {
+    const checkpointGeneration =
+      await getActiveCheckpointGenerationForAcceptance({ transaction, now });
     await transaction.project.findFirstOrThrow({
       where: {
         id: input.projectId,
@@ -210,6 +213,7 @@ export async function scheduleTraceDeletionOperations(input: {
           projectId: input.projectId,
           traceId,
           generation,
+          checkpointGeneration,
           requesterPrincipalType: input.requester.principalType,
           requesterPrincipalId: input.requester.principalId,
           status:
@@ -243,6 +247,8 @@ export async function scheduleProjectDeletionOperation(input: {
   const client = input.client ?? prisma;
   const now = input.now ?? new Date();
   return serializable(client, async (transaction) => {
+    const checkpointGeneration =
+      await getActiveCheckpointGenerationForAcceptance({ transaction, now });
     await transaction.project.findFirstOrThrow({
       where: { id: input.projectId, orgId: input.organizationId },
       select: { id: true },
@@ -276,6 +282,7 @@ export async function scheduleProjectDeletionOperation(input: {
         organizationId: input.organizationId,
         projectId: input.projectId,
         generation,
+        checkpointGeneration,
         requesterPrincipalType: input.requester.principalType,
         requesterPrincipalId: input.requester.principalId,
         status: "RETRYING",

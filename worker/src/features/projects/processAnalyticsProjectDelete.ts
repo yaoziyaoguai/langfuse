@@ -2,6 +2,7 @@ import type { AnalyticsDeletionOperation } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  acquireAnalyticsMutationPermit,
   completeDeletionOperation,
   claimDeletionOperation,
   deleteMediaFiles,
@@ -85,6 +86,16 @@ export async function processAnalyticsProjectDelete(
   }
   const lease = { owner, fence: operation.workerFence };
   try {
+    const mutationPermit = await acquireAnalyticsMutationPermit({
+      mutation: {
+        kind: "deletion",
+        checkpointGeneration: operation.checkpointGeneration,
+        createdAt: operation.createdAt,
+      },
+    });
+    if (mutationPermit.outcome === "held") {
+      throw new Error("Project deletion is held by the analytics checkpoint");
+    }
     if (!operation.logicallyInvisible) {
       const barrier = await lifecycle.store.publishProjectTombstone({
         operationId: operation.id,
