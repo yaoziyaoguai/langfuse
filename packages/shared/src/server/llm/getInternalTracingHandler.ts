@@ -1,8 +1,7 @@
 import CallbackHandler from "langfuse-langchain";
 import { ProcessedTraceEvent, TraceSinkParams } from "./types";
 import { buildInternalTraceEventInputs } from "./internalTraceEvents";
-import { processEventBatch } from "../ingestion/processEventBatch";
-import { createUnknownSdkIngestionAttribution } from "../ingestion/ingestionAttribution";
+import { writeInternalTraceViaOtelIngestion } from "../otel/internalTraceOtelWriter";
 import { logger } from "../logger";
 import { traceException } from "../instrumentation";
 
@@ -76,8 +75,7 @@ export function getInternalTracingHandler(traceSinkParams: TraceSinkParams): {
   handler: CallbackHandler;
   processTracedEvents: () => Promise<void>;
 } {
-  const { prompt, targetProjectId, environment, userId, eventsWriter } =
-    traceSinkParams;
+  const { prompt, targetProjectId, environment, userId } = traceSinkParams;
   const handler = new CallbackHandler({
     _projectId: targetProjectId,
     _isLocalEventExportEnabled: true,
@@ -96,53 +94,23 @@ export function getInternalTracingHandler(traceSinkParams: TraceSinkParams): {
         prompt,
       });
 
-      // Legacy write to traces/observations tables
       try {
-        const auth = {
-          validKey: true as const,
-          scope: {
-            projectId: traceSinkParams.targetProjectId, // Important: this controls into what project traces are ingested.
-            accessLevel: "project",
-          } as any,
-        };
-
-        await processEventBatch(
-          JSON.parse(JSON.stringify(processedEvents)), // stringify to emulate network event batch from network call
-          auth,
-          {
-            isLangfuseInternal: true,
-            forwardToEventsTable: eventsWriter ? false : undefined, // Do not dual write when we already direct event write
-            attribution: createUnknownSdkIngestionAttribution({
-              authCheck: auth,
-            }),
-          },
-        );
-      } catch (processingError) {
-        traceException(processingError);
-        logger.error("Failed to process traced events via legacy ingestion", {
-          error: processingError,
+        const { rootSpanId, eventInputs } = buildInternalTraceEventInputs({
+          processedEvents,
+          traceId: traceSinkParams.traceId,
+          projectId: targetProjectId,
         });
-      }
-
-      // Direct write to events table
-      if (eventsWriter) {
-        try {
-          const { rootSpanId, eventInputs } = buildInternalTraceEventInputs({
-            processedEvents,
-            traceId: traceSinkParams.traceId,
-            projectId: targetProjectId,
-            experimentContext: eventsWriter.experimentContext,
-          });
-
-          if (eventInputs.length > 0) {
-            await eventsWriter.write({ rootSpanId, eventInputs });
-          }
-        } catch (writeError) {
-          traceException(writeError);
-          logger.error("Failed to direct-write internal traced events", {
-            error: writeError,
+        if (eventInputs.length > 0) {
+          await writeInternalTraceViaOtelIngestion({
+            rootSpanId,
+            eventInputs,
           });
         }
+      } catch (writeError) {
+        traceException(writeError);
+        logger.error("Failed to publish internal traced events", {
+          error: writeError,
+        });
       }
     } catch (e) {
       logger.error("Failed to process traced events", { error: e });
