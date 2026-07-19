@@ -42,6 +42,7 @@ interface GenerationUsageInput {
   readonly providedCostDetails: Readonly<Record<string, number>>;
   readonly input?: string;
   readonly output?: string;
+  readonly level: string;
 }
 
 export interface EventCanonicalizerDependencies {
@@ -248,6 +249,7 @@ export class EventCanonicalizer {
             providedCostDetails,
             input: inputForUsage,
             output: outputForUsage,
+            level: eventData.level ?? "DEFAULT",
           })
         : null,
     ]);

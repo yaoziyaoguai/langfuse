@@ -6,12 +6,14 @@ const {
   mockClickhouseList,
   mockDorisGet,
   mockDorisRead,
+  mockAcceptAnalytics,
 } = vi.hoisted(() => ({
   mockClickhouseCount: vi.fn(),
   mockClickhouseGet: vi.fn(),
   mockClickhouseList: vi.fn(),
   mockDorisGet: vi.fn(),
   mockDorisRead: vi.fn(),
+  mockAcceptAnalytics: vi.fn(),
 }));
 
 vi.mock("@/src/features/public-api/server/scores", () => ({
@@ -34,6 +36,8 @@ vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
     }),
     isDorisAnalyticsBackend: () => true,
     readDorisScoresForPublicApi: mockDorisRead,
+    acceptAnalyticsIngestion: mockAcceptAnalytics,
+    getS3EventStorageClient: vi.fn(() => ({})),
   };
 });
 
@@ -80,6 +84,10 @@ describe("ScoresApiService Doris routing", () => {
       count: 1,
     });
     mockDorisGet.mockResolvedValue(score);
+    mockAcceptAnalytics.mockResolvedValue({
+      operationId: "operation-1",
+      status: "ACCEPTED",
+    });
   });
 
   it("shares the Doris list/count read and never calls ClickHouse handlers", async () => {
@@ -109,5 +117,38 @@ describe("ScoresApiService Doris routing", () => {
       scoreId: "score-1",
     });
     expect(mockClickhouseGet).not.toHaveBeenCalled();
+  });
+
+  it("durably accepts score writes without invoking the legacy event batch", async () => {
+    await expect(
+      new ScoresApiService("v2").createScore({
+        body: {
+          id: "score-2",
+          name: "quality",
+          value: 1,
+          dataType: "NUMERIC",
+          environment: "default",
+          source: "API",
+          traceId: "trace-1",
+        },
+        auth: { scope: { projectId: "project-1" } } as never,
+        attribution: {
+          ingestionApiKey: "pk-test",
+          ingestionSdkName: "python",
+          ingestionSdkVersion: "4.0.0",
+        },
+      }),
+    ).resolves.toMatchObject({
+      id: "score-2",
+      result: { errors: [], successes: [{ status: 201 }] },
+    });
+    expect(mockAcceptAnalytics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        canonicalizerVersion: "1",
+        schemaVersion: 1,
+        envelope: expect.objectContaining({ source: "score" }),
+      }),
+    );
   });
 });

@@ -7,7 +7,9 @@ import {
   type ScoreQueryType,
 } from "@/src/features/public-api/server/scores";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { env } from "@/src/env.mjs";
 import {
+  ForbiddenError,
   InternalServerError,
   LISTABLE_SCORE_TYPES,
   type ScoreSourceType,
@@ -32,6 +34,10 @@ import {
   deriveFilters,
   convertApiProvidedFilterToClickhouseFilter,
   scoresTableUiColumnDefinitions,
+  acceptAnalyticsIngestion,
+  CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+  CURRENT_ANALYTICS_SCHEMA_VERSION,
+  getS3EventStorageClient,
 } from "@langfuse/shared/src/server";
 import type { z } from "zod";
 
@@ -249,6 +255,10 @@ export class ScoresApiService {
     scoreId?: string;
     attribution: IngestionAttribution;
   }) {
+    if (!auth.scope.projectId) {
+      throw new ForbiddenError("Project-scoped API key required");
+    }
+
     const existingScore = auditScope
       ? await _handleGetScoreById({
           projectId: auditScope.projectId,
@@ -261,18 +271,32 @@ export class ScoresApiService {
         })
       : undefined;
 
-    const result = await processEventBatch(
-      [
-        {
-          id: randomUUID(),
-          type: eventTypes.SCORE_CREATE,
-          timestamp: new Date().toISOString(),
-          body: { ...body, id: scoreId },
-        },
-      ],
-      auth,
-      { attribution },
-    );
+    const event = {
+      id: randomUUID(),
+      type: eventTypes.SCORE_CREATE,
+      timestamp: new Date().toISOString(),
+      body: { ...body, id: scoreId },
+    };
+    const result = isDorisAnalyticsBackend()
+      ? await acceptAnalyticsIngestion({
+          projectId: auth.scope.projectId,
+          envelope: {
+            formatVersion: 1,
+            source: "score",
+            payload: [event],
+            attribution,
+          },
+          canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+          schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+          storageService: getS3EventStorageClient(
+            env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+          ),
+          rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+        }).then(() => ({
+          successes: [{ id: event.id, status: 201 }],
+          errors: [],
+        }))
+      : await processEventBatch([event], auth, { attribution });
 
     if (
       auditScope &&

@@ -25,6 +25,7 @@ import {
   deletedMaskCleaner,
   queueMetricsRunner,
   monitorRunners,
+  analyticsIngestionOutboxRunner,
 } from "../app";
 
 export const onShutdown: NodeJS.SignalsListener = async (signal) => {
@@ -70,6 +71,8 @@ export const onShutdown: NodeJS.SignalsListener = async (signal) => {
   for (const runner of monitorRunners) {
     runner.stop();
   }
+
+  analyticsIngestionOutboxRunner?.stop();
 
   // Before closeWorkers(), while the registry is still populated (LFE-10388).
   logInFlightBlobExportsOnShutdown();

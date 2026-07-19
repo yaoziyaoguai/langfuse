@@ -8,6 +8,8 @@ import type { StorageService } from "../services/StorageService";
 import { AnalyticsPersistenceError } from "./errors";
 
 const RAW_FORMAT_VERSION = 1;
+export const CURRENT_ANALYTICS_CANONICALIZER_VERSION = "1";
+export const CURRENT_ANALYTICS_SCHEMA_VERSION = 1;
 export const MAX_RAW_ANALYTICS_BYTES = 100 * 1024 * 1024;
 const REPLAY_HORIZON_MS = 7 * 24 * 60 * 60 * 1_000;
 const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -16,6 +18,7 @@ export type RawAnalyticsIngestionEnvelope = {
   readonly formatVersion: typeof RAW_FORMAT_VERSION;
   readonly source: "otlp" | "score" | "internal-event";
   readonly payload: unknown;
+  readonly isLangfuseInternal?: boolean;
   readonly attribution: {
     readonly ingestionApiKey: string;
     readonly ingestionSdkName: string;
@@ -50,6 +53,8 @@ export function encodeRawAnalyticsIngestionEnvelope(
     envelope.formatVersion !== RAW_FORMAT_VERSION ||
     !["otlp", "score", "internal-event"].includes(envelope.source) ||
     !("payload" in envelope) ||
+    (envelope.isLangfuseInternal !== undefined &&
+      typeof envelope.isLangfuseInternal !== "boolean") ||
     !envelope.attribution ||
     typeof envelope.attribution.ingestionApiKey !== "string" ||
     typeof envelope.attribution.ingestionSdkName !== "string" ||
@@ -63,6 +68,9 @@ export function encodeRawAnalyticsIngestionEnvelope(
       formatVersion: RAW_FORMAT_VERSION,
       source: envelope.source,
       payload: envelope.payload,
+      ...(envelope.isLangfuseInternal === true
+        ? { isLangfuseInternal: true }
+        : {}),
       attribution: envelope.attribution,
       ...(receipt
         ? {
@@ -107,6 +115,8 @@ export function decodeRawAnalyticsIngestionEnvelope(
       (envelope.source !== "otlp" &&
         envelope.source !== "score" &&
         envelope.source !== "internal-event") ||
+      (envelope.isLangfuseInternal !== undefined &&
+        typeof envelope.isLangfuseInternal !== "boolean") ||
       typeof attribution !== "object" ||
       attribution === null ||
       Array.isArray(attribution)
@@ -126,6 +136,7 @@ export function decodeRawAnalyticsIngestionEnvelope(
       formatVersion: RAW_FORMAT_VERSION,
       source: envelope.source,
       payload: envelope.payload,
+      isLangfuseInternal: envelope.isLangfuseInternal === true,
       attribution: {
         ingestionApiKey: typedAttribution.ingestionApiKey,
         ingestionSdkName: typedAttribution.ingestionSdkName,

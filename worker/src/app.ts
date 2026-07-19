@@ -33,6 +33,7 @@ import {
   BlobStorageIntegrationQueue,
   DeadLetterRetryQueue,
   IngestionQueue,
+  AnalyticsIngestionQueue,
   SecondaryIngestionQueue,
   OtelIngestionQueue,
   SecondaryOtelIngestionQueue,
@@ -97,6 +98,8 @@ import { QueueMetricsRunner } from "./features/queue-metrics-runner";
 import { MonitorRunner } from "./features/monitor-runner";
 import { DeletedMaskCleaner } from "./features/deleted-mask-cleaner";
 import { TraceDeleteBatchActionRunner } from "./features/trace-delete-batch-action-runner";
+import { createDorisAnalyticsPersistence } from "./services/dorisAnalyticsPersistence";
+import { AnalyticsIngestionOutboxRunner } from "./features/analytics-ingestion-outbox-runner";
 
 const app = express();
 
@@ -388,6 +391,31 @@ if (env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true") {
       },
     );
   });
+}
+
+const dorisAnalyticsPersistence =
+  env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+    ? createDorisAnalyticsPersistence({})
+    : null;
+
+export let analyticsIngestionOutboxRunner: AnalyticsIngestionOutboxRunner | null =
+  null;
+
+if (dorisAnalyticsPersistence) {
+  AnalyticsIngestionQueue.getInstance();
+  WorkerManager.register(
+    QueueName.AnalyticsIngestionQueue,
+    dorisAnalyticsPersistence.processor,
+    {
+      concurrency: env.LANGFUSE_ANALYTICS_INGESTION_WORKER_CONCURRENCY,
+    },
+  );
+  analyticsIngestionOutboxRunner = new AnalyticsIngestionOutboxRunner({
+    workerId: dorisAnalyticsPersistence.workerId,
+    intervalMs: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_INTERVAL_MS,
+    batchSize: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE,
+  });
+  analyticsIngestionOutboxRunner.start();
 }
 
 if (

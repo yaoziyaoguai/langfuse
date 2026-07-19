@@ -15,7 +15,6 @@ import {
   recordIncrement,
   traceException,
   getS3EventStorageClient,
-  QueueJobs,
   instrumentSync,
   recordDistribution,
   UsageDetails,
@@ -26,7 +25,12 @@ import {
 import { LangfuseOtelSpanAttributes } from "./attributes";
 import { ObservationTypeMapperRegistry } from "./ObservationTypeMapper";
 import { env } from "../../env";
-import { OtelIngestionQueue } from "../redis/otelIngestionQueue";
+import {
+  acceptAnalyticsIngestion,
+  CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+  CURRENT_ANALYTICS_SCHEMA_VERSION,
+} from "../analytics-persistence";
+import type { StorageService } from "../services/StorageService";
 import { isValidDateString, flattenJsonToPathArrays } from "./utils";
 import { convertDateToClickhouseDateTime } from "../clickhouse/client";
 
@@ -58,6 +62,8 @@ export interface OtelIngestionProcessorConfig {
    * log line points at the replayable payload.
    */
   fileKey?: string;
+  acceptAnalytics?: typeof acceptAnalyticsIngestion;
+  storageService?: StorageService;
 }
 
 interface CreateTraceEventParams {
@@ -174,6 +180,8 @@ export class OtelIngestionProcessor {
   private readonly ingestionVersion?: string;
   private readonly isLangfuseInternal?: boolean;
   private readonly fileKey?: string;
+  private readonly acceptAnalytics: typeof acceptAnalyticsIngestion;
+  private readonly storageService?: StorageService;
 
   constructor(config: OtelIngestionProcessorConfig) {
     this.projectId = config.projectId;
@@ -189,58 +197,36 @@ export class OtelIngestionProcessor {
     this.ingestionVersion = config.ingestionVersion;
     this.isLangfuseInternal = config.isLangfuseInternal;
     this.fileKey = config.fileKey;
+    this.acceptAnalytics = config.acceptAnalytics ?? acceptAnalyticsIngestion;
+    this.storageService = config.storageService;
   }
 
   /**
-   * Returns the current time as yyyy/mm/dd/hh/mm`.
+   * Durably accepts a raw OTLP batch. The Postgres outbox publishes the queue
+   * job independently, so a Redis outage cannot turn an accepted response into
+   * silent data loss.
    */
-  private getCurrentTimePath(): string {
-    const now = new Date();
-    return `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}/${String(now.getHours()).padStart(2, "0")}/${String(now.getMinutes()).padStart(2, "0")}`;
-  }
-
-  /**
-   * Uploads a batch of resourceSpans to blob storage and adds a job to process them
-   * into the otel-ingestion-queue.
-   */
-  async publishToOtelIngestionQueue(resourceSpans: ResourceSpan[]) {
-    const fileKey = `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}otel/${this.projectId}/${this.getCurrentTimePath()}/${randomUUID()}.json`;
-
-    // Upload to S3
-    await getS3EventStorageClient(
-      env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
-    ).uploadJson(fileKey, resourceSpans as Record<string, unknown>[]);
-
-    // Add queue job
-    const queue = OtelIngestionQueue.getInstance({
-      shardingKey: `${this.projectId}-${fileKey}`,
+  async publishToAnalyticsIngestion(resourceSpans: ResourceSpan[]) {
+    return this.acceptAnalytics({
+      projectId: this.projectId,
+      envelope: {
+        formatVersion: 1,
+        source: "otlp",
+        payload: resourceSpans,
+        ...(this.isLangfuseInternal ? { isLangfuseInternal: true } : {}),
+        attribution: {
+          ingestionApiKey: this.publicKey,
+          ingestionSdkName: this.sdkName,
+          ingestionSdkVersion: this.sdkVersion,
+        },
+      },
+      canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+      schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+      storageService:
+        this.storageService ??
+        getS3EventStorageClient(env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET),
+      rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
     });
-    return queue
-      ? queue.add(QueueJobs.OtelIngestionJob, {
-          id: randomUUID(),
-          timestamp: new Date(),
-          name: QueueJobs.OtelIngestionJob as const,
-          payload: {
-            data: {
-              fileKey,
-              publicKey: this.publicKey,
-            },
-            authCheck: {
-              validKey: true,
-              scope: {
-                projectId: this.projectId,
-                accessLevel: "project" as const,
-                orgId: this.orgId,
-              },
-            },
-            propagatedHeaders: this.propagatedHeaders,
-            sdkName: this.sdkName,
-            sdkVersion: this.sdkVersion,
-            ingestionVersion: this.ingestionVersion,
-            ...(this.isLangfuseInternal ? { isLangfuseInternal: true } : {}),
-          },
-        })
-      : Promise.reject("Failed to instantiate otel ingestion queue");
   }
 
   /**

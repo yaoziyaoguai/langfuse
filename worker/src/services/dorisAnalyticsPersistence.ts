@@ -6,6 +6,8 @@ import { prisma } from "@langfuse/shared/src/db";
 import {
   DorisStreamLoadClient,
   getS3EventStorageClient,
+  PromptService,
+  redis,
   parseDorisStreamLoadConfig,
   type ResourceSpan,
   type StorageService,
@@ -23,6 +25,11 @@ import {
   type DorisStreamLoadTransport,
 } from "./AnalyticsWriter/DorisBatchSink";
 import type { EventCanonicalizer } from "./EventCanonicalizer";
+import { EventCanonicalizer as ProductionEventCanonicalizer } from "./EventCanonicalizer";
+import {
+  AnalyticsGenerationUsageResolver,
+  warnOnUsageTotalMismatch,
+} from "./AnalyticsGenerationUsageResolver";
 import { RawAnalyticsIngestionCanonicalizer } from "./RawAnalyticsIngestionCanonicalizer";
 
 type RuntimeEnvironment = {
@@ -66,7 +73,7 @@ export function createDorisAnalyticsPersistence(input: {
   readonly streamLoadTransport?: DorisStreamLoadTransport;
   readonly databaseName?: string;
   readonly workerId?: string;
-  readonly eventCanonicalizer: EventCanonicalizer;
+  readonly eventCanonicalizer?: EventCanonicalizer;
   readonly maskOtlp?: (input: {
     readonly projectId: string;
     readonly resourceSpans: ResourceSpan[];
@@ -111,6 +118,8 @@ export function createDorisAnalyticsPersistence(input: {
     input.workerId ??
     `doris-writer-${hostname()}-${process.pid}-${randomUUID()}`;
   const client = input.prismaClient ?? prisma;
+  const eventCanonicalizer =
+    input.eventCanonicalizer ?? createProductionEventCanonicalizer();
   const writer = new AnalyticsWriter({
     client,
     artifactStore: new CanonicalIngestionArtifactStore(
@@ -124,7 +133,7 @@ export function createDorisAnalyticsPersistence(input: {
   const canonicalizer = new RawAnalyticsIngestionCanonicalizer({
     client,
     storageService,
-    eventCanonicalizer: input.eventCanonicalizer,
+    eventCanonicalizer,
     maskOtlp: input.maskOtlp,
   });
 
@@ -138,4 +147,27 @@ export function createDorisAnalyticsPersistence(input: {
     }),
     workerId,
   };
+}
+
+function createProductionEventCanonicalizer(): EventCanonicalizer {
+  if (!redis) {
+    throw new Error("Redis is required for Doris analytics enrichment");
+  }
+  const promptService = new PromptService(prisma, redis);
+  const usageResolver = new AnalyticsGenerationUsageResolver();
+  return new ProductionEventCanonicalizer({
+    warnOnUsageTotalMismatch,
+    resolvePrompt: async ({ projectId, promptName, promptVersion }) => {
+      const prompt = await promptService.getPrompt({
+        projectId,
+        promptName,
+        version: promptVersion,
+        label: undefined,
+      });
+      return prompt
+        ? { id: prompt.id, name: prompt.name, version: prompt.version }
+        : null;
+    },
+    resolveGenerationUsage: usageResolver.resolve,
+  });
 }

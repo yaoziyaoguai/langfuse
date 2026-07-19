@@ -26,11 +26,9 @@ const W3C_TRACE_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 /**
  * Publishes internally captured OTel spans through the regular OTel ingestion
- * pipeline (same S3 + queue path as the public /api/public/otel/v1/traces
- * endpoint), so internal traces get exactly the same write treatment as user
- * traces: legacy traces/observations tables and events tables per the V4
- * migration flags. Shared by the AI-SDK judge capture (`createAiSdkTelemetryCapture`)
- * and `writeInternalTraceViaOtelIngestion`.
+ * pipeline (same durable raw receipt + outbox path as the public
+ * /api/public/otel/v1/traces endpoint). Shared by the AI-SDK judge capture
+ * (`createAiSdkTelemetryCapture`) and `writeInternalTraceViaOtelIngestion`.
  */
 export async function publishInternalOtelSpans(params: {
   spans: ReadableSpan[];
@@ -49,13 +47,7 @@ export async function publishInternalOtelSpans(params: {
     publicKey: "", // internal ingestion has no API key; mirrors internal event writes
     sdkName: params.sdkName,
     sdkVersion: "unknown",
-    // Opt into the v4-native direct events write like a modern SDK batch:
-    // only that path runs processToEvent -> createEventRecord, which is
-    // the sole extractor of langfuse.experiment.* into experiment_*
-    // columns. Without it, dual-write mode routes internal batches
-    // (unknown SDK, no scope version) through legacy forwarding and
-    // experiment run items lose their linkage in events_full/v4 views.
-    // Legacy tables are still dual-written per v4WritesToLegacyTables.
+    // Keep the v4 protocol marker for source compatibility and diagnostics.
     ingestionVersion: "4",
     // The consumer must parse these events with the internal ingestion
     // schema; the public schema strips the "langfuse-" environment prefix,
@@ -64,7 +56,7 @@ export async function publishInternalOtelSpans(params: {
     isLangfuseInternal: true,
   });
 
-  await processor.publishToOtelIngestionQueue(resourceSpans);
+  await processor.publishToAnalyticsIngestion(resourceSpans);
 }
 
 /**

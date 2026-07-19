@@ -150,6 +150,22 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(100 * 1024 * 1024),
+  LANGFUSE_ANALYTICS_INGESTION_WORKER_CONCURRENCY: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(4),
+  LANGFUSE_ANALYTICS_INGESTION_OUTBOX_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .default(500),
+  LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(100),
   LANGFUSE_EVAL_CREATOR_LIMITER_DURATION: z.coerce
     .number()
     .positive()

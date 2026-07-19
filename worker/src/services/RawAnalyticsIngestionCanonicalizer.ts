@@ -158,6 +158,7 @@ export class RawAnalyticsIngestionCanonicalizer {
           operation,
           payload: envelope.payload,
           attribution: envelope.attribution,
+          isLangfuseInternal: envelope.isLangfuseInternal,
           projectDeletionGeneration,
           traceDeletionGeneration,
         });
@@ -199,6 +200,7 @@ export class RawAnalyticsIngestionCanonicalizer {
       ingestionSdkName: string;
       ingestionSdkVersion: string;
     };
+    isLangfuseInternal?: boolean;
     projectDeletionGeneration: bigint;
     traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
   }): Promise<CanonicalAnalyticsEntityClaim[]> {
@@ -215,6 +217,7 @@ export class RawAnalyticsIngestionCanonicalizer {
       publicKey: input.attribution.ingestionApiKey,
       sdkName: input.attribution.ingestionSdkName,
       sdkVersion: input.attribution.ingestionSdkVersion,
+      isLangfuseInternal: input.isLangfuseInternal,
     });
     const eventInputs = processor.processToEvent(resourceSpans);
     const rawSpans = resourceSpans.flatMap((resourceSpan) =>
