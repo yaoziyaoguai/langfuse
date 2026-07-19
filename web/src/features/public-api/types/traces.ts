@@ -116,6 +116,11 @@ export const DeleteTraceV1Query = z.object({
 export const DeleteTraceV1Response = z
   .object({
     message: z.string(),
+    deletionOperationId: z.string().optional(),
+    status: z
+      .enum(["scheduled", "retrying", "needs_attention", "completed"])
+      .optional(),
+    logicallyInvisible: z.boolean().optional(),
   })
   .strict();
 
@@ -131,5 +136,20 @@ export const DeleteTracesV1Body = z
 export const DeleteTracesV1Response = z
   .object({
     message: z.string(),
+    deletionOperations: z
+      .array(
+        z.object({
+          deletionOperationId: z.string(),
+          traceId: z.string(),
+          status: z.enum([
+            "scheduled",
+            "retrying",
+            "needs_attention",
+            "completed",
+          ]),
+          logicallyInvisible: z.boolean(),
+        }),
+      )
+      .optional(),
   })
   .strict();

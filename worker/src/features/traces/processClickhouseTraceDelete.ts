@@ -12,7 +12,7 @@ import { env, v4WritesToEventsTable } from "../../env";
 import { Prisma, prisma } from "@langfuse/shared/src/db";
 import { chunk } from "lodash";
 
-const deleteMediaItemsForTraces = async (
+export const deleteMediaItemsForTraces = async (
   projectId: string,
   traceIds: string[],
 ): Promise<void> => {

@@ -812,9 +812,9 @@ export default function ObservationsEventsTable({
   const traceDeleteMutation = api.traces.deleteMany.useMutation({
     onSuccess: () => {
       showSuccessToast({
-        title: "Traces deleted",
+        title: "Trace deletion requested",
         description:
-          "Selected traces will be deleted. Traces are removed asynchronously and may continue to be visible for up to 15 minutes.",
+          "Each trace becomes unavailable after its deletion barrier is confirmed. Doris and media cleanup continue asynchronously; raw and canonical ingestion objects expire within 7 days.",
       });
     },
     onSettled: () => {
@@ -910,7 +910,7 @@ export default function ObservationsEventsTable({
             id: ActionId.TraceDelete,
             type: BatchActionType.Delete,
             label: "Delete Traces",
-            description: `${itemCountDisplay} ${selectedItemCount === 1 ? "item is" : "items are"} selected, spanning ${traceCountDisplay} unique ${selectedUniqueTraceCount === 1 ? "trace" : "traces"}. A trace is always deleted as a whole — if at least one of its observations is selected, all of its observations are deleted with it. This action cannot be undone. Trace deletion happens asynchronously and may take up to 24 hours.`,
+            description: `${itemCountDisplay} ${selectedItemCount === 1 ? "item is" : "items are"} selected, spanning ${traceCountDisplay} unique ${selectedUniqueTraceCount === 1 ? "trace" : "traces"}. A trace is always deleted as a whole — if at least one observation is selected, the entire trace is included. A confirmed barrier makes it logically unavailable before asynchronous Doris and media cleanup; raw and canonical ingestion objects expire within 7 days.`,
             // Select-all is not gated on the visible-page selection; if that
             // selection drained to empty, dispatch fails loudly with the
             // server's min-1 traceIds rejection (as in the v3 traces table).

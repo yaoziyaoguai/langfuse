@@ -172,26 +172,7 @@ function decodeField(
 }
 
 export function toEventIdentity(encoded: string): EventIdentity {
-  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
-    throw new Error("Event identity is malformed");
-  }
-  const bytes = Buffer.from(encoded, "base64url");
-  if (bytes.toString("base64url") !== encoded) {
-    throw new Error("Event identity is malformed");
-  }
-  const prefix = Buffer.from("event\0", "ascii");
-  if (!bytes.subarray(0, prefix.byteLength).equals(prefix)) {
-    throw new Error("Event identity is malformed");
-  }
-  const fields: string[] = [];
-  let offset = prefix.byteLength;
-  for (let index = 0; index < 3; index += 1) {
-    const decoded = decodeField(bytes, offset);
-    fields.push(decoded.value);
-    offset = decoded.nextOffset;
-  }
-  if (offset !== bytes.byteLength)
-    throw new Error("Event identity is malformed");
+  const fields = decodeIdentityFields(encoded, "event", 3);
   const identity = {
     projectId: fields[0] ?? "",
     traceId: fields[1] ?? "",
@@ -199,6 +180,60 @@ export function toEventIdentity(encoded: string): EventIdentity {
   };
   encodeEventIdentity(identity);
   return identity;
+}
+
+export function toScoreIdentity(encoded: string): ScoreIdentity {
+  const fields = decodeIdentityFields(encoded, "score", 2);
+  const identity = {
+    projectId: fields[0] ?? "",
+    scoreId: fields[1] ?? "",
+  };
+  encodeScoreIdentity(identity);
+  return identity;
+}
+
+export function toFileReferenceIdentity(
+  encoded: string,
+): FileReferenceIdentity {
+  const fields = decodeIdentityFields(encoded, "file-reference", 4);
+  const identity = {
+    projectId: fields[0] ?? "",
+    entityType: fields[1] as FileReferenceIdentity["entityType"],
+    entityId: fields[2] ?? "",
+    fileId: fields[3] ?? "",
+  };
+  if (identity.entityType !== "EVENT" && identity.entityType !== "SCORE") {
+    throw new Error("File-reference identity is malformed");
+  }
+  encodeFileReferenceIdentity(identity);
+  return identity;
+}
+
+function decodeIdentityFields(
+  encoded: string,
+  domain: "event" | "score" | "file-reference",
+  fieldCount: number,
+): string[] {
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new Error("Identity is malformed");
+  }
+  const bytes = Buffer.from(encoded, "base64url");
+  if (bytes.toString("base64url") !== encoded) {
+    throw new Error("Identity is malformed");
+  }
+  const prefix = Buffer.from(`${domain}\0`, "ascii");
+  if (!bytes.subarray(0, prefix.byteLength).equals(prefix)) {
+    throw new Error("Identity is malformed");
+  }
+  const fields: string[] = [];
+  let offset = prefix.byteLength;
+  for (let index = 0; index < fieldCount; index += 1) {
+    const decoded = decodeField(bytes, offset);
+    fields.push(decoded.value);
+    offset = decoded.nextOffset;
+  }
+  if (offset !== bytes.byteLength) throw new Error("Identity is malformed");
+  return fields;
 }
 
 function lengthPrefix(value: string): string {

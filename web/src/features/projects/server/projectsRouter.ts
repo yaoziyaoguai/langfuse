@@ -16,6 +16,8 @@ import {
   redis,
   ProjectDeleteQueue,
   getEnvironmentsForProject,
+  isDorisAnalyticsBackend,
+  scheduleProjectDeletionOperation,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
 import { StringNoHTMLNonEmpty } from "@langfuse/shared";
@@ -178,6 +180,26 @@ export const projectsRouter = createTRPCRouter({
         scope: "project:delete",
       });
 
+      const projectDeleteQueue = ProjectDeleteQueue.getInstance();
+      if (!projectDeleteQueue) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            "ProjectDeleteQueue is not available. Please try again later.",
+        });
+      }
+
+      const deletionOperation = isDorisAnalyticsBackend()
+        ? await scheduleProjectDeletionOperation({
+            projectId: input.projectId,
+            organizationId: ctx.session.orgId,
+            requester: {
+              principalType: "user",
+              principalId: ctx.session.user.id,
+            },
+          })
+        : null;
+
       // API keys need to be deleted from cache. Otherwise, they will still be valid.
       await new ApiAuthService(
         ctx.prisma,
@@ -210,26 +232,35 @@ export const projectsRouter = createTRPCRouter({
         action: "delete",
       });
 
-      const projectDeleteQueue = ProjectDeleteQueue.getInstance();
-      if (!projectDeleteQueue) {
-        throw new TRPCError({
-          code: "INTERNAL_SERVER_ERROR",
-          message:
-            "ProjectDeleteQueue is not available. Please try again later.",
-        });
-      }
-
       await projectDeleteQueue.add(QueueJobs.ProjectDelete, {
         timestamp: new Date(),
         id: randomUUID(),
         payload: {
           projectId: input.projectId,
           orgId: ctx.session.orgId,
+          ...(deletionOperation
+            ? {
+                deletionOperationId: deletionOperation.id,
+                deletionGeneration: deletionOperation.generation.toString(),
+              }
+            : {}),
         },
         name: QueueJobs.ProjectDelete,
       });
 
-      return true;
+      return deletionOperation
+        ? {
+            deletionOperationId: deletionOperation.id,
+            status: deletionOperation.status.toLowerCase(),
+            phase: deletionOperation.phase,
+            logicallyInvisible: deletionOperation.logicallyInvisible,
+          }
+        : {
+            deletionOperationId: null,
+            status: "scheduled",
+            phase: "legacy_cleanup",
+            logicallyInvisible: false,
+          };
     }),
 
   transfer: protectedProjectProcedure

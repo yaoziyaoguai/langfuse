@@ -524,9 +524,9 @@ export default function TracesTable({
   const traceDeleteMutation = api.traces.deleteMany.useMutation({
     onSuccess: () => {
       showSuccessToast({
-        title: "Traces deleted",
+        title: "Trace deletion requested",
         description:
-          "Selected traces will be deleted. Traces are removed asynchronously and may continue to be visible for up to 15 minutes.",
+          "Each trace becomes unavailable after its deletion barrier is confirmed. Doris and media cleanup continue asynchronously; raw and canonical ingestion objects expire within 7 days.",
       });
     },
     onSettled: () => {
@@ -615,7 +615,7 @@ export default function TracesTable({
             id: ActionId.TraceDelete,
             type: BatchActionType.Delete,
             label: "Delete Traces",
-            description: `This action permanently deletes ${displayCount} traces and cannot be undone. Trace deletion happens asynchronously and may take up to 24 hours.`,
+            description: `This action requests deletion of ${displayCount} traces and cannot be undone. A confirmed barrier makes each trace logically unavailable before asynchronous Doris and media cleanup. Raw and canonical ingestion objects expire within 7 days.`,
             disabled: selectAll && hasCommentFilter,
             disabledReason:
               "Batch deletion does not support comment filters. Remove the comment filter to delete.",

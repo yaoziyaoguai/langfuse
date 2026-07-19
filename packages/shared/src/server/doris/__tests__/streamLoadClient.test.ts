@@ -71,6 +71,51 @@ describe("DorisStreamLoadClient", () => {
     ).resolves.toMatchObject({ committed: true, numberTotalRows: 1 });
   });
 
+  it("sends explicit batch-delete headers for lifecycle key loads", async () => {
+    const fe = await listen((req, res) => {
+      expect(req.headers.merge_type).toBe("DELETE");
+      expect(req.headers.columns).toBe(
+        "project_id,partition_date,trace_id,span_id,version_token",
+      );
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            Status: "Success",
+            Label: "trace_delete_1",
+            NumberTotalRows: 1,
+            NumberFilteredRows: 0,
+          }),
+        );
+      });
+    });
+    const client = new DorisStreamLoadClient({
+      feOrigin: fe.origin,
+      database: "langfuse",
+      user: "load",
+      password: "secret",
+      requireTls: false,
+      allowedRedirectOrigins: [],
+    });
+
+    await expect(
+      client.load({
+        table: "events_current",
+        label: "trace_delete_1",
+        ndjsonBody: "{}\n",
+        columns: [
+          "project_id",
+          "partition_date",
+          "trace_id",
+          "span_id",
+          "version_token",
+        ],
+        mergeType: "DELETE",
+      }),
+    ).resolves.toMatchObject({ committed: true });
+  });
+
   it("rejects an unallowlisted redirect before contacting the target", async () => {
     const target = vi.fn();
     const hostile = await listen((req, res) => {

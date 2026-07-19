@@ -94,10 +94,28 @@ export const TraceQueueEventSchema = z.object({
   traceId: z.string(),
   exactTimestamp: z.date().optional(),
   traceEnvironment: z.string().optional(), // Optional to maintain backward compatibility with existing jobs in queue during deployment. 'optional()' can be removed after queue was exhausted
+  deletionOperations: z
+    .array(
+      z.object({
+        operationId: z.string().min(1),
+        traceId: z.string().min(1),
+        generation: z.string().regex(/^\d+$/),
+      }),
+    )
+    .optional(),
 });
 export const TracesQueueEventSchema = z.object({
   projectId: z.string(),
   traceIds: z.array(z.string()),
+  deletionOperations: z
+    .array(
+      z.object({
+        operationId: z.string().min(1),
+        traceId: z.string().min(1),
+        generation: z.string().regex(/^\d+$/),
+      }),
+    )
+    .optional(),
 });
 export const ScoresQueueEventSchema = z.object({
   projectId: z.string(),
@@ -121,6 +139,8 @@ export const DatasetQueueEventSchema = z.discriminatedUnion("deletionType", [
 export const ProjectQueueEventSchema = z.object({
   projectId: z.string(),
   orgId: z.string(),
+  deletionOperationId: z.string().min(1).optional(),
+  deletionGeneration: z.string().regex(/^\d+$/).optional(),
 });
 export const DatasetRunItemUpsertEventSchema = z.object({
   projectId: z.string(),

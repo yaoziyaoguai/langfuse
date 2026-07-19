@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalPayloadHash,
   encodeEventIdentity,
+  encodeFileReferenceIdentity,
+  encodeScoreIdentity,
   INT64_MAX,
   INT64_MIN,
   normalizeVersionToken,
   partitionDateFromVersionToken,
   toEventIdentity,
+  toFileReferenceIdentity,
+  toScoreIdentity,
   type EventIdentity,
 } from "../canonicalHash";
 
@@ -77,6 +81,22 @@ describe("event identity", () => {
     expect(() =>
       toEventIdentity(`${encodeEventIdentity(identity)}=`),
     ).toThrow();
+  });
+});
+
+describe("deletion identity decoding", () => {
+  it("round-trips score and file-reference primary keys", () => {
+    const score = { projectId: "project-1", scoreId: "score-1" };
+    const file = {
+      projectId: "project-1",
+      entityType: "EVENT" as const,
+      entityId: "span-1",
+      fileId: "file-1",
+    };
+    expect(toScoreIdentity(encodeScoreIdentity(score))).toEqual(score);
+    expect(toFileReferenceIdentity(encodeFileReferenceIdentity(file))).toEqual(
+      file,
+    );
   });
 });
 

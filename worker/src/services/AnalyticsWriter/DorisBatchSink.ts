@@ -58,6 +58,8 @@ export interface DorisStreamLoadTransport {
     readonly table: string;
     readonly label: string;
     readonly ndjsonBody: string | Buffer;
+    readonly columns?: readonly string[];
+    readonly mergeType?: "APPEND" | "DELETE";
   }): Promise<DorisStreamLoadResult>;
   reconcile(input: {
     readonly database?: string;

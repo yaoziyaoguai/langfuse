@@ -63,8 +63,12 @@ export function DeleteProjectButton() {
       .mutateAsync({
         projectId: project.id,
       })
-      .then(() => {
-        window.location.href = env.NEXT_PUBLIC_BASE_PATH ?? "/"; // browser reload to refresh jwt
+      .then((result) => {
+        const basePath = env.NEXT_PUBLIC_BASE_PATH ?? "";
+        window.location.href =
+          result.deletionOperationId && organization
+            ? `${basePath}/organization/${organization.id}/deletions/${result.deletionOperationId}`
+            : basePath || "/"; // browser reload to refresh jwt
       })
       .catch((error) => {
         console.error(error);
@@ -84,7 +88,7 @@ export function DeleteProjectButton() {
             Delete Project
           </DialogTitle>
           <DialogDescription className=" ">
-            {`To confirm, type "${confirmMessage}" in the input box `}
+            {`To confirm, type "${confirmMessage}" below. A durable barrier first makes the project logically unavailable, then Doris and media cleanup continue asynchronously. Raw and canonical ingestion objects expire within 7 days.`}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>

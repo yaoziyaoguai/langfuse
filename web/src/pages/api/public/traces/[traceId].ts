@@ -218,9 +218,28 @@ export default withMiddlewares(
           orgId: auth.scope.orgId,
         });
 
-        await traceDeletionProcessor(auth.scope.projectId, [traceId]);
+        const [deletionOperation] = await traceDeletionProcessor(
+          auth.scope.projectId,
+          [traceId],
+          {
+            organizationId: auth.scope.orgId,
+            requester: {
+              principalType: "api_key",
+              principalId: auth.scope.apiKeyId,
+            },
+          },
+        );
 
-        return { message: "Trace deleted successfully" };
+        return {
+          message: "Trace deletion requested",
+          ...(deletionOperation
+            ? {
+                deletionOperationId: deletionOperation.deletionOperationId,
+                status: deletionOperation.status,
+                logicallyInvisible: deletionOperation.logicallyInvisible,
+              }
+            : {}),
+        };
       },
     }),
   },

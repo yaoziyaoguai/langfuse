@@ -6,7 +6,12 @@ import {
   normalizeVersionToken,
 } from "@langfuse/shared/analytics-persistence";
 import {
+  DorisAnalyticsLifecycleStore,
+  DorisTracesRepository,
   StorageServiceFactory,
+  getDeletionProgressForProject,
+  scheduleProjectDeletionOperation,
+  scheduleTraceDeletionOperations,
   type StorageService,
 } from "@langfuse/shared/src/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -18,6 +23,12 @@ import { createDorisAnalyticsPersistence } from "../dorisAnalyticsPersistence";
 import { EventCanonicalizer } from "../EventCanonicalizer";
 import { publishAnalyticsIngestionOutboxBatch } from "../../queues/analyticsIngestionQueue";
 import { QueueName, type TQueueJobTypes } from "@langfuse/shared/src/server";
+import {
+  DorisMaterializedDeletionWriter,
+  type DorisAnalyticsLifecycleRuntime,
+} from "../dorisAnalyticsLifecycle";
+import { processAnalyticsTraceDelete } from "../../features/traces/processAnalyticsTraceDelete";
+import { processAnalyticsProjectDelete } from "../../features/projects/processAnalyticsProjectDelete";
 
 const ENABLED =
   process.env.DORIS_POC_ENABLED === "1" &&
@@ -52,6 +63,8 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   let admin: DorisPoCMysqlClient;
   let doris: DorisPoCMysqlClient;
   let storage: StorageService;
+  let streamLoad: DorisPoCStreamLoadClient;
+  let lifecycle: DorisAnalyticsLifecycleRuntime;
 
   beforeAll(async () => {
     storage = StorageServiceFactory.getInstance({
@@ -67,6 +80,69 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
     await admin.execute(`CREATE DATABASE IF NOT EXISTS ${DB}`);
     await runMigrations({ ...dorisConfig, database: DB });
     doris = new DorisPoCMysqlClient({ ...dorisConfig, database: DB });
+    streamLoad = new DorisPoCStreamLoadClient({
+      feHttpOrigin:
+        process.env.DORIS_POC_FE_HTTP_ORIGIN ?? "http://127.0.0.1:8031",
+      user: dorisConfig.user,
+      password: dorisConfig.password,
+      defaultDatabase: DB,
+      beRedirectAllowlist: {
+        "172.28.0.3:8040": "http://127.0.0.1:8041",
+      },
+      reconcileLabelStatus: async (label) => {
+        const rows = await doris.query<{ status: string }>(
+          "SHOW TRANSACTION WHERE label = ?",
+          [label],
+        );
+        const status = rows[0]?.status ?? "UNKNOWN";
+        return { status, visible: status === "VISIBLE" };
+      },
+    });
+    const lifecycleTransport = {
+      load: async (input: {
+        table: string;
+        database?: string;
+        label: string;
+        ndjsonBody: string | Buffer;
+        columns?: readonly string[];
+        mergeType?: "APPEND" | "DELETE";
+      }) => {
+        const result = await streamLoad.streamLoad({
+          table: input.table,
+          database: input.database,
+          label: input.label,
+          ndjsonBody: input.ndjsonBody.toString(),
+          columns: input.columns,
+          mergeType: input.mergeType,
+        });
+        if (result.status !== "Success") {
+          throw new Error(
+            `Doris PoC load failed with ${result.status}: ${result.message}`,
+          );
+        }
+        return {
+          status: result.status,
+          label: result.label,
+          numberTotalRows: result.numberTotalRows,
+          numberFilteredRows: result.numberFilteredRows,
+          committed: result.committed,
+          requiresReconciliation: streamLoad.isUnknownOutcome(result),
+        };
+      },
+      reconcile: (input: { label: string }) =>
+        streamLoad.reconcile({ label: input.label }),
+    };
+    lifecycle = {
+      store: new DorisAnalyticsLifecycleStore({
+        streamLoad: lifecycleTransport,
+        query: doris.query.bind(doris),
+        getDeletionProgress: (input) =>
+          getDeletionProgressForProject({ ...input, client: prisma }),
+      }),
+      materializedDeletion: new DorisMaterializedDeletionWriter(
+        lifecycleTransport,
+      ),
+    };
     await prisma.organization.create({
       data: { id: organizationId, name: "Doris writer real-path test" },
     });
@@ -84,6 +160,12 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
     if (files.length > 0) {
       await storage.deleteFiles(files.map(({ file }) => file));
     }
+    await prisma.analyticsDeletionOperation.deleteMany({
+      where: { projectId },
+    });
+    await prisma.analyticsProjectDeletionGeneration.deleteMany({
+      where: { projectId },
+    });
     await prisma.organization.deleteMany({ where: { id: organizationId } });
     await prisma.$disconnect();
     await doris?.end();
@@ -197,24 +279,6 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       acceptedAtNanos: acceptedAt,
       canonicalizerVersion: "1",
       schemaVersion: 3,
-    });
-    const streamLoad = new DorisPoCStreamLoadClient({
-      feHttpOrigin:
-        process.env.DORIS_POC_FE_HTTP_ORIGIN ?? "http://127.0.0.1:8031",
-      user: dorisConfig.user,
-      password: dorisConfig.password,
-      defaultDatabase: DB,
-      beRedirectAllowlist: {
-        "172.28.0.3:8040": "http://127.0.0.1:8041",
-      },
-      reconcileLabelStatus: async (label) => {
-        const rows = await doris.query<{ status: string }>(
-          "SHOW TRANSACTION WHERE label = ?",
-          [label],
-        );
-        const status = rows[0]?.status ?? "UNKNOWN";
-        return { status, visible: status === "VISIBLE" };
-      },
     });
     const { processor } = createDorisAnalyticsPersistence({
       runtimeEnv: {
@@ -359,5 +423,105 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
     expect(
       scoreOperation.loadBatches.every(({ status }) => status === "VISIBLE"),
     ).toBe(true);
+  }, 120_000);
+
+  it("deletes trace and project data behind visible barriers without deleting lifecycle-owned raw objects", async () => {
+    const rawObjectsBefore = await storage.listFiles(canonicalPrefix);
+    expect(rawObjectsBefore.some(({ file }) => file === rawObjectKey)).toBe(
+      true,
+    );
+    const [traceDeletion] = await scheduleTraceDeletionOperations({
+      client: prisma,
+      projectId,
+      organizationId,
+      traceIds: [traceId],
+      requester: { principalType: "user", principalId: "writer-e2e-owner" },
+    });
+    await processAnalyticsTraceDelete(
+      projectId,
+      {
+        operationId: traceDeletion!.operation.id,
+        traceId,
+        generation: traceDeletion!.generation,
+      },
+      lifecycle,
+    );
+
+    const traces = new DorisTracesRepository({
+      query: doris.query.bind(doris),
+    });
+    await expect(traces.get({ projectId, traceId })).resolves.toBeNull();
+    const [traceOperation, tombstone, eventRows, scoreRows, fileRows] =
+      await Promise.all([
+        prisma.analyticsDeletionOperation.findUniqueOrThrow({
+          where: { id: traceDeletion!.operation.id },
+        }),
+        doris.query<{ deletion_generation: string | number }>(
+          "SELECT deletion_generation FROM trace_tombstones WHERE project_id = ? AND trace_id = ?",
+          [projectId, traceId],
+        ),
+        doris.query(
+          "SELECT span_id FROM events_current WHERE project_id = ? AND trace_id = ?",
+          [projectId, traceId],
+        ),
+        doris.query(
+          "SELECT score_id FROM scores_current WHERE project_id = ? AND trace_id = ?",
+          [projectId, traceId],
+        ),
+        doris.query(
+          "SELECT file_id FROM blob_storage_file_log WHERE project_id = ?",
+          [projectId],
+        ),
+      ]);
+    expect(traceOperation).toMatchObject({
+      status: "COMPLETED",
+      phase: "completed",
+      logicallyInvisible: true,
+    });
+    expect(String(tombstone[0]!.deletion_generation)).toBe("1");
+    expect(eventRows).toHaveLength(0);
+    expect(scoreRows).toHaveLength(0);
+    expect(fileRows).toHaveLength(0);
+    const rawObjectsAfterTraceDelete = await storage.listFiles(canonicalPrefix);
+    expect(
+      rawObjectsAfterTraceDelete.some(({ file }) => file === rawObjectKey),
+    ).toBe(true);
+
+    const projectDeletion = await scheduleProjectDeletionOperation({
+      client: prisma,
+      projectId,
+      organizationId,
+      requester: { principalType: "user", principalId: "writer-e2e-owner" },
+    });
+    await processAnalyticsProjectDelete(
+      {
+        projectId,
+        organizationId,
+        reference: {
+          operationId: projectDeletion.id,
+          generation: projectDeletion.generation,
+        },
+      },
+      lifecycle,
+    );
+    await expect(
+      prisma.project.findUnique({ where: { id: projectId } }),
+    ).resolves.toBeNull();
+    await expect(
+      prisma.analyticsDeletionOperation.findUniqueOrThrow({
+        where: { id: projectDeletion.id },
+      }),
+    ).resolves.toMatchObject({
+      organizationId,
+      projectId,
+      status: "COMPLETED",
+      logicallyInvisible: true,
+    });
+    await expect(
+      doris.query(
+        "SELECT project_id FROM project_tombstones WHERE project_id = ?",
+        [projectId],
+      ),
+    ).resolves.toHaveLength(1);
   }, 120_000);
 });

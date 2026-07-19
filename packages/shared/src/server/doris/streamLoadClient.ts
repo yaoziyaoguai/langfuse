@@ -35,6 +35,7 @@ export interface DorisStreamLoadRequest {
   readonly label: string;
   readonly ndjsonBody: string | Buffer;
   readonly columns?: readonly string[];
+  readonly mergeType?: "APPEND" | "DELETE";
 }
 
 export interface DorisStreamLoadResult {
@@ -284,6 +285,7 @@ export class DorisStreamLoadClient {
         read_json_by_line: "true",
       };
       if (request.columns?.length) headers.columns = request.columns.join(",");
+      if (request.mergeType) headers.merge_type = request.mergeType;
 
       const req = transport.request(
         url,

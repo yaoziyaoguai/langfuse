@@ -216,9 +216,24 @@ export default withMiddlewares(
           ),
         );
 
-        await traceDeletionProcessor(auth.scope.projectId, traceIds);
+        const deletionOperations = await traceDeletionProcessor(
+          auth.scope.projectId,
+          traceIds,
+          {
+            organizationId: auth.scope.orgId,
+            requester: {
+              principalType: "api_key",
+              principalId: auth.scope.apiKeyId,
+            },
+          },
+        );
 
-        return { message: "Traces deleted successfully" };
+        return {
+          message: "Trace deletion requested",
+          ...(deletionOperations.length > 0
+            ? { deletionOperations: [...deletionOperations] }
+            : {}),
+        };
       },
     }),
   },

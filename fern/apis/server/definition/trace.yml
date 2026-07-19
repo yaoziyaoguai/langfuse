@@ -204,6 +204,22 @@ types:
   DeleteTraceResponse:
     properties:
       message: string
+      deletionOperationId: optional<string>
+      status: optional<DeleteTraceStatus>
+      logicallyInvisible: optional<boolean>
+      deletionOperations: optional<list<TraceDeletionOperation>>
+  DeleteTraceStatus:
+    enum:
+      - scheduled
+      - retrying
+      - needs_attention
+      - completed
+  TraceDeletionOperation:
+    properties:
+      deletionOperationId: string
+      traceId: string
+      status: DeleteTraceStatus
+      logicallyInvisible: boolean
   Sort:
     properties:
       id: string

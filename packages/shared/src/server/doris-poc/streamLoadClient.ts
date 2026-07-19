@@ -62,6 +62,7 @@ export interface DorisPoCStreamLoadRequest {
   readonly label: string;
   /** Column list, needed when marking __DORIS_DELETE_SIGN__ for a delete. */
   readonly columns?: readonly string[];
+  readonly mergeType?: "APPEND" | "DELETE";
 }
 
 const UNKNOWN_RESPONSE_STATUSES = new Set(["Publish Timeout", "unknown", ""]);
@@ -180,6 +181,7 @@ export class DorisPoCStreamLoadClient {
     if (req.columns && req.columns.length > 0) {
       headers.columns = req.columns.join(",");
     }
+    if (req.mergeType) headers.merge_type = req.mergeType;
 
     const resp = await putExpectContinue(url, headers, body);
 

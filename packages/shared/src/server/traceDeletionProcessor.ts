@@ -5,10 +5,24 @@ import { QueueJobs } from "./queues";
 import { logger } from "./logger";
 import { env } from "../env";
 import { shouldSkipDeletionFor } from "./deletionGuard";
+import {
+  scheduleTraceDeletionOperations,
+  type AnalyticsDeletionRequester,
+} from "./repositories/analyticsDeletionOperations";
+import { isDorisAnalyticsBackend } from "./repositories/telemetry/doris/runtime";
 
 export interface TraceDeletionProcessorOptions {
   delayMs?: number; // Default from LANGFUSE_TRACE_DELETE_DELAY_MS env var
+  organizationId?: string;
+  requester?: AnalyticsDeletionRequester;
 }
+
+export type TraceDeletionDispatch = {
+  readonly deletionOperationId: string;
+  readonly traceId: string;
+  readonly status: "scheduled" | "retrying" | "needs_attention" | "completed";
+  readonly logicallyInvisible: boolean;
+};
 
 /**
  * Efficient trace deletion processor that batches deletions for better performance.
@@ -27,14 +41,14 @@ export async function traceDeletionProcessor(
   projectId: string,
   traceIds: string[],
   options: TraceDeletionProcessorOptions = {},
-): Promise<void> {
+): Promise<readonly TraceDeletionDispatch[]> {
   const { delayMs = env.LANGFUSE_TRACE_DELETE_DELAY_MS } = options;
 
   if (traceIds.length === 0) {
     logger.warn("traceDeletionProcessor called with empty traceIds array", {
       projectId,
     });
-    return;
+    return [];
   }
 
   logger.info(
@@ -47,10 +61,28 @@ export async function traceDeletionProcessor(
   );
 
   if (await shouldSkipDeletionFor(projectId, traceIds, "trace")) {
-    return; // Early return - don't create pending_deletions or queue job
+    return []; // Early return - don't create pending_deletions or queue job
   }
 
   try {
+    const project = isDorisAnalyticsBackend()
+      ? await prisma.project.findUniqueOrThrow({
+          where: { id: projectId },
+          select: { orgId: true },
+        })
+      : null;
+    const scheduled = project
+      ? await scheduleTraceDeletionOperations({
+          projectId,
+          organizationId: options.organizationId ?? project.orgId,
+          traceIds,
+          requester: options.requester ?? {
+            principalType: "system",
+            principalId: "trace-deletion-processor",
+          },
+        })
+      : [];
+
     // Create pending deletion records for all traces
     await prisma.pendingDeletion.createMany({
       data: traceIds.map((traceId) => ({
@@ -78,12 +110,29 @@ export async function traceDeletionProcessor(
         payload: {
           projectId,
           traceIds,
+          ...(scheduled.length > 0
+            ? {
+                deletionOperations: scheduled.map(
+                  ({ operation, traceId, generation }) => ({
+                    operationId: operation.id,
+                    traceId,
+                    generation: generation.toString(),
+                  }),
+                ),
+              }
+            : {}),
         },
       },
       {
         delay: delayMs,
       },
     );
+    return scheduled.map(({ operation, traceId }) => ({
+      deletionOperationId: operation.id,
+      traceId,
+      status: operation.status.toLowerCase() as TraceDeletionDispatch["status"],
+      logicallyInvisible: operation.logicallyInvisible,
+    }));
   } catch (error) {
     logger.error(`Failed to process trace deletion for project ${projectId}`, {
       projectId,

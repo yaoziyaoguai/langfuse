@@ -3,6 +3,7 @@ export interface TraceTombstoneRequest {
   readonly projectId: string;
   readonly traceId: string;
   readonly generation: bigint;
+  readonly createdAt: Date;
 }
 
 export interface TraceTombstoneResult {
@@ -10,6 +11,7 @@ export interface TraceTombstoneResult {
   readonly traceId: string;
   readonly generation: bigint;
   readonly visible: boolean;
+  readonly barrierLabel: string;
 }
 
 export interface AnalyticsDeletionProgress {
@@ -19,10 +21,27 @@ export interface AnalyticsDeletionProgress {
   readonly logicallyInvisible: boolean;
 }
 
+export interface ProjectTombstoneRequest {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly generation: bigint;
+  readonly createdAt: Date;
+}
+
+export interface ProjectTombstoneResult {
+  readonly projectId: string;
+  readonly generation: bigint;
+  readonly visible: boolean;
+  readonly barrierLabel: string;
+}
+
 export interface AnalyticsLifecycleStore {
   publishTraceTombstone(
     request: TraceTombstoneRequest,
   ): Promise<TraceTombstoneResult>;
+  publishProjectTombstone(
+    request: ProjectTombstoneRequest,
+  ): Promise<ProjectTombstoneResult>;
   getDeletionProgress(input: {
     readonly operationId: string;
     readonly projectId: string;

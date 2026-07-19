@@ -239,9 +239,9 @@ export function DeleteTraceButton(props: DeleteButtonProps) {
       return Promise.reject(error);
     }
     showSuccessToast({
-      title: "Trace deleted",
+      title: "Trace deletion requested",
       description:
-        "Selected trace will be deleted. Traces are removed asynchronously and may continue to be visible for up to 24 hours.",
+        "The trace becomes unavailable after its deletion barrier is confirmed. Doris and media cleanup then continue asynchronously; raw and canonical ingestion objects expire within 7 days.",
     });
     onSuccess();
   };
@@ -262,6 +262,7 @@ export function DeleteTraceButton(props: DeleteButtonProps) {
         })
       }
       entityToDeleteName="trace"
+      customDeletePrompt="After confirmation, a deletion barrier makes the trace logically unavailable before asynchronous Doris and media cleanup. Raw and canonical ingestion objects are lifecycle-managed and expire within 7 days."
       executeDeleteMutation={executeDeleteMutation}
       isDeleteMutationLoading={traceMutation.isPending}
       enabled={hasTraceDeletionEntitlement}

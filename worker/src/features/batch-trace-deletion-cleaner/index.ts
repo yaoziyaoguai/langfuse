@@ -1,5 +1,6 @@
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  isDorisAnalyticsBackend,
   logger,
   recordIncrement,
   traceException,
@@ -8,6 +9,7 @@ import { env } from "../../env";
 import { PeriodicExclusiveRunner } from "../../utils/PeriodicExclusiveRunner";
 import { processClickhouseTraceDelete } from "../traces/processClickhouseTraceDelete";
 import { processPostgresTraceDelete } from "../traces/processPostgresTraceDelete";
+import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
 
 const METRIC_PREFIX = "langfuse.batch_trace_deletion_cleaner";
 
@@ -19,7 +21,7 @@ interface ProjectWorkload {
   pendingCount: number;
 }
 
-type TraceDeletionBackend = "postgres" | "clickhouse";
+type TraceDeletionBackend = "postgres" | "clickhouse" | "doris";
 type TraceDeletionFailure = {
   backend: TraceDeletionBackend;
   errorName: string;
@@ -162,27 +164,52 @@ export class BatchTraceDeletionCleaner extends PeriodicExclusiveRunner {
       count: traceIdsToDelete.length,
     });
 
-    const [postgresDeletion, clickhouseDeletion] = await Promise.allSettled([
-      processPostgresTraceDelete(projectId, traceIdsToDelete),
-      processClickhouseTraceDelete(projectId, traceIdsToDelete),
-    ]);
-
-    const failures: TraceDeletionFailure[] = [
-      { backend: "postgres" as const, result: postgresDeletion },
-      { backend: "clickhouse" as const, result: clickhouseDeletion },
-    ].flatMap(({ backend, result }) => {
-      if (result.status === "rejected") {
-        traceException(result.reason);
-        return [
+    const deletionTasks: Array<{
+      backend: TraceDeletionBackend;
+      promise: Promise<void>;
+    }> = isDorisAnalyticsBackend()
+      ? [
           {
-            backend,
-            errorName: getErrorName(result.reason),
+            backend: "doris",
+            promise: processAnalyticsTraceDeletionBatch({
+              projectId,
+              traceIds: traceIdsToDelete,
+            }),
+          },
+        ]
+      : [
+          {
+            backend: "postgres",
+            promise: processPostgresTraceDelete(projectId, traceIdsToDelete),
+          },
+          {
+            backend: "clickhouse",
+            promise: processClickhouseTraceDelete(projectId, traceIdsToDelete),
           },
         ];
-      }
+    const settled = await Promise.allSettled(
+      deletionTasks.map(({ promise }) => promise),
+    );
+    const deletionResults = deletionTasks.map(({ backend }, index) => ({
+      backend,
+      result: settled[index]!,
+    }));
 
-      return [];
-    });
+    const failures: TraceDeletionFailure[] = deletionResults.flatMap(
+      ({ backend, result }) => {
+        if (result.status === "rejected") {
+          traceException(result.reason);
+          return [
+            {
+              backend,
+              errorName: getErrorName(result.reason),
+            },
+          ];
+        }
+
+        return [];
+      },
+    );
 
     if (failures.length > 0) {
       recordIncrement(`${METRIC_PREFIX}.deletion_failures`, 1);

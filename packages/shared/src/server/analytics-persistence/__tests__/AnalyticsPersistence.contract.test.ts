@@ -354,6 +354,13 @@ describe("persistence boundaries", () => {
         traceId: input.traceId,
         generation: input.generation,
         visible: false,
+        barrierLabel: "trace-barrier",
+      }),
+      publishProjectTombstone: async (input) => ({
+        projectId: input.projectId,
+        generation: input.generation,
+        visible: false,
+        barrierLabel: "project-barrier",
       }),
       getDeletionProgress: async () => null,
     };
@@ -368,6 +375,7 @@ describe("persistence boundaries", () => {
         projectId: "project-1",
         traceId: "trace-1",
         generation: 2n,
+        createdAt: new Date("2026-07-18T00:00:00.000Z"),
       }),
     ).resolves.toMatchObject({ generation: 2n, visible: false });
   });

@@ -1,5 +1,6 @@
 export * from "./AnalyticsBatchSink";
 export * from "./AnalyticsLifecycleStore";
+export * from "./DorisAnalyticsLifecycleStore";
 export * from "./acceptAnalyticsIngestion";
 export * from "./canonicalHash";
 export * from "./errors";

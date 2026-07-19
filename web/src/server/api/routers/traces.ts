@@ -522,20 +522,32 @@ export const traceRouter = createTRPCRouter({
           query: input.query,
           useEventsTableOverride: declaresEventsTable ? true : undefined,
         });
-      } else {
-        await Promise.all(
-          input.traceIds.map((traceId) =>
-            auditLog({
-              resourceType: "trace",
-              resourceId: traceId,
-              action: "delete",
-              session: ctx.session,
-            }),
-          ),
-        );
-
-        await traceDeletionProcessor(input.projectId, input.traceIds);
+        return { deletionOperations: [] };
       }
+
+      await Promise.all(
+        input.traceIds.map((traceId) =>
+          auditLog({
+            resourceType: "trace",
+            resourceId: traceId,
+            action: "delete",
+            session: ctx.session,
+          }),
+        ),
+      );
+
+      const deletionOperations = await traceDeletionProcessor(
+        input.projectId,
+        input.traceIds,
+        {
+          organizationId: ctx.session.orgId,
+          requester: {
+            principalType: "user",
+            principalId: ctx.session.user.id,
+          },
+        },
+      );
+      return { deletionOperations };
     }),
   bookmark: protectedProjectProcedure
     .input(
