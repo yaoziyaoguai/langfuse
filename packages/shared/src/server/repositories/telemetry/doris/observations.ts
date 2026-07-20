@@ -591,6 +591,28 @@ export class DorisObservationsRepository {
     return this.listInternal(input, true);
   }
 
+  /**
+   * Batch exports are already bounded by their row limit and cutoff timestamp,
+   * so they may scan full content outside the interactive 30-day window.
+   */
+  async scan(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly cursor?: string;
+    readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisEventOrderBy;
+    readonly includeFullContent?: boolean;
+    readonly partitionDates?: readonly string[];
+  }): Promise<DorisObservationsPage> {
+    return this.listInternal(input, false);
+  }
+
   async count(input: {
     readonly projectId: string;
     readonly range: AnalyticsTimeRange | null;

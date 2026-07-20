@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
-const mysql = vi.hoisted(() => ({
-  createPool: vi.fn(() => ({
+const mysql = vi.hoisted(() => {
+  const pool = {
     query: vi.fn(),
+    getConnection: vi.fn(),
     end: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
+  };
+  return {
+    pool,
+    createPool: vi.fn(() => pool),
+  };
+});
 
 vi.mock("mysql2/promise", () => ({
   default: { createPool: mysql.createPool },
@@ -64,5 +69,33 @@ describe("DorisClientManager", () => {
       message: "Analytics storage is unavailable",
     });
     expect((thrown as Error).message).not.toContain("/missing/private");
+  });
+
+  it("destroys an in-flight query connection when the caller aborts", async () => {
+    let rejectQuery: ((reason: Error) => void) | undefined;
+    const connection = {
+      query: vi.fn(
+        () =>
+          new Promise<never>((_resolve, reject) => {
+            rejectQuery = reject;
+          }),
+      ),
+      destroy: vi.fn(() => rejectQuery?.(new Error("Connection destroyed"))),
+      release: vi.fn(),
+    };
+    mysql.pool.getConnection.mockResolvedValueOnce(connection);
+    const controller = new AbortController();
+    const query = new DorisClient(config).query("SELECT SLEEP(10)", [], {
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(connection.query).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(query).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+    });
+    expect(connection.destroy).toHaveBeenCalledOnce();
+    expect(connection.release).not.toHaveBeenCalled();
   });
 });

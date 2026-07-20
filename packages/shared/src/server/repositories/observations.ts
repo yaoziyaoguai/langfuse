@@ -603,6 +603,8 @@ export type ObservationTableQuery = {
    * Required by callers whose limits/paging count observations.
    */
   dedupeBySpanId?: boolean;
+  /** Batch exports use their own cutoff and row limit instead of UI windows. */
+  queryMode?: "interactive" | "export";
   clickhouseConfigs?: ClickHouseClientConfigOptions | undefined;
 };
 
@@ -799,10 +801,15 @@ export const getObservationsTableWithModelData = async (
             ...common,
             traceId,
           })
-        : await getDorisTelemetryRepositories().observations.list({
-            ...common,
-            range: query.range,
-          });
+        : opts.queryMode === "export"
+          ? await getDorisTelemetryRepositories().observations.scan({
+              ...common,
+              range: query.range,
+            })
+          : await getDorisTelemetryRepositories().observations.list({
+              ...common,
+              range: query.range,
+            });
     const modelIds = [
       ...new Set(
         page.items.flatMap(({ internalModelId }) =>

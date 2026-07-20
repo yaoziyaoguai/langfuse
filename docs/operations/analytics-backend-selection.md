@@ -41,21 +41,39 @@ deletion lifecycle, and schema readiness checks. Configure:
 
 The Doris adapter exposes OTLP/v4 telemetry, legacy trace/observation ingestion,
 scores, trace/observation/session reads, core metrics, analytics deletion, and
-Community product monitors. Legacy ingestion is converted into canonical events;
-it never restores or writes the ClickHouse v3 trace/observation tables. Partial
-legacy updates merge against the current visible Doris snapshot and are
-serialized per entity so concurrent updates cannot overwrite one another from a
-stale read.
+Community product monitors. Custom dashboards use the same logical query
+interface on both backends; ClickHouse retains native progress events while the
+Doris adapter emits rows after its bounded query completes. Queries using a
+dimension or filter that has not yet been implemented by the Doris compiler fail
+explicitly instead of falling back to ClickHouse. Legacy ingestion is converted
+into canonical events; it never restores or writes the ClickHouse v3
+trace/observation tables. Partial legacy updates merge against the current
+visible Doris snapshot and are serialized per entity so concurrent updates
+cannot overwrite one another from a stale read.
 
-Evaluator execution, experiments/dataset-run analytics, batch exports,
-third-party analytics integrations, and custom dashboard authoring remain
-unavailable in Doris mode. Their UI/API/MCP entry points fail with a structured
-`UnsupportedFeature` response before enqueuing work, and their ClickHouse-backed
-workers remain unregistered. Dataset-run items sent through the legacy ingestion
-endpoint receive child-level HTTP 501 while supported tracing and score children
-continue normally. These capabilities are deferred, not impossible: each needs
-its ClickHouse-specific repositories, queue producers, and recovery semantics
-replaced at the analytics boundary before its gate can be removed.
+Batch exports select an analytics export adapter at worker startup. Doris mode
+supports scores, sessions, traces, observations, events, dataset items, and
+audit logs. ClickHouse keeps its native streaming readers; Doris uses bounded
+paginated reads through the same export contract. Dataset-run item exports are
+rejected before the job is persisted because they depend on the experiment
+storage model, which is not implemented for Doris.
+
+Doris exports preserve the requested table ordering with paginated reads and
+are bounded by the configured export row limit, creation cutoff, and query
+timeout. Operators should require a time filter for very large telemetry
+projects: an intentionally unfiltered export may scan the project's retained
+history up to that row limit and is not a substitute for a backend-native bulk
+unload.
+
+Evaluator execution, experiments/dataset-run analytics, and third-party
+analytics integrations remain unavailable in Doris mode. Their UI/API/MCP entry
+points fail with a structured `UnsupportedFeature` response before enqueuing
+work, and their ClickHouse-backed workers remain unregistered. Dataset-run items
+sent through the legacy ingestion endpoint receive child-level HTTP 501 while
+supported tracing and score children continue normally. These capabilities are
+deferred, not impossible: each needs its ClickHouse-specific repositories,
+queue producers, and recovery semantics replaced at the analytics boundary
+before its gate can be removed.
 
 ### Optional global retention
 

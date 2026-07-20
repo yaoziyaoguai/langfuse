@@ -2827,6 +2827,39 @@ export const getDistinctScoreNames = async (
   const { projectId, cutoffCreatedAt, clickhouseConfigs } = p;
   const startTimeFrom = getDistinctScoreNamesStartTimeFrom(p);
 
+  if (isDorisAnalyticsBackend()) {
+    const lowerBound = startTimeFrom
+      ? new Date(
+          parseClickhouseUTCDateTimeFormat(startTimeFrom).getTime() -
+            60 * 60 * 1_000,
+        )
+      : DORIS_SCORE_RANGE_START;
+    const rows = await getDorisTelemetryRepositories().scores.aggregateGroups({
+      projectId,
+      range: {
+        from: lowerBound,
+        to: new Date(Math.max(Date.now() + 1, cutoffCreatedAt.getTime() + 1)),
+      },
+      filters: [
+        {
+          type: "datetime",
+          column: "createdAt",
+          operator: "<=",
+          value: cutoffCreatedAt,
+        },
+        {
+          type: "stringOptions",
+          column: "dataType",
+          operator: "any of",
+          value: [...LISTABLE_SCORE_TYPES],
+        },
+      ],
+      columns: ["name"],
+      limit: FILTER_OPTION_SCORE_NAME_LIMIT,
+    });
+    return rows.map((row) => String(row.name));
+  }
+
   const query = `    SELECT DISTINCT
       name
     FROM scores s

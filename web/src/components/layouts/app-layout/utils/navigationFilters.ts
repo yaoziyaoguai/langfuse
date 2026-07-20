@@ -8,7 +8,7 @@ import type { NavigationFilterContext } from "./navigationFilters.types";
 import { hasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { hasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 import type { Session } from "next-auth";
-import { capabilityForPagePath } from "@/src/features/capabilities/communityAvailability";
+import { isCommunityPageAvailable } from "@/src/features/capabilities/communityAvailability";
 
 /** Organization type from user session (can be null when not in project/org context) */
 type Organization =
@@ -24,11 +24,12 @@ export const filters = {
   analyticsBackendCapability: (
     route: Route,
     ctx: NavigationFilterContext,
-  ): Route | null =>
-    ctx.session?.environment?.analyticsBackend === "doris" &&
-    capabilityForPagePath(route.pathname)
+  ): Route | null => {
+    const backend = ctx.session?.environment?.analyticsBackend;
+    return backend && !isCommunityPageAvailable(route.pathname, backend)
       ? null
-      : route,
+      : route;
+  },
 
   /**
    * Filter routes that require a project ID when none is available

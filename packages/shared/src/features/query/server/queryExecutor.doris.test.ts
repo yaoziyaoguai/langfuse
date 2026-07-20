@@ -8,7 +8,9 @@ const { executeDoris, queryClickhouse, executor } = vi.hoisted(() => ({
 
 vi.mock("../../../server/repositories/clickhouse", () => ({ queryClickhouse }));
 
-vi.mock("../../../env", () => ({ env: {} }));
+vi.mock("../../../env", () => ({
+  env: { LANGFUSE_ANALYTICS_BACKEND: "doris" },
+}));
 
 vi.mock("../../../server/repositories/telemetry/doris/runtime", () => ({
   getDorisQueryExecutor: () => executor,

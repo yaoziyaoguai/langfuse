@@ -86,14 +86,21 @@ import { ScoreCacheProvider } from "@/src/features/scores/contexts/ScoreCacheCon
 import { CorrectionCacheProvider } from "@/src/features/corrections/contexts/CorrectionCacheContext";
 import { V4_BETA_ENABLED_POSTHOG_PROPERTY } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { UnavailableFeaturePage } from "@/src/components/UnavailableFeaturePage";
-import { capabilityForPagePath } from "@/src/features/capabilities/communityAvailability";
+import {
+  capabilityForPagePath,
+  isCommunityPageAvailable,
+} from "@/src/features/capabilities/communityAvailability";
 
 function AnalyticsCapabilityPageGate({ children }: { children: ReactNode }) {
   const { data: session } = useSession();
   const router = useRouter();
   const capability = capabilityForPagePath(router.pathname);
 
-  if (capability && session?.environment?.analyticsBackend === "doris") {
+  if (
+    capability &&
+    session?.environment?.analyticsBackend === "doris" &&
+    !isCommunityPageAvailable(router.pathname, "doris")
+  ) {
     return <UnavailableFeaturePage capability={capability} />;
   }
   return children;

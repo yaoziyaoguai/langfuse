@@ -14,6 +14,7 @@ export interface DorisQueryExecutor {
   query<T extends object = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[],
+    options?: { readonly signal?: AbortSignal },
   ): Promise<readonly T[]>;
 }
 
@@ -58,8 +59,12 @@ export class DorisClient implements DorisQueryExecutor {
   async query<T extends object = Record<string, unknown>>(
     sql: string,
     params: readonly unknown[] = [],
+    options?: { readonly signal?: AbortSignal },
   ): Promise<readonly T[]> {
     try {
+      if (options?.signal) {
+        return await this.queryWithSignal<T>(sql, params, options.signal);
+      }
       const [rows] = await this.pool.query<RowDataPacket[]>({
         sql,
         values: [...params],
@@ -68,6 +73,36 @@ export class DorisClient implements DorisQueryExecutor {
       return rows as unknown as readonly T[];
     } catch (error) {
       throw toDorisError(error);
+    }
+  }
+
+  private async queryWithSignal<T extends object>(
+    sql: string,
+    params: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<readonly T[]> {
+    const connection = await this.pool.getConnection();
+    let destroyed = false;
+    const abort = () => {
+      destroyed = true;
+      connection.destroy();
+    };
+
+    try {
+      if (signal.aborted) {
+        abort();
+        throw new Error("Doris query was cancelled");
+      }
+      signal.addEventListener("abort", abort, { once: true });
+      const [rows] = await connection.query<RowDataPacket[]>({
+        sql,
+        values: [...params],
+        timeout: this.queryTimeoutMs,
+      });
+      return rows as unknown as readonly T[];
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (!destroyed) connection.release();
     }
   }
 

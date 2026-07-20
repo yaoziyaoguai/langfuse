@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
+  scan: vi.fn(),
   listForTrace: vi.fn(),
   count: vi.fn(),
   countForTrace: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("./telemetry/doris/runtime", () => ({
   getDorisTelemetryRepositories: () => ({
     observations: {
       list: mocks.list,
+      scan: mocks.scan,
       listForTrace: mocks.listForTrace,
       count: mocks.count,
       countForTrace: mocks.countForTrace,
@@ -147,6 +149,29 @@ describe("legacy observation repository Doris routing", () => {
         offset: 100,
       }),
     );
+  });
+
+  it("routes export-mode full-content reads through the unbounded Doris scan", async () => {
+    mocks.scan.mockResolvedValue({ items: [observation], nextCursor: null });
+
+    await getObservationsTableWithModelData({
+      projectId: "project-1",
+      filter,
+      limit: 50,
+      selectIOAndMetadata: true,
+      queryMode: "export",
+    });
+
+    expect(mocks.scan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        range: {
+          from: new Date("2026-07-17T00:00:00.000Z"),
+          to: new Date("2026-07-18T00:00:00.000Z"),
+        },
+        includeFullContent: true,
+      }),
+    );
+    expect(mocks.list).not.toHaveBeenCalled();
   });
 
   it("routes trace observation expansion through locator-bounded Doris pages", async () => {

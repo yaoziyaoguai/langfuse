@@ -1,8 +1,11 @@
 import {
   getObservationById as getObservationByIdRoutingWrapper,
   getTraceById as getTraceByIdRoutingWrapper,
+  getTraceByIdFromEventsTable,
   getTracesIdentifierForSession as getTracesIdentifierForSessionRoutingWrapper,
 } from "./repositories/events";
+
+export { getTraceByIdFromEventsTable };
 
 export * from "./services/StorageService";
 export * from "./services/safeBlobKeySegment";

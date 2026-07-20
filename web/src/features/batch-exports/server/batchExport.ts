@@ -19,6 +19,11 @@ import {
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
+import { env } from "@/src/env.mjs";
+import {
+  CommunityCapabilityUnavailableError,
+  isCommunityBatchExportTableAvailable,
+} from "@/src/features/capabilities/communityAvailability";
 
 export const batchExportRouter = createTRPCRouter({
   create: protectedProjectProcedure
@@ -41,6 +46,22 @@ export const batchExportRouter = createTRPCRouter({
           ...input.query,
           useEventsTable: ctx.session.user.v4BetaEnabled ?? false,
         };
+
+        if (
+          !isCommunityBatchExportTableAvailable(
+            query.tableName,
+            env.LANGFUSE_ANALYTICS_BACKEND,
+          )
+        ) {
+          const unavailable = new CommunityCapabilityUnavailableError(
+            "experiments",
+          );
+          throw new TRPCError({
+            code: "NOT_IMPLEMENTED",
+            message: unavailable.body.message,
+            cause: unavailable,
+          });
+        }
 
         if (query.tableName === BatchExportTableName.AuditLogs) {
           throwIfNoEntitlement({

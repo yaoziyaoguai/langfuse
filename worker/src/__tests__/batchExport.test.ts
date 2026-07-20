@@ -2932,20 +2932,19 @@ describe("batch export test suite", () => {
       expect(eventsHeader).toBe(legacyHeader);
     });
 
-    it("routes events exports through getEventsStream, not the paginated reader", async () => {
-      // Path A contract: the events-table export is served by getEventsStream
-      // (wired in handleBatchExportJob). The paginated reader intentionally has
-      // no "events" case, so a regression that drops the getEventsStream route
-      // would surface as this throw rather than silently exporting nothing.
-      await expect(
-        getDatabaseReadStreamPaginated({
-          projectId: randomUUID(),
-          tableName: BatchExportTableName.Events,
-          cutoffCreatedAt: new Date(),
-          filter: [],
-          orderBy: { column: "startTime", order: "DESC" },
-        }),
-      ).rejects.toThrow("Unhandled table case: events");
+    it("exposes a paginated events reader for non-ClickHouse export adapters", async () => {
+      const stream = await getDatabaseReadStreamPaginated({
+        projectId: randomUUID(),
+        tableName: BatchExportTableName.Events,
+        cutoffCreatedAt: new Date(),
+        filter: [],
+        orderBy: { column: "startTime", order: "DESC" },
+      });
+
+      // ClickHouse still selects getEventsStream through its adapter. The
+      // paginated implementation exists for backends without a native stream.
+      expect(stream.readableObjectMode).toBe(true);
+      stream.destroy();
     });
 
     it("should export events from events table", async () => {

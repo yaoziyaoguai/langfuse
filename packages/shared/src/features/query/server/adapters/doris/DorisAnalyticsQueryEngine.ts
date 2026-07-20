@@ -772,6 +772,7 @@ export async function executeDorisAnalyticsQuery(input: {
   readonly projectId: string;
   readonly query: QueryType;
   readonly version: ViewVersion;
+  readonly signal?: AbortSignal;
 }): Promise<Array<Record<string, unknown>>> {
   const deferredDimension = [
     ...input.query.dimensions.map(({ field }) => field),
@@ -982,7 +983,11 @@ ${groups.length ? `GROUP BY ${groups.join(", ")}` : ""}
 ${orderBy.length ? `ORDER BY ${orderBy.join(", ")}` : ""}
 ${limit ? "LIMIT ?" : ""}`;
   if (limit) params.push(limit);
-  const rows = await input.executor.query<Record<string, unknown>>(sql, params);
+  const rows = input.signal
+    ? await input.executor.query<Record<string, unknown>>(sql, params, {
+        signal: input.signal,
+      })
+    : await input.executor.query<Record<string, unknown>>(sql, params);
   return fillTimeBuckets({
     rows: decodeRows(rows, input.query),
     query: input.query,

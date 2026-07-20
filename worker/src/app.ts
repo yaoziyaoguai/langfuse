@@ -353,7 +353,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true"
 ) {
   WorkerManager.register(QueueName.BatchExport, batchExportQueueProcessor, {

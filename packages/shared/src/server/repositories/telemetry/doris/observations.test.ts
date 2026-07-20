@@ -212,6 +212,25 @@ describe("Doris observations repository", () => {
     );
   });
 
+  it("allows an export scan to project full content beyond 30 days", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.scan({
+        projectId: "project-1",
+        range: {
+          from: new Date("2026-01-01T00:00:00.000Z"),
+          to: new Date("2026-02-01T00:00:00.001Z"),
+        },
+        filters: [],
+        includeFullContent: true,
+        limit: 10,
+      }),
+    ).resolves.toEqual({ items: [], nextCursor: null });
+    expect(query.mock.calls[0]?.[0]).toContain("e.input AS input");
+  });
+
   it("treats a trace-scoped full-content read as point detail", async () => {
     const locateTrace = vi.fn().mockResolvedValue([
       {

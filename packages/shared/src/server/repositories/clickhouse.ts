@@ -555,6 +555,7 @@ export type ClickhouseQueryOpts = {
   preferredClickhouseService?: PreferredClickhouseService;
   clickhouseSettings?: ClickHouseSettings;
   allowLegacyEventsRead?: boolean;
+  abortSignal?: AbortSignal;
 };
 
 function recordSummaryOnSpan(
@@ -594,6 +595,7 @@ async function sendClickhouseQuery<F extends DataFormat>(opts: {
   clickhouseSettings?: ClickHouseSettings;
   format: F;
   span: Span;
+  abortSignal?: AbortSignal;
 }) {
   const normalizedTags = normalizeClickHouseQueryTags(opts.tags);
   const res = await clickhouseClient(
@@ -607,6 +609,7 @@ async function sendClickhouseQuery<F extends DataFormat>(opts: {
       ...opts.clickhouseSettings,
       log_comment: JSON.stringify(normalizedTags),
     },
+    ...(opts.abortSignal ? { abort_signal: opts.abortSignal } : {}),
   });
 
   if (env.NODE_ENV === "development") {

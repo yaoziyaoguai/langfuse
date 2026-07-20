@@ -9,14 +9,15 @@ import {
   capabilityForTrpcPath,
   createUnsupportedFeatureApiHandler,
   isCommunityCapabilityAvailable,
+  isCommunityBatchExportTableAvailable,
+  isCommunityPageAvailable,
 } from "./communityAvailability";
 
 describe("Doris R1A community capability contract", () => {
   it.each([
     ["evaluations", "R1B_EVALUATIONS_UNAVAILABLE"],
     ["experiments", "R1B_EXPERIMENTS_UNAVAILABLE"],
-    ["batchExports", "R2_BATCH_EXPORTS_UNAVAILABLE"],
-    ["customDashboards", "R2_CUSTOM_DASHBOARDS_UNAVAILABLE"],
+    ["analyticsIntegrations", "R2_ANALYTICS_INTEGRATIONS_UNAVAILABLE"],
   ] as const)("keeps %s inactive with stable code", (capability, code) => {
     expect(isCommunityCapabilityAvailable(capability)).toBe(false);
     expect(isCommunityCapabilityAvailable(capability, "clickhouse")).toBe(true);
@@ -26,9 +27,34 @@ describe("Doris R1A community capability contract", () => {
     });
   });
 
-  it("makes monitors available on both analytics backends", () => {
+  it("makes monitors, batch exports, and custom dashboards available on both analytics backends", () => {
     expect(isCommunityCapabilityAvailable("monitors", "doris")).toBe(true);
     expect(isCommunityCapabilityAvailable("monitors", "clickhouse")).toBe(true);
+    expect(isCommunityCapabilityAvailable("batchExports", "doris")).toBe(true);
+    expect(isCommunityCapabilityAvailable("batchExports", "clickhouse")).toBe(
+      true,
+    );
+    expect(isCommunityCapabilityAvailable("customDashboards", "doris")).toBe(
+      true,
+    );
+    expect(
+      isCommunityCapabilityAvailable("customDashboards", "clickhouse"),
+    ).toBe(true);
+  });
+
+  it("applies capability availability consistently to page routes", () => {
+    expect(
+      isCommunityPageAvailable("/project/[projectId]/dashboards", "doris"),
+    ).toBe(true);
+    expect(
+      isCommunityPageAvailable("/project/[projectId]/monitors", "doris"),
+    ).toBe(true);
+    expect(
+      isCommunityPageAvailable("/project/[projectId]/evals", "doris"),
+    ).toBe(false);
+    expect(
+      isCommunityPageAvailable("/project/[projectId]/evals", "clickhouse"),
+    ).toBe(true);
   });
 
   it("maps every inactive server channel to the same capability", () => {
@@ -43,6 +69,9 @@ describe("Doris R1A community capability contract", () => {
     expect(capabilityForTrpcPath("datasets.itemsByDatasetId")).toBeNull();
     expect(capabilityForTrpcPath("monitors.all")).toBe("monitors");
     expect(capabilityForTrpcPath("batchExport.create")).toBe("batchExports");
+    expect(capabilityForTrpcPath("posthogIntegration.create")).toBe(
+      "analyticsIntegrations",
+    );
     expect(capabilityForTrpcPath("dashboard.createDashboard")).toBe(
       "customDashboards",
     );
@@ -88,6 +117,16 @@ describe("Doris R1A community capability contract", () => {
     "/api/public/integrations/blob-storage",
     "/api/public/integrations/blob-storage/config-1",
   ])("gates blob-storage route %s", (path) => {
-    expect(capabilityForPublicApiPath(path)).toBe("batchExports");
+    expect(capabilityForPublicApiPath(path)).toBe("analyticsIntegrations");
+  });
+
+  it("keeps experiment-backed dataset-run exports unavailable only in Doris", () => {
+    expect(
+      isCommunityBatchExportTableAvailable("dataset_run_items", "doris"),
+    ).toBe(false);
+    expect(
+      isCommunityBatchExportTableAvailable("dataset_run_items", "clickhouse"),
+    ).toBe(true);
+    expect(isCommunityBatchExportTableAvailable("events", "doris")).toBe(true);
   });
 });

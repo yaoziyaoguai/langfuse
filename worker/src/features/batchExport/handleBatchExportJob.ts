@@ -3,7 +3,6 @@ import {
   BatchExportFileFormat,
   BatchExportQuerySchema,
   BatchExportStatus,
-  BatchExportTableName,
   exportOptions,
   LangfuseNotFoundError,
 } from "@langfuse/shared";
@@ -19,10 +18,7 @@ import {
   type CommentObjectType,
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
-import { getDatabaseReadStreamPaginated } from "../database-read-stream/getDatabaseReadStream";
-import { getObservationStream } from "../database-read-stream/observation-stream";
-import { getTraceStream } from "../database-read-stream/trace-stream";
-import { getEventsStream } from "../database-read-stream/event-stream";
+import { getAnalyticsExportSource } from "./analyticsExportRuntime";
 
 // Map table names to comment object types for preprocessing
 const tableToCommentType: Record<string, CommentObjectType | undefined> = {
@@ -171,35 +167,13 @@ export const handleBatchExportJob = async (
 
   // handle db read stream
 
-  const dbReadStream =
-    parsedQuery.data.tableName === BatchExportTableName.Observations
-      ? await getObservationStream({
-          projectId,
-          cutoffCreatedAt: jobDetails.createdAt,
-          ...parsedQuery.data,
-          filter: processedFilter,
-          fileFormat: jobDetails.format as BatchExportFileFormat,
-        })
-      : parsedQuery.data.tableName === BatchExportTableName.Traces
-        ? await getTraceStream({
-            projectId,
-            cutoffCreatedAt: jobDetails.createdAt,
-            ...parsedQuery.data,
-            filter: processedFilter,
-          })
-        : parsedQuery.data.tableName === BatchExportTableName.Events
-          ? await getEventsStream({
-              projectId,
-              cutoffCreatedAt: jobDetails.createdAt,
-              ...parsedQuery.data,
-              filter: processedFilter,
-            })
-          : await getDatabaseReadStreamPaginated({
-              projectId,
-              cutoffCreatedAt: jobDetails.createdAt,
-              ...parsedQuery.data,
-              filter: processedFilter,
-            });
+  const dbReadStream = await getAnalyticsExportSource().open({
+    projectId,
+    cutoffCreatedAt: jobDetails.createdAt,
+    ...parsedQuery.data,
+    filter: processedFilter,
+    fileFormat: jobDetails.format as BatchExportFileFormat,
+  });
 
   // Transform data to desired format
   let rowCount = 0;

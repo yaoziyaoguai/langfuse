@@ -1,23 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import * as z from "zod/v4";
-import {
-  isProgressRow,
-  isRow,
-  isException,
-  ClickHouseResourceError,
-  queryClickhouseWithProgress,
-} from "@langfuse/shared/src/server";
 import { RESOURCE_LIMIT_ERROR_MESSAGE } from "@langfuse/shared";
 import { logger } from "@langfuse/shared/src/server";
-import { env } from "@/src/env.mjs";
-import { COMMUNITY_CAPABILITIES } from "@/src/features/capabilities/communityAvailability";
 
 import { getServerAuthSession } from "@/src/server/auth";
 import { sendAdminAccessWebhook } from "@/src/server/adminAccessWebhook";
 import { prisma } from "@langfuse/shared/src/db";
 import {
-  prepareExecuteQuery,
-  toClickhouseQueryOpts,
+  AnalyticsQueryError,
+  streamAnalyticsQuery,
 } from "@langfuse/shared/query/server";
 import {
   query as customQuery,
@@ -53,10 +44,6 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse,
 ) {
-  if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
-    res.status(501).json(COMMUNITY_CAPABILITIES.customDashboards);
-    return;
-  }
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     res.status(405).end();
@@ -133,59 +120,41 @@ export default async function handler(
   });
   res.flushHeaders();
 
-  let aborted = false;
+  const abortController = new AbortController();
   req.on("close", () => {
-    aborted = true;
+    abortController.abort();
   });
 
   try {
-    const prepared = await prepareExecuteQuery({
+    for await (const event of streamAnalyticsQuery({
       projectId,
       query,
       version,
       enableSingleLevelOptimization: version === "v2",
-    });
-    const chOpts = toClickhouseQueryOpts(prepared);
-
-    for await (const event of queryClickhouseWithProgress<
-      Record<string, unknown>
-    >(chOpts)) {
-      if (aborted) break;
-
-      if (isProgressRow(event)) {
+      signal: abortController.signal,
+    })) {
+      if (abortController.signal.aborted) break;
+      if (event.type === "progress") {
         res.write(
           formatSSEEvent({ type: "progress", progress: event.progress }),
         );
-      } else if (isRow<Record<string, unknown>>(event)) {
+      } else {
         res.write(formatSSEEvent({ type: "row", row: event.row }));
-      } else if (isException(event)) {
-        const isResource =
-          ClickHouseResourceError.wrapIfResourceError(
-            new Error(event.exception),
-          ) instanceof ClickHouseResourceError;
-        logger.error(
-          `[execute-query-stream] ClickHouse exception: ${event.exception}`,
-          { projectId },
-        );
-        const userMessage = isResource
-          ? RESOURCE_LIMIT_ERROR_MESSAGE
-          : event.exception;
-        res.write(formatSSEEvent({ type: "error", message: userMessage }));
-        return;
       }
     }
 
-    if (!aborted) {
+    if (!abortController.signal.aborted) {
       res.write(formatSSEEvent({ type: "done" }));
     }
   } catch (error) {
-    if (!aborted) {
+    if (!abortController.signal.aborted) {
       logger.error("[execute-query-stream] Query failed", {
         error: error instanceof Error ? error.message : String(error),
         projectId,
       });
       const message =
-        error instanceof ClickHouseResourceError
+        error instanceof AnalyticsQueryError &&
+        error.code === "RESOURCE_EXHAUSTED"
           ? RESOURCE_LIMIT_ERROR_MESSAGE
           : error instanceof Error
             ? error.message

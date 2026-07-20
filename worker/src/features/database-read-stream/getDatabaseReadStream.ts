@@ -11,6 +11,7 @@ import {
 import { prisma } from "@langfuse/shared/src/db";
 import {
   FullObservationsWithScores,
+  type FullEventsObservations,
   DatabaseReadStream,
   getScoresUiTable,
   getScoresUiTableFromEvents,
@@ -37,6 +38,7 @@ import {
   BatchExportEventsRow,
 } from "./types";
 import { fetchCommentsForExport } from "./fetchCommentsForExport";
+import { mapObservationToBatchExportEvent } from "./mapObservationToBatchExportEvent";
 
 const tableNameToTimeFilterColumn: Record<BatchTableNames, string> = {
   scores: "timestamp",
@@ -378,6 +380,7 @@ export const getDatabaseReadStreamPaginated = async ({
             searchType: searchType ?? ["id" as const],
             orderBy,
             selectIOAndMetadata: true,
+            queryMode: "export",
             clickhouseConfigs,
           });
           const scores = await getScoresForObservations({
@@ -417,6 +420,63 @@ export const getDatabaseReadStreamPaginated = async ({
             ...obs,
             comments: observationComments.get(obs.id) ?? [],
           }));
+        },
+        env.BATCH_EXPORT_PAGE_SIZE,
+        rowLimit,
+      );
+    }
+    case "events": {
+      let emptyScoreColumns: Record<string, null>;
+
+      return new DatabaseReadStream<unknown>(
+        async (pageSize: number, offset: number) => {
+          const finalFilter = filter
+            ? [...filter, createdAtCutoffFilterCh]
+            : [createdAtCutoffFilterCh];
+          const distinctScoreNames = await getDistinctScoreNames({
+            projectId,
+            cutoffCreatedAt,
+            filter: finalFilter,
+            isTimestampFilter: isGenerationTimestampFilter,
+            clickhouseConfigs,
+          });
+          emptyScoreColumns = distinctScoreNames.reduce(
+            (acc, name) => ({ ...acc, [name]: null }),
+            {} as Record<string, null>,
+          );
+
+          const events = (await getObservationsTableWithModelData({
+            projectId,
+            limit: pageSize,
+            offset,
+            filter: finalFilter,
+            searchQuery,
+            searchType: searchType ?? ["id" as const],
+            orderBy,
+            selectIOAndMetadata: true,
+            queryMode: "export",
+            clickhouseConfigs,
+          })) as FullEventsObservations;
+          const scores = await getScoresForObservations({
+            projectId,
+            observationIds: events.map((event) => event.id),
+            clickhouseConfigs,
+          });
+          const comments = await fetchCommentsForExport(
+            projectId,
+            "OBSERVATION",
+            events.map((event) => event.id),
+          );
+          const rows = events.map((event) =>
+            mapObservationToBatchExportEvent(
+              event,
+              prepareScoresForOutput(
+                scores.filter((score) => score.observationId === event.id),
+              ),
+              comments.get(event.id) ?? [],
+            ),
+          );
+          return getChunkWithFlattenedScores(rows, emptyScoreColumns);
         },
         env.BATCH_EXPORT_PAGE_SIZE,
         rowLimit,

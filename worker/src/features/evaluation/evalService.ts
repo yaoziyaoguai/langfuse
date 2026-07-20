@@ -17,8 +17,6 @@ import {
   checkObservationExists,
   TraceQueueEventType,
   CreateEvalQueueEventType,
-  getTraceById,
-  getObservationForTraceIdByName,
   InMemoryFilterService,
   recordIncrement,
   getCurrentSpan,
@@ -90,6 +88,7 @@ import {
   buildEvalExecutionSpanAttributes,
   buildEvaluatorLlmErrorSpanAttributes,
 } from "./evalSpanAttributes";
+import { getAnalyticsEvaluationTargetSource } from "./analyticsEvaluationTargetRuntime";
 
 /**
  * Determines which eval jobs to create for a given event (traces or dataset run items).
@@ -280,8 +279,7 @@ export const createEvalJobs = async ({
 
       // Fetch trace data and store it. If observation data is required, we'll make a separate lookup.
       // Those fields are used rarely, though.
-      // eslint-disable-next-line @typescript-eslint/no-deprecated
-      cachedTrace = await getTraceById({
+      cachedTrace = await getAnalyticsEvaluationTargetSource().getTrace({
         traceId: event.traceId,
         projectId: event.projectId,
         timestamp:
@@ -1362,8 +1360,7 @@ export async function extractVariablesFromTracingData({
       const traceCacheKey = `${projectId}:${traceId}`;
       let trace = traceCache.get(traceCacheKey);
       if (!traceCache.has(traceCacheKey)) {
-        // eslint-disable-next-line @typescript-eslint/no-deprecated
-        trace = await getTraceById({
+        trace = await getAnalyticsEvaluationTargetSource().getTrace({
           traceId,
           projectId,
           timestamp: traceTimestamp,
@@ -1421,13 +1418,14 @@ export async function extractVariablesFromTracingData({
       const observationCacheKey = `${projectId}:${traceId}:${mapping.objectName}`;
       let observation = observationCache.get(observationCacheKey);
       if (!observationCache.has(observationCacheKey)) {
-        const observations = await getObservationForTraceIdByName({
-          traceId,
-          projectId,
-          name: mapping.objectName,
-          timestamp: traceTimestamp,
-          fetchWithInputOutput: true,
-        });
+        const observations =
+          await getAnalyticsEvaluationTargetSource().getObservationsByName({
+            traceId,
+            projectId,
+            name: mapping.objectName,
+            timestamp: traceTimestamp,
+            fetchWithInputOutput: true,
+          });
         observation = observations.shift() || null; // We only take the first match and ignore duplicate generation-names in a trace.
         observationCache.set(observationCacheKey, observation);
       }

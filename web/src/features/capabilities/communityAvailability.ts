@@ -6,6 +6,7 @@ export type CommunityCapability =
   | "experiments"
   | "monitors"
   | "batchExports"
+  | "analyticsIntegrations"
   | "customDashboards";
 
 export type UnsupportedFeatureBody = {
@@ -15,6 +16,7 @@ export type UnsupportedFeatureBody = {
     | "R1B_EXPERIMENTS_UNAVAILABLE"
     | "R2_MONITORS_UNAVAILABLE"
     | "R2_BATCH_EXPORTS_UNAVAILABLE"
+    | "R2_ANALYTICS_INTEGRATIONS_UNAVAILABLE"
     | "R2_CUSTOM_DASHBOARDS_UNAVAILABLE";
   readonly message: string;
   readonly recovery: string;
@@ -53,6 +55,14 @@ export const COMMUNITY_CAPABILITIES: Readonly<
     recovery:
       "Create a separately reviewed Doris export implementation before enabling this capability.",
   },
+  analyticsIntegrations: {
+    error: "UnsupportedFeature",
+    code: "R2_ANALYTICS_INTEGRATIONS_UNAVAILABLE",
+    message:
+      "Third-party analytics integrations are not available with the Doris backend.",
+    recovery:
+      "Use the ClickHouse backend until the integration event source is migrated to the analytics storage interface.",
+  },
   customDashboards: {
     error: "UnsupportedFeature",
     code: "R2_CUSTOM_DASHBOARDS_UNAVAILABLE",
@@ -66,7 +76,11 @@ export const COMMUNITY_CAPABILITIES: Readonly<
 export const isCommunityCapabilityAvailable = (
   capability: CommunityCapability,
   backend: AnalyticsBackend = "doris",
-): boolean => backend === "clickhouse" || capability === "monitors";
+): boolean =>
+  backend === "clickhouse" ||
+  capability === "monitors" ||
+  capability === "batchExports" ||
+  capability === "customDashboards";
 
 export class CommunityCapabilityUnavailableError extends Error {
   readonly body: UnsupportedFeatureBody;
@@ -107,13 +121,13 @@ export function capabilityForTrpcPath(
     return "experiments";
   }
   if (path.startsWith("monitors.")) return "monitors";
+  if (path.startsWith("batchExport.")) return "batchExports";
   if (
-    path.startsWith("batchExport.") ||
     path.startsWith("posthogIntegration.") ||
     path.startsWith("mixpanelIntegration.") ||
     path.startsWith("blobStorageIntegration.")
   ) {
-    return "batchExports";
+    return "analyticsIntegrations";
   }
   if (
     /^(dashboard\.(allDashboards|getDashboard|createDashboard|updateDashboardDefinition|updateDashboardMetadata|cloneDashboard|setHomeDashboard|updateDashboardFilters|delete)|dashboardWidgets\.)/.test(
@@ -137,7 +151,7 @@ export function capabilityForPublicApiPath(
     return "experiments";
   }
   if (/^\/api\/public\/integrations\/blob-storage(?:\/|$)/.test(pathname)) {
-    return "batchExports";
+    return "analyticsIntegrations";
   }
   if (
     /^\/api\/public\/unstable\/(evaluation-rules|evaluators)(?:\/|$)/.test(
@@ -183,9 +197,26 @@ export function capabilityForPagePath(
       path,
     )
   ) {
-    return "batchExports";
+    return "analyticsIntegrations";
   }
   return null;
+}
+
+export function isCommunityBatchExportTableAvailable(
+  tableName: string,
+  backend: AnalyticsBackend,
+): boolean {
+  return backend === "clickhouse" || tableName !== "dataset_run_items";
+}
+
+export function isCommunityPageAvailable(
+  path: string,
+  backend: AnalyticsBackend,
+): boolean {
+  const capability = capabilityForPagePath(path);
+  return (
+    capability === null || isCommunityCapabilityAvailable(capability, backend)
+  );
 }
 
 export function capabilityForMcpFeature(
