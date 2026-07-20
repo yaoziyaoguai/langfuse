@@ -82,7 +82,7 @@
     "test": "dotenv -e ../../.env -- vitest run",
     "doris:up": "docker-compose -f ../../docker-compose.doris-poc.yml up -d",
     "doris:down": "docker-compose -f ../../docker-compose.doris-poc.yml down -v",
-    "test:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- vitest run --no-file-parallelism --testTimeout=180000 --hookTimeout=120000 src/server/doris/__tests__/DorisPoC.integration.test.ts src/server/doris/__tests__/migration.integration.test.ts src/server/queries/doris-sql/__tests__/querySemantics.integration.test.ts src/server/doris/__tests__/DorisTelemetryRepositories.integration.test.ts src/server/doris/__tests__/DorisScoresRepository.integration.test.ts src/features/query/server/adapters/doris/DorisAnalyticsQueryEngine.integration.test.ts",
+    "test:doris": "LANGFUSE_ANALYTICS_BACKEND=doris DORIS_LOCAL_DEV_MODE=true DORIS_QUERY_URL=mysql://127.0.0.1:9031/langfuse_poc DORIS_QUERY_USER=root DORIS_QUERY_PASSWORD= DORIS_QUERY_TLS_ENABLED=false DORIS_POC_ENABLED=1 dotenv -e ../../.env -- vitest run --no-file-parallelism --testTimeout=180000 --hookTimeout=120000 src/server/doris/__tests__/DorisPoC.integration.test.ts src/server/doris/__tests__/migration.integration.test.ts src/server/queries/doris-sql/__tests__/querySemantics.integration.test.ts src/server/doris/__tests__/DorisTelemetryRepositories.integration.test.ts src/server/doris/__tests__/DorisScoresRepository.integration.test.ts src/features/query/server/adapters/doris/DorisAnalyticsQueryEngine.integration.test.ts",
     "benchmark:doris": "DORIS_POC_ENABLED=1 dotenv -e ../../.env -- tsx scripts/doris-poc-benchmark.ts",
     "doris:migrate": "dotenv -e ../../.env -- tsx doris/scripts/migrate.ts",
     "doris:checkpoint": "tsx scripts/doris-checkpoint.ts",

@@ -8,3 +8,4 @@ export * from "./canonicalHash";
 export * from "./errors";
 export * from "./sourceTime";
 export * from "./types";
+export * from "./versions";

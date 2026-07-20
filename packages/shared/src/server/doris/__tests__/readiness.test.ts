@@ -7,7 +7,7 @@ import {
   EXPECTED_DORIS_MIGRATIONS,
   SUPPORTED_DORIS_SCHEMA_VERSIONS,
 } from "../readiness";
-import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../../analytics-persistence/acceptAnalyticsIngestion";
+import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../../analytics-persistence/versions";
 
 const createTableByName: Record<string, string> = {
   events_current: `

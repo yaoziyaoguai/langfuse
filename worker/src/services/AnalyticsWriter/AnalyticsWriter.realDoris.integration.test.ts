@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import type { Job } from "bullmq";
 import {
   acceptAnalyticsIngestion,
+  CURRENT_ANALYTICS_SCHEMA_VERSION,
   encodeRawAnalyticsIngestionEnvelope,
   normalizeVersionToken,
 } from "@langfuse/shared/analytics-persistence";
@@ -44,6 +45,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   const projectId = `writer-e2e-project-${suffix}`;
   const operationId = `writer-e2e-operation-${suffix}`;
   const scoreOperationId = `writer-e2e-score-operation-${suffix}`;
+  const legacyOperationId = `writer-e2e-legacy-operation-${suffix}`;
   const traceId = `writer-e2e-trace-${suffix}`;
   const spanId = `writer-e2e-span-${suffix}`;
   const scoreId = `writer-e2e-score-${suffix}`;
@@ -51,6 +53,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
   const canonicalPrefix = `writer-e2e/${suffix}/`;
   const rawObjectKey = `${canonicalPrefix}analytics-ingestion/raw/${projectId}/${operationId}.json`;
   const scoreRawObjectKey = `${canonicalPrefix}analytics-ingestion/raw/${projectId}/${scoreOperationId}.json`;
+  const legacyRawObjectKey = `${canonicalPrefix}analytics-ingestion/raw/${projectId}/${legacyOperationId}.json`;
   const prisma = new PrismaClient({
     datasourceUrl: process.env.DORIS_CONTROL_TEST_DATABASE_URL,
   });
@@ -239,7 +242,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       acceptedAt: new Date("2026-07-18T12:30:00.123Z"),
       acceptedAtNanos: acceptedAt,
       canonicalizerVersion: "1",
-      schemaVersion: 3,
+      schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
     });
     const scoreEnvelope = {
       formatVersion: 1 as const,
@@ -278,7 +281,43 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       acceptedAt: new Date("2026-07-18T12:30:00.123Z"),
       acceptedAtNanos: acceptedAt,
       canonicalizerVersion: "1",
-      schemaVersion: 3,
+      schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+    });
+    await acceptAnalyticsIngestion({
+      client: prisma,
+      operationId: legacyOperationId,
+      projectId,
+      sourceOperationId: `source-${legacyOperationId}`,
+      envelope: {
+        formatVersion: 1,
+        source: "legacy-event",
+        payload: [
+          {
+            id: `legacy-trace-event-${suffix}`,
+            type: "trace-create",
+            timestamp: "2026-07-17T10:02:00.987654323Z",
+            body: {
+              id: traceId,
+              timestamp: "2026-07-17T09:59:59.123456789Z",
+              name: "legacy Doris trace",
+              input: { legacy: true },
+              metadata: { source: "legacy-sdk" },
+              environment: "production",
+            },
+          },
+        ],
+        attribution: {
+          ingestionApiKey: "pk-writer-legacy-e2e",
+          ingestionSdkName: "langfuse-js",
+          ingestionSdkVersion: "2.9.0",
+        },
+      },
+      storageService: storage,
+      rawPrefix: canonicalPrefix,
+      acceptedAt: new Date("2026-07-18T12:30:00.123Z"),
+      acceptedAtNanos: acceptedAt,
+      canonicalizerVersion: "1",
+      schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
     });
     const { processor } = createDorisAnalyticsPersistence({
       runtimeEnv: {
@@ -335,8 +374,8 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
           },
         },
       }),
-    ).resolves.toBe(2);
-    expect(queuedJobs).toHaveLength(2);
+    ).resolves.toBe(3);
+    expect(queuedJobs).toHaveLength(3);
     for (const data of queuedJobs) {
       const job = { data } as Job<
         TQueueJobTypes[QueueName.AnalyticsIngestionQueue]
@@ -352,6 +391,8 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       artifactFiles,
       eventOperation,
       scoreOperation,
+      legacyEvents,
+      legacyOperation,
     ] = await Promise.all([
       doris.query<{
         version_token: string | number;
@@ -383,6 +424,18 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
         where: { id: scoreOperationId },
         include: { candidates: true, loadBatches: true, outboxV2: true },
       }),
+      doris.query<{
+        name: string;
+        input: string;
+        metadata: Record<string, unknown>;
+      }>(
+        "SELECT name, input, metadata FROM events_current WHERE project_id = ? AND trace_id = ? AND span_id = ?",
+        [projectId, traceId, `t-${traceId}`],
+      ),
+      prisma.analyticsIngestionOperation.findUniqueOrThrow({
+        where: { id: legacyOperationId },
+        include: { candidates: true, loadBatches: true, outboxV2: true },
+      }),
     ]);
 
     expect(events).toHaveLength(1);
@@ -402,7 +455,7 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
       (sourceVersion + 1n).toString(),
     );
     expect(files[0]!.bucket_path).toBe(scoreRawObjectKey);
-    expect(artifactFiles).toHaveLength(2);
+    expect(artifactFiles).toHaveLength(3);
     expect(eventOperation).toMatchObject({
       status: "VISIBLE",
       manifestState: "FROZEN",
@@ -427,6 +480,22 @@ describe.skipIf(!ENABLED)("AnalyticsWriter real storage path", () => {
     expect(
       scoreOperation.loadBatches.every(({ status }) => status === "VISIBLE"),
     ).toBe(true);
+    expect(legacyEvents).toEqual([
+      {
+        name: "legacy Doris trace",
+        input: '{"legacy":true}',
+        metadata: { source: "legacy-sdk" },
+      },
+    ]);
+    expect(legacyOperation).toMatchObject({
+      status: "VISIBLE",
+      manifestState: "FROZEN",
+      terminalAt: expect.any(Date),
+      rawObjectKey: legacyRawObjectKey,
+      outboxV2: { status: "PUBLISHED" },
+    });
+    expect(legacyOperation.candidates).toHaveLength(1);
+    expect(legacyOperation.loadBatches).toHaveLength(1);
   }, 120_000);
 
   it("deletes trace and project data behind visible barriers without deleting lifecycle-owned raw objects", async () => {

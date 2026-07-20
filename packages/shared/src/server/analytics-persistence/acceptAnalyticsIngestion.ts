@@ -8,8 +8,6 @@ import type { StorageService } from "../services/StorageService";
 import { AnalyticsPersistenceError } from "./errors";
 
 const RAW_FORMAT_VERSION = 1;
-export const CURRENT_ANALYTICS_CANONICALIZER_VERSION = "1";
-export const CURRENT_ANALYTICS_SCHEMA_VERSION = 1;
 export const MAX_RAW_ANALYTICS_BYTES = 100 * 1024 * 1024;
 const REPLAY_HORIZON_MS = 7 * 24 * 60 * 60 * 1_000;
 const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;

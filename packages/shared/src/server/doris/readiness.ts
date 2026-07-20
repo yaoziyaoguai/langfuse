@@ -1,5 +1,5 @@
 import type { DorisQueryExecutor } from "./client";
-import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../analytics-persistence/acceptAnalyticsIngestion";
+import { CURRENT_ANALYTICS_SCHEMA_VERSION } from "../analytics-persistence/versions";
 
 export const EXPECTED_DORIS_MIGRATIONS = [
   {
