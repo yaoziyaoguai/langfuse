@@ -8,6 +8,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const organizationId = `deletion-org-${suffix}`;
   const projectId = `deletion-project-${suffix}`;
+  const projectDeletionProjectId = `project-deletion-${suffix}`;
   const traceId = `trace-${suffix}`;
   let repository: typeof import("./analyticsDeletionOperations.js");
 
@@ -22,12 +23,12 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
   });
 
   afterAll(async () => {
-    await prisma.project.deleteMany({ where: { id: projectId } });
+    await prisma.project.deleteMany({ where: { orgId: organizationId } });
     await prisma.analyticsDeletionOperation.deleteMany({
-      where: { projectId },
+      where: { organizationId },
     });
     await prisma.analyticsProjectDeletionGeneration.deleteMany({
-      where: { projectId },
+      where: { projectId: { contains: suffix } },
     });
     await prisma.organization.deleteMany({ where: { id: organizationId } });
     await prisma.$disconnect();
@@ -85,9 +86,16 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
   });
 
   it("retains one project generation and operation outside the project row", async () => {
+    await prisma.project.create({
+      data: {
+        id: projectDeletionProjectId,
+        orgId: organizationId,
+        name: "Project deletion operation test",
+      },
+    });
     const request = {
       client: prisma,
-      projectId,
+      projectId: projectDeletionProjectId,
       organizationId,
       requester: { principalType: "user" as const, principalId: "owner-1" },
       now: new Date("2026-07-18T01:00:00.000Z"),
@@ -99,37 +107,45 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
     await expect(
       repository.findLatestProjectDeletionOperation({
         client: prisma,
-        projectId,
+        projectId: projectDeletionProjectId,
         organizationId,
       }),
     ).resolves.toMatchObject({ id: first.id, generation: 1n });
   });
 
   it("completes outstanding trace operations behind the project deletion fence", async () => {
+    const supersededProjectId = `superseded-project-${suffix}`;
+    await prisma.project.create({
+      data: {
+        id: supersededProjectId,
+        orgId: organizationId,
+        name: "Superseded trace deletion test",
+      },
+    });
     const supersededTraceId = `superseded-${suffix}`;
     const [traceOperation] = await repository.scheduleTraceDeletionOperations({
       client: prisma,
-      projectId,
+      projectId: supersededProjectId,
       organizationId,
       traceIds: [supersededTraceId],
       requester: { principalType: "system", principalId: "test" },
     });
     const projectOperation = await repository.scheduleProjectDeletionOperation({
       client: prisma,
-      projectId,
+      projectId: supersededProjectId,
       organizationId,
       requester: { principalType: "system", principalId: "test" },
     });
     const claimed = await repository.claimDeletionOperation({
       client: prisma,
       operationId: projectOperation.id,
-      projectId,
+      projectId: supersededProjectId,
       owner: "project-worker",
     });
     await repository.markDeletionBarrierVisible({
       client: prisma,
       operationId: projectOperation.id,
-      projectId,
+      projectId: supersededProjectId,
       scope: "PROJECT",
       generation: projectOperation.generation,
       barrierLabel: "project-barrier",
@@ -137,10 +153,11 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
     });
 
     await expect(
-      repository.completeTraceDeletionsSupersededByProject({
+      repository.finalizeProjectDeletionOperation({
         client: prisma,
         projectOperationId: projectOperation.id,
-        projectId,
+        projectId: supersededProjectId,
+        organizationId,
         projectGeneration: projectOperation.generation,
         lease: { owner: "project-worker", fence: claimed!.workerFence },
       }),
@@ -156,6 +173,68 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
     });
   });
 
+  it("rechecks pre-barrier ingestion while holding the Project finalize lock", async () => {
+    const drainProjectId = `drain-project-${suffix}`;
+    await prisma.project.create({
+      data: {
+        id: drainProjectId,
+        orgId: organizationId,
+        name: "Project ingestion drain test",
+      },
+    });
+    const projectOperation = await repository.scheduleProjectDeletionOperation({
+      client: prisma,
+      projectId: drainProjectId,
+      organizationId,
+      requester: { principalType: "system", principalId: "test" },
+    });
+    await prisma.analyticsIngestionOperation.create({
+      data: {
+        id: `drain-ingestion-${suffix}`,
+        acceptanceSequence: projectOperation.ingestionBarrierSequence! - 1n,
+        projectId: drainProjectId,
+        sourceOperationId: `drain-source-${suffix}`,
+        sourceChecksum: "a".repeat(64),
+        rawObjectKey: `raw/drain-${suffix}`,
+        acceptedAt: new Date("2026-07-18T00:30:00.000Z"),
+        acceptedAtNanos: 1_784_378_200_000_000_000n,
+        canonicalizerVersion: "r1a-v1",
+        schemaVersion: 1,
+        recoverableUntil: new Date("2026-07-25T00:00:00.000Z"),
+        statusExpiresAt: new Date("2026-08-18T00:00:00.000Z"),
+      },
+    });
+    const claimed = await repository.claimDeletionOperation({
+      client: prisma,
+      operationId: projectOperation.id,
+      projectId: drainProjectId,
+      owner: "drain-worker",
+    });
+    await repository.markDeletionBarrierVisible({
+      client: prisma,
+      operationId: projectOperation.id,
+      projectId: drainProjectId,
+      scope: "PROJECT",
+      generation: projectOperation.generation,
+      barrierLabel: "drain-project-barrier",
+      lease: { owner: "drain-worker", fence: claimed!.workerFence },
+    });
+
+    await expect(
+      repository.finalizeProjectDeletionOperation({
+        client: prisma,
+        projectOperationId: projectOperation.id,
+        projectId: drainProjectId,
+        organizationId,
+        projectGeneration: projectOperation.generation,
+        lease: { owner: "drain-worker", fence: claimed!.workerFence },
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      prisma.project.findUnique({ where: { id: drainProjectId } }),
+    ).resolves.toMatchObject({ id: drainProjectId });
+  });
+
   it("does not complete while pre-barrier ingestion remains nonterminal", async () => {
     const operationId = `ingestion-${suffix}`;
     await prisma.analyticsIngestionOperation.create({
@@ -167,6 +246,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics deletion operations", () => {
         rawObjectKey: `raw/${suffix}`,
         acceptedAt: new Date("2026-07-18T00:30:00.000Z"),
         acceptedAtNanos: 1_784_378_200_000_000_000n,
+        createdAt: new Date("2026-07-18T00:30:00.000Z"),
         canonicalizerVersion: "r1a-v1",
         schemaVersion: 1,
         recoverableUntil: new Date("2026-07-25T00:00:00.000Z"),

@@ -1,10 +1,14 @@
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  analyticsDurableProvenanceFromRecord,
+  isDorisAnalyticsBackend,
   logger,
   redis,
   QueueJobs,
   ProjectDeleteQueue,
+  scheduleProjectDeletionOperation,
+  serializeAnalyticsDurableProvenance,
   type ApiAccessScope,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
@@ -13,6 +17,7 @@ import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/ha
 import { projectNameSchema } from "@/src/features/auth/lib/projectNameSchema";
 import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export async function handleUpdateProject(
   req: NextApiRequest,
@@ -119,6 +124,38 @@ export async function handleDeleteProject(
   scope: ApiAccessScope,
 ) {
   try {
+    const projectDeleteQueue = ProjectDeleteQueue.getInstance();
+    if (!projectDeleteQueue) {
+      logger.error("ProjectDeleteQueue is not available");
+      return res.status(500).json({
+        message: "Internal server error",
+      });
+    }
+
+    const isDoris = isDorisAnalyticsBackend();
+    const analyticsAdmissionContext = isDoris
+      ? getWebAnalyticsAdmissionContext()
+      : null;
+    if (isDoris && !analyticsAdmissionContext) {
+      throw new Error(
+        "Doris analytics deletion requires managed runtime admission",
+      );
+    }
+    const deletionOperation = isDoris
+      ? await scheduleProjectDeletionOperation({
+          projectId,
+          organizationId: scope.orgId,
+          requester: {
+            principalType: "api_key",
+            principalId: scope.apiKeyId,
+          },
+          analyticsAdmissionContext,
+        })
+      : null;
+    const deletionProvenance = deletionOperation
+      ? analyticsDurableProvenanceFromRecord(deletionOperation)
+      : null;
+
     // API keys need to be deleted from cache. Otherwise, they will still be valid.
     await new ApiAuthService(prisma, redis).invalidateCachedProjectApiKeys(
       projectId,
@@ -132,16 +169,14 @@ export async function handleDeleteProject(
       },
     });
 
-    // Mark project as deleted
-    const project = await prisma.project.update({
-      where: {
-        id: projectId,
-        orgId: scope.orgId,
-      },
-      data: {
-        deletedAt: new Date(),
-      },
-    });
+    const project = deletionOperation
+      ? await prisma.project.findUniqueOrThrow({
+          where: { id: projectId, orgId: scope.orgId },
+        })
+      : await prisma.project.update({
+          where: { id: projectId, orgId: scope.orgId },
+          data: { deletedAt: new Date() },
+        });
 
     // Create audit log entry
     await auditLog({
@@ -155,20 +190,24 @@ export async function handleDeleteProject(
     });
 
     // Queue project deletion job
-    const projectDeleteQueue = ProjectDeleteQueue.getInstance();
-    if (!projectDeleteQueue) {
-      logger.error("ProjectDeleteQueue is not available");
-      return res.status(500).json({
-        message: "Internal server error",
-      });
-    }
-
     await projectDeleteQueue.add(QueueJobs.ProjectDelete, {
       timestamp: new Date(),
       id: randomUUID(),
       payload: {
-        projectId: projectId,
+        projectId,
         orgId: scope.orgId,
+        ...(deletionOperation
+          ? {
+              deletionOperationId: deletionOperation.id,
+              deletionGeneration: deletionOperation.generation.toString(),
+              ...(deletionProvenance
+                ? {
+                    analyticsProvenance:
+                      serializeAnalyticsDurableProvenance(deletionProvenance),
+                  }
+                : {}),
+            }
+          : {}),
       },
       name: QueueJobs.ProjectDelete,
     });

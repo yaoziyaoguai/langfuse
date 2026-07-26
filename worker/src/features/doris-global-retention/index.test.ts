@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { processDorisGlobalRetentionStep } from ".";
 
 const cutoff = new Date("2026-06-20T00:00:00.000Z");
+const withWorkFence = async <T>(input: {
+  execute: (client: PrismaClient) => Promise<T>;
+}) => input.execute({} as PrismaClient);
+const databaseClock = (value: string) => vi.fn(async () => new Date(value));
 
 function run(phase: string, startedAt = new Date("2026-07-20T00:00:00.000Z")) {
   return {
@@ -20,6 +24,48 @@ function run(phase: string, startedAt = new Date("2026-07-20T00:00:00.000Z")) {
 }
 
 describe("processDorisGlobalRetentionStep", () => {
+  it("carries the current runtime admission through the durable work fence", async () => {
+    const admissionContext = {
+      runtimeLeaseId: "worker-lease",
+      backend: "doris" as const,
+      deploymentGeneration: 7n,
+    };
+    const fencedClient = {} as PrismaClient;
+    const advance = vi.fn(async () => true);
+    const startOrResume = vi.fn(async () => run("DRAIN"));
+    const fence = vi.fn(async (input) => {
+      expect(input.admissionContext).toEqual(admissionContext);
+      return input.execute(fencedClient);
+    });
+
+    await expect(
+      processDorisGlobalRetentionStep({
+        retentionDays: 30,
+        drainMs: 120_000,
+        batchSize: 1_000,
+        admissionContext,
+        dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          client: {} as PrismaClient,
+          startOrResume: startOrResume as never,
+          countUnresolvedLoads: vi.fn(async () => 0) as never,
+          advance: advance as never,
+          withWorkFence: fence as never,
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "advanced", phase: "DRAIN" });
+    expect(startOrResume).toHaveBeenCalledWith(
+      expect.objectContaining({ admissionContext, retentionDays: 30 }),
+    );
+    expect(startOrResume).not.toHaveBeenCalledWith(
+      expect.objectContaining({ cutoffDate: expect.any(Date) }),
+    );
+    expect(fence).toHaveBeenCalledTimes(1);
+    expect(advance).toHaveBeenCalledWith(
+      expect.objectContaining({ client: fencedClient }),
+    );
+  });
+
   it("publishes the cutoff and waits for the drain window before deleting", async () => {
     const deleteDorisHeads = vi.fn();
     const advance = vi.fn();
@@ -29,8 +75,9 @@ describe("processDorisGlobalRetentionStep", () => {
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:01:00.000Z"),
         dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:01:00.000Z"),
+          withWorkFence,
           client: {} as PrismaClient,
           startOrResume: vi.fn(async () => run("DRAIN")) as never,
           deleteDorisHeads,
@@ -53,8 +100,9 @@ describe("processDorisGlobalRetentionStep", () => {
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:03:00.000Z"),
         dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence,
           client: {} as PrismaClient,
           startOrResume: vi.fn(async () => run("EVENTS")) as never,
           findHeads: vi.fn(async () => heads) as never,
@@ -83,8 +131,9 @@ describe("processDorisGlobalRetentionStep", () => {
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:03:00.000Z"),
         dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence,
           client: {} as PrismaClient,
           startOrResume: vi.fn(async () => run("EVENTS")) as never,
           findHeads: vi.fn(async () => []) as never,
@@ -110,8 +159,9 @@ describe("processDorisGlobalRetentionStep", () => {
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:03:00.000Z"),
         dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence,
           client: {} as PrismaClient,
           startOrResume: vi.fn(async () => run("DRAIN")) as never,
           countUnresolvedLoads: countUnresolvedLoads as never,
@@ -134,8 +184,9 @@ describe("processDorisGlobalRetentionStep", () => {
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:03:00.000Z"),
         dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence,
           client: {} as PrismaClient,
           startOrResume: vi.fn(async () => run("DRAIN")) as never,
           countUnresolvedLoads: vi.fn(async () => 0) as never,
@@ -153,15 +204,18 @@ describe("processDorisGlobalRetentionStep", () => {
 
   it("records a retryable phase failure without moving the cutoff", async () => {
     const recordFailure = vi.fn(async () => undefined);
+    const client = {} as PrismaClient;
+    const fencedClient = {} as PrismaClient;
 
     await expect(
       processDorisGlobalRetentionStep({
         retentionDays: 30,
         drainMs: 120_000,
         batchSize: 1_000,
-        now: new Date("2026-07-20T00:03:00.000Z"),
         dependencies: {
-          client: {} as PrismaClient,
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence: async (input) => input.execute(fencedClient),
+          client,
           startOrResume: vi.fn(async () => run("SCORES")) as never,
           findHeads: vi.fn(async () => [{ id: "head-1" }]) as never,
           deleteDorisHeads: vi.fn(async () => {
@@ -173,10 +227,12 @@ describe("processDorisGlobalRetentionStep", () => {
     ).rejects.toThrow("Doris unavailable");
     expect(recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
+        client,
         runId: "run-1",
         phase: "SCORES",
         reasonCode: "RETENTION_STEP_FAILED",
       }),
     );
+    expect(recordFailure.mock.calls[0]?.[0].client).toBe(client);
   });
 });

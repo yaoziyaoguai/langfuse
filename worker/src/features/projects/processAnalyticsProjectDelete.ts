@@ -3,22 +3,33 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   acquireAnalyticsMutationPermit,
-  completeDeletionOperation,
+  finalizeProjectDeletionOperation,
   claimDeletionOperation,
+  deleteDatasetRunItemsByProjectId,
+  deleteEventsByProjectId,
   deleteMediaFiles,
   deleteMediaLinkRowsByProjectId,
+  deleteObservationsByProjectId,
+  deleteScoresByProjectId,
+  deleteTracesByProjectId,
   findAllMediaByProjectId,
   findDeletionOperationForProject,
   getS3MediaStorageClient,
   hasPreBarrierIngestionWork,
+  isDorisAnalyticsBackend,
   logger,
   markDeletionBarrierVisible,
   markDeletionOperationRetrying,
   markDeletionOperationPhase,
+  removeIngestionEventsFromS3AndDeleteClickhouseRefsForProject,
   renewDeletionOperationLease,
+  type AnalyticsRuntimeAdmissionContext,
+  type SerializedAnalyticsDurableProvenance,
 } from "@langfuse/shared/src/server";
 
-import { env } from "../../env";
+import { getWorkerAnalyticsAdmissionContext } from "../../analyticsRuntime";
+import { env, v4WritesToEventsTable } from "../../env";
+import { withAnalyticsDeletionWorkFence } from "../analytics-deletion/analyticsDeletionWorkFence";
 import {
   getDorisAnalyticsLifecycleRuntime,
   type DorisAnalyticsLifecycleRuntime,
@@ -27,6 +38,7 @@ import {
 export type ProjectDeletionReference = {
   readonly operationId: string;
   readonly generation: bigint;
+  readonly analyticsProvenance?: SerializedAnalyticsDurableProvenance;
 };
 
 async function operationFor(input: {
@@ -61,6 +73,26 @@ async function deleteProjectMedia(projectId: string): Promise<void> {
   });
 }
 
+async function deleteClickhouseProjectAnalytics(
+  projectId: string,
+): Promise<void> {
+  await Promise.all([
+    env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true"
+      ? removeIngestionEventsFromS3AndDeleteClickhouseRefsForProject(
+          projectId,
+          undefined,
+        )
+      : Promise.resolve(),
+    deleteTracesByProjectId(projectId),
+    deleteObservationsByProjectId(projectId),
+    deleteScoresByProjectId(projectId),
+    v4WritesToEventsTable(env)
+      ? deleteEventsByProjectId(projectId)
+      : Promise.resolve(),
+  ]);
+  await deleteDatasetRunItemsByProjectId(projectId);
+}
+
 /**
  * Keeps the independent operation/generation rows while removing the entire
  * Project foreign-key scope. Raw/canonical objects remain on their lifecycle.
@@ -71,10 +103,40 @@ export async function processAnalyticsProjectDelete(
     readonly organizationId: string;
     readonly reference: ProjectDeletionReference;
   },
-  lifecycle: DorisAnalyticsLifecycleRuntime = getDorisAnalyticsLifecycleRuntime(),
+  lifecycle?: DorisAnalyticsLifecycleRuntime,
+  admissionContext: AnalyticsRuntimeAdmissionContext | null = getWorkerAnalyticsAdmissionContext(),
 ): Promise<void> {
   const currentOperation = await operationFor(input);
-  if (currentOperation.status === "COMPLETED") return;
+  const selectedBackend = isDorisAnalyticsBackend()
+    ? ("doris" as const)
+    : ("clickhouse" as const);
+  await withAnalyticsDeletionWorkFence({
+    client: prisma,
+    operation: currentOperation,
+    serializedProvenance: input.reference.analyticsProvenance,
+    admissionContext,
+    selectedBackend,
+    claimKind: "analytics-deletion-operation",
+    run: () =>
+      currentOperation.status === "COMPLETED"
+        ? Promise.resolve()
+        : processFencedAnalyticsProjectDelete({
+            ...input,
+            lifecycle:
+              currentOperation.analyticsBackend === "DORIS"
+                ? (lifecycle ?? getDorisAnalyticsLifecycleRuntime())
+                : lifecycle,
+          }),
+  });
+}
+
+async function processFencedAnalyticsProjectDelete(input: {
+  readonly projectId: string;
+  readonly organizationId: string;
+  readonly reference: ProjectDeletionReference;
+  readonly lifecycle?: DorisAnalyticsLifecycleRuntime;
+}): Promise<void> {
+  const { lifecycle } = input;
   const owner = randomUUID();
   const operation = await claimDeletionOperation({
     operationId: input.reference.operationId,
@@ -97,12 +159,22 @@ export async function processAnalyticsProjectDelete(
       throw new Error("Project deletion is held by the analytics checkpoint");
     }
     if (!operation.logicallyInvisible) {
-      const barrier = await lifecycle.store.publishProjectTombstone({
-        operationId: operation.id,
-        projectId: input.projectId,
-        generation: input.reference.generation,
-        createdAt: operation.createdAt,
-      });
+      const barrier =
+        operation.analyticsBackend !== "DORIS"
+          ? await deleteClickhouseProjectAnalytics(input.projectId).then(
+              () => ({
+                visible: true,
+                barrierLabel: `clickhouse-deletion-${operation.id}`,
+              }),
+            )
+          : await (
+              lifecycle ?? getDorisAnalyticsLifecycleRuntime()
+            ).store.publishProjectTombstone({
+              operationId: operation.id,
+              projectId: input.projectId,
+              generation: input.reference.generation,
+              createdAt: operation.createdAt,
+            });
       if (!barrier.visible) {
         await markDeletionOperationRetrying({
           operationId: operation.id,
@@ -129,6 +201,7 @@ export async function processAnalyticsProjectDelete(
       await hasPreBarrierIngestionWork({
         projectId: input.projectId,
         barrierCreatedAt: operation.createdAt,
+        barrierAcceptanceSequence: operation.ingestionBarrierSequence,
       })
     ) {
       await markDeletionOperationRetrying({
@@ -161,24 +234,23 @@ export async function processAnalyticsProjectDelete(
     const heads = await prisma.analyticsEntityHead.findMany({
       where: { projectId: input.projectId },
     });
-    await lifecycle.materializedDeletion.deleteHeads(operation.id, heads);
+    if (operation.analyticsBackend === "DORIS") {
+      await (
+        lifecycle ?? getDorisAnalyticsLifecycleRuntime()
+      ).materializedDeletion.deleteHeads(operation.id, heads);
+    }
     await deleteProjectMedia(input.projectId);
 
-    await prisma.project.deleteMany({
-      where: {
-        id: input.projectId,
-        orgId: input.organizationId,
-      },
-    });
-    const completed = await completeDeletionOperation({
-      operationId: operation.id,
+    const completed = await finalizeProjectDeletionOperation({
+      projectOperationId: operation.id,
       projectId: input.projectId,
-      scope: "PROJECT",
-      generation: input.reference.generation,
+      organizationId: input.organizationId,
+      projectGeneration: input.reference.generation,
       lease,
     });
-    if (!completed)
-      throw new Error("Project deletion completion lost its fence");
+    if (!completed) {
+      throw new Error("Project deletion could not finalize atomically");
+    }
   } catch (error) {
     const current = await operationFor(input);
     if (current.status !== "COMPLETED") {
@@ -197,7 +269,7 @@ export async function processAnalyticsProjectDelete(
         lease,
       });
     }
-    logger.warn("Doris project deletion will retry", {
+    logger.warn("Analytics project deletion will retry", {
       projectId: input.projectId,
       organizationId: input.organizationId,
       deletionOperationId: operation.id,

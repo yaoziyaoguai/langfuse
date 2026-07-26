@@ -1,13 +1,25 @@
 import { randomUUID } from "node:crypto";
 
-import type {
-  AnalyticsEntityHead,
-  AnalyticsEntityType,
-  AnalyticsRetentionRun,
-  PrismaClient,
+import {
+  Prisma,
+  type AnalyticsEntityHead,
+  type AnalyticsEntityType,
+  type AnalyticsRetentionRun,
+  type PrismaClient,
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+import {
+  lockAnalyticsAdmission,
+  lockLegacyAnalyticsAdmission,
+  type AnalyticsRuntimeAdmissionContext,
+} from "../analytics-persistence/analyticsBackendAdmission";
+import {
+  analyticsDurableProvenanceFromRecord,
+  analyticsProducerProvenanceFromAdmission,
+  type AnalyticsDurableProvenance,
+} from "../analytics-persistence/analyticsDurableProvenance";
+import { acquireAnalyticsRetentionMutationPermit } from "./analyticsCheckpoints";
 
 export const ANALYTICS_RETENTION_STATE_ID = "global";
 
@@ -22,12 +34,39 @@ export const ANALYTICS_RETENTION_PHASES = [
 export type AnalyticsRetentionPhase =
   (typeof ANALYTICS_RETENTION_PHASES)[number];
 
+export type AnalyticsRetentionClient = PrismaClient | Prisma.TransactionClient;
+
+async function databaseClock(
+  transaction: Prisma.TransactionClient,
+): Promise<Date> {
+  const [row] = await transaction.$queryRaw<readonly { now: Date }[]>(
+    Prisma.sql`SELECT clock_timestamp() AS now`,
+  );
+  if (!row || !Number.isFinite(row.now.getTime())) {
+    throw new Error("Postgres did not return its analytics retention clock");
+  }
+  return row.now;
+}
+
 function utcDate(value: Date): Date {
   if (Number.isNaN(value.getTime())) {
     throw new TypeError("Invalid analytics retention date");
   }
   return new Date(
     Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()),
+  );
+}
+
+function retentionCutoff(now: Date, retentionDays: number): Date {
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 3) {
+    throw new TypeError("Invalid analytics retention period");
+  }
+  return new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() - retentionDays,
+    ),
   );
 }
 
@@ -50,30 +89,96 @@ function activeRun(run: AnalyticsRetentionRun): ActiveAnalyticsRetentionRun {
   return { ...run, phase: phase(run.phase) };
 }
 
+async function lockRetentionAdmission(
+  transaction: Prisma.TransactionClient,
+  admissionContext: AnalyticsRuntimeAdmissionContext | null,
+): Promise<AnalyticsDurableProvenance | null> {
+  if (!admissionContext) {
+    await lockLegacyAnalyticsAdmission(transaction);
+    return null;
+  }
+  const admission = await lockAnalyticsAdmission({
+    transaction,
+    runtimeLeaseId: admissionContext.runtimeLeaseId,
+    expectedBackend: admissionContext.backend,
+    expectedDeploymentGeneration: admissionContext.deploymentGeneration,
+    action: "foundation",
+  });
+  return analyticsProducerProvenanceFromAdmission(admission);
+}
+
+function assertRetentionProvenanceMatchesAdmission(
+  run: AnalyticsRetentionRun,
+  admission: AnalyticsDurableProvenance | null,
+): void {
+  const provenance = analyticsDurableProvenanceFromRecord(run);
+  if ((provenance === null) !== (admission === null)) {
+    throw new Error("Analytics retention provenance does not match deployment");
+  }
+  if (
+    provenance &&
+    admission &&
+    (provenance.analyticsBackend !== admission.analyticsBackend ||
+      provenance.deploymentGeneration !== admission.deploymentGeneration ||
+      provenance.workloadEpochFingerprint !==
+        admission.workloadEpochFingerprint ||
+      provenance.runtimeContractVersion !== admission.runtimeContractVersion)
+  ) {
+    throw new Error("Analytics retention durable provenance changed");
+  }
+}
+
+async function assertRetentionMutationAllowed(
+  transaction: Prisma.TransactionClient,
+): Promise<void> {
+  const permit = await acquireAnalyticsRetentionMutationPermit({ transaction });
+  if (permit.outcome === "held") {
+    throw new Error("Analytics retention is held by the analytics checkpoint");
+  }
+  const integrationReplay =
+    await transaction.analyticsCapabilityActivation.findUnique({
+      where: { capability: "ANALYTICS_INTEGRATIONS" },
+      select: {
+        captureRequired: true,
+        rescanRequired: true,
+      },
+    });
+  if (integrationReplay?.captureRequired || integrationReplay?.rescanRequired) {
+    throw new Error(
+      "Analytics retention is held by analytics integration replay",
+    );
+  }
+}
+
 export async function startOrResumeAnalyticsRetention(input: {
   readonly client?: PrismaClient;
-  readonly cutoffDate: Date;
-  readonly now?: Date;
+  readonly retentionDays: number;
+  readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
 }): Promise<ActiveAnalyticsRetentionRun | null> {
   const client = input.client ?? prisma;
-  const cutoffDate = utcDate(input.cutoffDate);
-  const now = input.now ?? new Date();
-  if (!Number.isFinite(now.getTime())) {
-    throw new TypeError("Invalid analytics retention start time");
+  if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 3) {
+    throw new TypeError("Invalid analytics retention period");
   }
 
   return client.$transaction(async (transaction) => {
+    const producerProvenance = await lockRetentionAdmission(
+      transaction,
+      input.admissionContext ?? null,
+    );
+    await assertRetentionMutationAllowed(transaction);
+    const now = await databaseClock(transaction);
+    const cutoffDate = retentionCutoff(now, input.retentionDays);
     const state = await transaction.analyticsRetentionState.upsert({
       where: { id: ANALYTICS_RETENTION_STATE_ID },
       create: { id: ANALYTICS_RETENTION_STATE_ID },
       update: {},
     });
     if (state.activeRunId) {
-      return activeRun(
-        await transaction.analyticsRetentionRun.findUniqueOrThrow({
-          where: { id: state.activeRunId },
-        }),
-      );
+      const run = await transaction.analyticsRetentionRun.findUniqueOrThrow({
+        where: { id: state.activeRunId },
+      });
+      assertRetentionProvenanceMatchesAdmission(run, producerProvenance);
+      return activeRun(run);
     }
     if (state.purgedBefore && cutoffDate <= state.purgedBefore) return null;
 
@@ -83,6 +188,14 @@ export async function startOrResumeAnalyticsRetention(input: {
         cutoffDate,
         phase: "DRAIN",
         status: "RUNNING",
+        analyticsBackend: producerProvenance?.analyticsBackend ?? null,
+        deploymentGeneration: producerProvenance?.deploymentGeneration ?? null,
+        workloadEpochFingerprint:
+          producerProvenance?.workloadEpochFingerprint ?? null,
+        runtimeContractVersion:
+          producerProvenance?.runtimeContractVersion ?? null,
+        producerRuntimeLeaseId:
+          producerProvenance?.producerRuntimeLeaseId ?? null,
         startedAt: now,
       },
     });
@@ -104,16 +217,17 @@ export async function startOrResumeAnalyticsRetention(input: {
       where: { id: ANALYTICS_RETENTION_STATE_ID },
     });
     if (!winner.activeRunId) return null;
-    return activeRun(
+    const winningRun =
       await transaction.analyticsRetentionRun.findUniqueOrThrow({
         where: { id: winner.activeRunId },
-      }),
-    );
+      });
+    assertRetentionProvenanceMatchesAdmission(winningRun, producerProvenance);
+    return activeRun(winningRun);
   });
 }
 
 export async function advanceAnalyticsRetentionRun(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly runId: string;
   readonly expectedPhase: AnalyticsRetentionPhase;
   readonly nextPhase: AnalyticsRetentionPhase;
@@ -139,7 +253,7 @@ export async function advanceAnalyticsRetentionRun(input: {
 }
 
 export async function recordAnalyticsRetentionFailure(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly runId: string;
   readonly phase: AnalyticsRetentionPhase;
   readonly reasonCode: string;
@@ -155,13 +269,13 @@ export async function recordAnalyticsRetentionFailure(input: {
 }
 
 export async function completeAnalyticsRetentionRun(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly runId: string;
-  readonly now?: Date;
 }): Promise<boolean> {
   const client = input.client ?? prisma;
-  const now = input.now ?? new Date();
-  return client.$transaction(async (transaction) => {
+  const complete = async (transaction: Prisma.TransactionClient) => {
+    await assertRetentionMutationAllowed(transaction);
+    const now = await databaseClock(transaction);
     const state = await transaction.analyticsRetentionState.findUnique({
       where: { id: ANALYTICS_RETENTION_STATE_ID },
     });
@@ -186,12 +300,24 @@ export async function completeAnalyticsRetentionRun(input: {
       },
     });
     return true;
-  });
+  };
+  return "$transaction" in client
+    ? client.$transaction(complete)
+    : complete(client);
+}
+
+export async function getAnalyticsRetentionDatabaseClock(input: {
+  readonly client?: AnalyticsRetentionClient;
+}): Promise<Date> {
+  const client = input.client ?? prisma;
+  return "$transaction" in client
+    ? client.$transaction(databaseClock)
+    : databaseClock(client);
 }
 
 export async function getAnalyticsRetentionBarrier(
   input: {
-    readonly client?: PrismaClient;
+    readonly client?: AnalyticsRetentionClient;
   } = {},
 ): Promise<Date | null> {
   const client = input.client ?? prisma;
@@ -208,7 +334,7 @@ export async function getAnalyticsRetentionBarrier(
 }
 
 export async function countUnresolvedAnalyticsLoadsBefore(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly cutoffDate: Date;
 }): Promise<number> {
   const client = input.client ?? prisma;
@@ -221,7 +347,7 @@ export async function countUnresolvedAnalyticsLoadsBefore(input: {
 }
 
 export async function findAnalyticsEntityHeadsForRetention(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly cutoffDate: Date;
   readonly entityType: AnalyticsEntityType;
   readonly limit: number;
@@ -234,7 +360,13 @@ export async function findAnalyticsEntityHeadsForRetention(input: {
     throw new TypeError("Invalid analytics retention batch size");
   }
   // 这是 deployment-wide retention 的全局扫描，不是用户发起的 project 查询。
-  const client = input.client ?? prisma;
+  const client = input.client;
+  if (!client || "$transaction" in client) {
+    throw new TypeError(
+      "Analytics retention batch selection requires an existing transaction",
+    );
+  }
+  await assertRetentionMutationAllowed(client);
   return client.analyticsEntityHead.findMany({
     where: {
       entityType: input.entityType,
@@ -246,7 +378,7 @@ export async function findAnalyticsEntityHeadsForRetention(input: {
 }
 
 export async function deleteAnalyticsEntityHeadsForRetention(input: {
-  readonly client?: PrismaClient;
+  readonly client?: AnalyticsRetentionClient;
   readonly cutoffDate: Date;
   readonly entityType: AnalyticsEntityType;
   readonly headIds: readonly string[];

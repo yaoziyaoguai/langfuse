@@ -1,7 +1,39 @@
 import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { compactAnalyticsControlState } from ".";
+import { AnalyticsControlStateCleaner, compactAnalyticsControlState } from ".";
+
+describe("AnalyticsControlStateCleaner lifecycle", () => {
+  it("drains an in-flight compaction during shutdown", async () => {
+    let finishRun:
+      | ((result: {
+          operationsCompacted: number;
+          childRowsDeleted: number;
+        }) => void)
+      | undefined;
+    const runOnce = vi.fn(
+      () =>
+        new Promise<{
+          operationsCompacted: number;
+          childRowsDeleted: number;
+        }>((resolve) => {
+          finishRun = resolve;
+        }),
+    );
+    const cleaner = new AnalyticsControlStateCleaner({
+      intervalMs: 60_000,
+      runOnce,
+    });
+
+    cleaner.start();
+    await vi.waitFor(() => expect(runOnce).toHaveBeenCalledOnce());
+    const draining = cleaner.stopAndDrain();
+    finishRun?.({ operationsCompacted: 0, childRowsDeleted: 0 });
+    await draining;
+
+    expect(runOnce).toHaveBeenCalledOnce();
+  });
+});
 
 const controlDatabaseUrl = process.env.DORIS_CONTROL_TEST_DATABASE_URL;
 
@@ -141,7 +173,10 @@ describe.skipIf(!controlDatabaseUrl)("analytics control-state cleaner", () => {
         leaseOwner: "checkpoint-test",
         leaseExpiresAt: new Date("2026-08-02T00:00:00.000Z"),
         operationHighWatermarkAcceptedAt: new Date("2026-07-10T00:00:00.000Z"),
+        operationHighWatermarkAcceptedAtNanos:
+          BigInt(new Date("2026-07-10T00:00:00.000Z").getTime()) * 1_000_000n,
         loadHighWatermarkCreatedAt: new Date("2026-07-10T00:00:00.000Z"),
+        deletionHighWatermarkCreatedAt: new Date("2026-07-10T00:00:00.000Z"),
         keyId: "test-key",
         manifestHash: "d".repeat(64),
         signature: "test-signature",

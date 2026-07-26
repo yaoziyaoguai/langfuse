@@ -1,13 +1,16 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { prisma } from "@langfuse/shared/src/db";
-import { recordIncrement } from "@langfuse/shared/src/server";
+import { logger, recordIncrement } from "@langfuse/shared/src/server";
+
+import { PeriodicRunner } from "../../utils/PeriodicRunner";
 
 const POST_REPLAY_SAFETY_DELAY_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * 只压缩已经被可验证 checkpoint 覆盖的成功终态 child ledger。operation 状态和
- * entity head 继续保留；生产周期调度必须等 U8 checkpoint/restore 闭环后才启用。
+ * entity head 继续保留；生产周期调度默认关闭，只能在 checkpoint/restore
+ * 运维闭环可用后显式启用。
  */
 export async function compactAnalyticsControlState(input: {
   readonly client?: PrismaClient;
@@ -166,15 +169,14 @@ export async function compactAnalyticsControlState(input: {
   return { operationsCompacted, childRowsDeleted };
 }
 
-export class AnalyticsControlStateCleaner {
-  private timeout: NodeJS.Timeout | null = null;
-
+export class AnalyticsControlStateCleaner extends PeriodicRunner {
   constructor(
     private readonly dependencies: {
       readonly intervalMs: number;
       readonly runOnce?: typeof compactAnalyticsControlState;
     },
   ) {
+    super();
     if (
       !Number.isSafeInteger(dependencies.intervalMs) ||
       dependencies.intervalMs < 1_000
@@ -183,24 +185,23 @@ export class AnalyticsControlStateCleaner {
     }
   }
 
-  start(): void {
-    if (this.timeout) return;
-    const tick = async () => {
-      try {
-        await (this.dependencies.runOnce ?? compactAnalyticsControlState)({});
-      } finally {
-        if (this.timeout) {
-          this.timeout = setTimeout(tick, this.dependencies.intervalMs);
-          this.timeout.unref();
-        }
-      }
-    };
-    this.timeout = setTimeout(tick, this.dependencies.intervalMs);
-    this.timeout.unref();
+  protected get name(): string {
+    return "AnalyticsControlStateCleaner";
   }
 
-  stop(): void {
-    if (this.timeout) clearTimeout(this.timeout);
-    this.timeout = null;
+  protected get defaultIntervalMs(): number {
+    return this.dependencies.intervalMs;
+  }
+
+  protected async execute(): Promise<void> {
+    const result = await (
+      this.dependencies.runOnce ?? compactAnalyticsControlState
+    )({});
+    if (result.operationsCompacted > 0) {
+      logger.info(
+        "Compacted checkpoint-covered analytics control state",
+        result,
+      );
+    }
   }
 }

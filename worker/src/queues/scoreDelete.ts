@@ -9,19 +9,47 @@ import { processClickhouseScoreDelete } from "../features/scores/processClickhou
 import { processAnalyticsScoreDelete } from "../features/scores/processAnalyticsScoreDelete";
 import { isAnalyticsBackend } from "@langfuse/shared/analytics-backend";
 import { env } from "../env";
+import { prisma } from "@langfuse/shared/src/db";
+import { getWorkerAnalyticsAdmissionContext } from "../analyticsRuntime";
+import { withAnalyticsDurableWorkFence } from "../features/analytics-deletion/analyticsDeletionWorkFence";
+import { validateManagedScoreDeletionReference } from "../features/scores/managedScoreDeletionReference";
 
 export const scoreDeleteProcessor: Processor = async (
   job: Job<TQueueJobTypes[QueueName.ScoreDelete]>,
 ): Promise<void> => {
-  const { scoreIds, projectId } = job.data.payload;
+  const {
+    scoreIds,
+    projectId,
+    analyticsProvenance,
+    deletionOperationId,
+    deletionGeneration,
+  } = job.data.payload;
+  const selectedBackend = isAnalyticsBackend(
+    env.LANGFUSE_ANALYTICS_BACKEND,
+    "doris",
+  )
+    ? ("doris" as const)
+    : ("clickhouse" as const);
+  const resourceIdentity = String(job.id ?? job.data.id);
+  const serializedProvenance = validateManagedScoreDeletionReference(
+    { deletionOperationId, deletionGeneration, analyticsProvenance },
+    resourceIdentity,
+  );
 
-  if (await shouldSkipDeletionFor(projectId, scoreIds, "score")) {
-    return;
-  }
-
-  if (isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "doris")) {
-    await processAnalyticsScoreDelete(projectId, scoreIds);
-  } else {
-    await processClickhouseScoreDelete(projectId, scoreIds);
-  }
+  await withAnalyticsDurableWorkFence({
+    client: prisma,
+    serializedProvenance,
+    admissionContext: getWorkerAnalyticsAdmissionContext(),
+    selectedBackend,
+    claimKind: "score-delete",
+    resourceIdentity,
+    run: async () => {
+      if (await shouldSkipDeletionFor(projectId, scoreIds, "score")) return;
+      if (selectedBackend === "doris") {
+        await processAnalyticsScoreDelete(projectId, scoreIds);
+      } else {
+        await processClickhouseScoreDelete(projectId, scoreIds);
+      }
+    },
+  });
 };

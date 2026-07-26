@@ -15,13 +15,16 @@ import {
   QueueJobs,
   redis,
   ProjectDeleteQueue,
+  analyticsDurableProvenanceFromRecord,
   getEnvironmentsForProject,
   isDorisAnalyticsBackend,
   scheduleProjectDeletionOperation,
+  serializeAnalyticsDurableProvenance,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
 import { StringNoHTMLNonEmpty } from "@langfuse/shared";
 import { buildAdminOrgContext } from "@/src/features/organizations/server/adminOrgContext";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export const projectsRouter = createTRPCRouter({
   create: protectedOrganizationProcedure
@@ -189,7 +192,16 @@ export const projectsRouter = createTRPCRouter({
         });
       }
 
-      const deletionOperation = isDorisAnalyticsBackend()
+      const isDoris = isDorisAnalyticsBackend();
+      const analyticsAdmissionContext = isDoris
+        ? getWebAnalyticsAdmissionContext()
+        : null;
+      if (isDoris && !analyticsAdmissionContext) {
+        throw new Error(
+          "Doris analytics deletion requires managed runtime admission",
+        );
+      }
+      const deletionOperation = isDoris
         ? await scheduleProjectDeletionOperation({
             projectId: input.projectId,
             organizationId: ctx.session.orgId,
@@ -197,7 +209,11 @@ export const projectsRouter = createTRPCRouter({
               principalType: "user",
               principalId: ctx.session.user.id,
             },
+            analyticsAdmissionContext,
           })
+        : null;
+      const deletionProvenance = deletionOperation
+        ? analyticsDurableProvenanceFromRecord(deletionOperation)
         : null;
 
       // API keys need to be deleted from cache. Otherwise, they will still be valid.
@@ -214,15 +230,14 @@ export const projectsRouter = createTRPCRouter({
         },
       });
 
-      const project = await ctx.prisma.project.update({
-        where: {
-          id: input.projectId,
-          orgId: ctx.session.orgId,
-        },
-        data: {
-          deletedAt: new Date(),
-        },
-      });
+      const project = deletionOperation
+        ? await ctx.prisma.project.findUniqueOrThrow({
+            where: { id: input.projectId, orgId: ctx.session.orgId },
+          })
+        : await ctx.prisma.project.update({
+            where: { id: input.projectId, orgId: ctx.session.orgId },
+            data: { deletedAt: new Date() },
+          });
 
       await auditLog({
         session: ctx.session,
@@ -242,6 +257,12 @@ export const projectsRouter = createTRPCRouter({
             ? {
                 deletionOperationId: deletionOperation.id,
                 deletionGeneration: deletionOperation.generation.toString(),
+                ...(deletionProvenance
+                  ? {
+                      analyticsProvenance:
+                        serializeAnalyticsDurableProvenance(deletionProvenance),
+                    }
+                  : {}),
               }
             : {}),
         },
