@@ -30,16 +30,22 @@ const score = {
 
 describe("Doris public score reads", () => {
   it("preserves score pagination and trace projection", async () => {
-    const list = vi
-      .fn()
-      .mockResolvedValue({ items: [score], nextCursor: null });
-    const count = vi.fn().mockResolvedValue(1);
-    const getTrace = vi.fn().mockResolvedValue({
-      userId: "user-1",
-      tags: ["prod"],
-      environment: "production",
-      sessionId: "session-1",
+    const list = vi.fn().mockResolvedValue({
+      items: [
+        {
+          ...score,
+          trace: {
+            name: null,
+            userId: "user-1",
+            tags: ["prod"],
+            environment: "production",
+            sessionId: "session-1",
+          },
+        },
+      ],
+      nextCursor: null,
     });
+    const count = vi.fn().mockResolvedValue(1);
 
     await expect(
       readDorisScoresForPublicApi(
@@ -50,7 +56,7 @@ describe("Doris public score reads", () => {
           fields: ["score", "trace"],
         },
         "v2",
-        { list, count, getTrace },
+        { list, count },
       ),
     ).resolves.toEqual({
       items: [
@@ -71,26 +77,29 @@ describe("Doris public score reads", () => {
         projectId: "project-1",
         limit: 10,
         offset: 0,
+        includeTraceContext: true,
       }),
     );
   });
 
-  it("filters trace properties before applying API pagination", async () => {
+  it("pushes trace properties down before applying API pagination", async () => {
     const second = { ...score, id: "score-2", traceId: "trace-2" };
     const list = vi.fn().mockResolvedValue({
-      items: [score, second],
+      items: [
+        {
+          ...second,
+          trace: {
+            name: "target-trace",
+            userId: "target",
+            tags: [],
+            environment: "production",
+            sessionId: null,
+          },
+        },
+      ],
       nextCursor: null,
     });
-    const count = vi.fn().mockResolvedValue(2);
-    const getTrace = vi.fn().mockImplementation(({ traceId }) =>
-      Promise.resolve({
-        name: traceId === "trace-2" ? "target-trace" : "other-trace",
-        userId: traceId === "trace-2" ? "target" : "other",
-        tags: [],
-        environment: "production",
-        sessionId: null,
-      }),
-    );
+    const count = vi.fn().mockResolvedValue(1);
 
     await expect(
       readDorisScoresForPublicApi(
@@ -101,29 +110,33 @@ describe("Doris public score reads", () => {
           userId: "target",
         },
         "v2",
-        { list, count, getTrace },
+        { list, count },
       ),
     ).resolves.toEqual({
       items: [expect.objectContaining({ id: "score-2" })],
       count: 1,
     });
-  });
-
-  it("keeps trace-backed advanced filters out of score SQL", async () => {
-    const second = { ...score, id: "score-2", traceId: "trace-2" };
-    const list = vi.fn().mockResolvedValue({
-      items: [score, second],
-      nextCursor: null,
-    });
-    const getTrace = vi.fn().mockImplementation(({ traceId }) =>
-      Promise.resolve({
-        name: traceId === "trace-2" ? "target-trace" : "other-trace",
-        userId: null,
-        tags: [],
-        environment: "production",
-        sessionId: null,
+    expect(list.mock.calls[0]?.[0].filters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ column: "userId", value: "target" }),
+      ]),
+    );
+    expect(count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: expect.arrayContaining([
+          expect.objectContaining({ column: "userId", value: "target" }),
+        ]),
       }),
     );
+  });
+
+  it("keeps trace-backed advanced filters in score SQL", async () => {
+    const second = { ...score, id: "score-2", traceId: "trace-2" };
+    const list = vi.fn().mockResolvedValue({
+      items: [{ ...second, trace: null }],
+      nextCursor: null,
+    });
+    const count = vi.fn().mockResolvedValue(1);
 
     await expect(
       readDorisScoresForPublicApi(
@@ -142,17 +155,95 @@ describe("Doris public score reads", () => {
           ],
         },
         "v2",
-        { list, count: vi.fn(), getTrace },
+        { list, count },
       ),
     ).resolves.toEqual({
       items: [expect.objectContaining({ id: "score-2" })],
       count: 1,
     });
-    expect(list.mock.calls[0]?.[0].filters).not.toEqual(
+    expect(list.mock.calls[0]?.[0].filters).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ column: "traceName" }),
       ]),
     );
-    expect(getTrace).toHaveBeenCalledTimes(2);
+  });
+
+  it("matches ClickHouse environment scoping for trace-backed API filters", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValue({ items: [score], nextCursor: null });
+    const count = vi.fn().mockResolvedValue(1);
+
+    await readDorisScoresForPublicApi(
+      {
+        projectId: "project-1",
+        page: 1,
+        limit: 10,
+        userId: "user-1",
+        environment: ["production"],
+        fields: ["score"],
+      },
+      "v2",
+      { list, count },
+    );
+
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeTraceContext: false,
+        filters: expect.arrayContaining([
+          expect.objectContaining({
+            column: "environment",
+            value: ["production"],
+          }),
+          expect.objectContaining({
+            column: "traceEnvironment",
+            value: ["production"],
+          }),
+        ]),
+      }),
+    );
+    expect(count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: expect.arrayContaining([
+          expect.objectContaining({ column: "traceEnvironment" }),
+        ]),
+      }),
+    );
+  });
+
+  it("pushes dataset-run identity into Doris score reads", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValue({ items: [score], nextCursor: null });
+    const count = vi.fn().mockResolvedValue(1);
+
+    await readDorisScoresForPublicApi(
+      {
+        projectId: "project-1",
+        page: 1,
+        limit: 10,
+        datasetRunId: "run-1",
+        fields: ["score"],
+      },
+      "v2",
+      { list, count },
+    );
+
+    const expectedFilter = expect.objectContaining({
+      type: "string",
+      column: "datasetRunId",
+      operator: "=",
+      value: "run-1",
+    });
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: expect.arrayContaining([expectedFilter]),
+      }),
+    );
+    expect(count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: expect.arrayContaining([expectedFilter]),
+      }),
+    );
   });
 });

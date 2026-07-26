@@ -79,4 +79,16 @@ describe("executeQuery Doris composition", () => {
     });
     expect(queryClickhouse).not.toHaveBeenCalled();
   });
+
+  it("preserves Doris validation errors for dashboard, public API, and MCP callers", async () => {
+    const validationError = new Error(
+      "Doris analytics query has too many filters",
+    );
+    executeDoris.mockRejectedValueOnce(validationError);
+
+    await expect(executeQuery("project-1", query, "v2", true)).rejects.toBe(
+      validationError,
+    );
+    expect(queryClickhouse).not.toHaveBeenCalled();
+  });
 });

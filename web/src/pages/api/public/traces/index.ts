@@ -32,6 +32,7 @@ import {
 } from "@/src/features/public-api/server/traces";
 import { env } from "@/src/env.mjs";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export default withMiddlewares(
   {
@@ -55,6 +56,7 @@ export default withMiddlewares(
           event.body.id = v4();
         }
         const result = await processEventBatch([event], auth, {
+          analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
           attribution: createIngestionAttribution({
             headers: req.headers,
             authCheck: auth,
@@ -221,6 +223,7 @@ export default withMiddlewares(
           traceIds,
           {
             organizationId: auth.scope.orgId,
+            analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
             requester: {
               principalType: "api_key",
               principalId: auth.scope.apiKeyId,

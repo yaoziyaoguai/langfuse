@@ -21,6 +21,7 @@ export class DatabaseReadStream<EntityType> extends Readable {
   private hasNextPage: boolean;
   private offset: number;
   private isReading: boolean;
+  private ended: boolean;
 
   constructor(
     // the delegate function takes care of querying the database in a paginated manner
@@ -37,33 +38,48 @@ export class DatabaseReadStream<EntityType> extends Readable {
     this.isReading = false; // Prevent concurrent read executions
     this.hasNextPage = true;
     this.offset = 0;
+    this.ended = false;
   }
 
-  async _read() {
-    if (!this.hasNextPage || this.isReading) return; // Avoid calling the database if there's no more data or if a read operation is already in progress
-
+  _read() {
+    if (this.isReading || this.ended) return;
     this.isReading = true;
+    this.readPages().catch((error: unknown) => {
+      this.destroy(error instanceof Error ? error : new Error(String(error)));
+    });
+  }
 
+  private async readPages(): Promise<void> {
     try {
-      // Stop reading if the maximum number of records has been reached
-      if (this.maxRecords && this.offset >= this.maxRecords) {
-        this.hasNextPage = false;
-        this.push(null); // Signal end of stream
+      while (this.hasNextPage) {
+        const remaining =
+          this.maxRecords === undefined
+            ? this.pageSize
+            : this.maxRecords - this.offset;
+        if (remaining <= 0) {
+          this.hasNextPage = false;
+          break;
+        }
 
-        return;
+        const requested = Math.min(this.pageSize, remaining);
+        const rows = await this.queryDelegate(requested, this.offset);
+        this.offset += rows.length;
+        if (
+          rows.length < requested ||
+          this.offset >= (this.maxRecords ?? Infinity)
+        ) {
+          this.hasNextPage = false;
+        }
+
+        for (const row of rows) {
+          if (!this.push(row)) return;
+        }
       }
 
-      const rows = await this.queryDelegate(this.pageSize, this.offset);
-
-      if (rows.length > 0) {
-        rows.forEach((row) => this.push(row));
-        this.offset += this.pageSize;
-      } else {
-        this.hasNextPage = false;
-        this.push(null); // Signal end of stream
-      }
+      this.ended = true;
+      this.push(null);
     } catch (error) {
-      this.emit("error", error);
+      this.destroy(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.isReading = false;
     }

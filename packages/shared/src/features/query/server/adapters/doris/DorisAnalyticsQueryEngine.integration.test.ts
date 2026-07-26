@@ -6,24 +6,31 @@ import {
   type QueryType,
 } from "../../../types";
 import { DorisPoCMysqlClient } from "../../../../../server/doris-poc/mysqlClient";
+import {
+  assertOwnedDorisTestDatabase,
+  parseDorisTestNamespace,
+} from "../../../../../server/doris/testDatabase";
 import type { DorisQueryExecutor } from "../../../../../server/doris/client";
 import { executeDorisAnalyticsQuery } from "./DorisAnalyticsQueryEngine";
 
 const enabled = process.env.DORIS_POC_ENABLED === "1";
 const describeDoris = enabled ? describe : describe.skip;
+const testNamespace = enabled ? parseDorisTestNamespace() : null;
 
 describeDoris("Doris analytics query engine integration", () => {
   let db: DorisPoCMysqlClient;
   let executor: DorisQueryExecutor;
 
   beforeAll(async () => {
+    if (!testNamespace) throw new Error("Doris test namespace is required");
     db = new DorisPoCMysqlClient({
       host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
       port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
       user: process.env.DORIS_POC_USER ?? "root",
       password: process.env.DORIS_POC_PASSWORD ?? "",
-      database: "langfuse_poc",
+      database: testNamespace.database,
     });
+    await assertOwnedDorisTestDatabase(db, testNamespace);
     executor = {
       query: async <T extends object>(
         sql: string,
@@ -36,6 +43,7 @@ describeDoris("Doris analytics query engine integration", () => {
       end: string,
       completionStart: string,
       parent: string | null,
+      metadata: Readonly<Record<string, unknown>>,
     ) =>
       db.execute(
         `INSERT INTO events_current
@@ -49,10 +57,10 @@ describeDoris("Doris analytics query engine integration", () => {
          VALUES ('analytics-engine-project', '2026-07-17', 'trace-1', ?, ?,
            ?, 1000, 'GENERATION', 'production', ?, 'user-1',
            'session-1', 'checkout', ?, ?, ?, ?, ?, 'api', 'js', '5.0.0',
-           ARRAY('prod'), CAST('{"region":"eu"}' AS VARIANT),
+           ARRAY('prod'), CAST(? AS VARIANT),
            CAST('{"input":10,"output":5,"total":15}' AS VARIANT),
            CAST('{"input":0.1,"output":0.025,"total":0.125}' AS VARIANT),
-           CAST('{"search":"{}"}' AS VARIANT), ARRAY('search'), ARRAY('search'),
+           CAST('{"search":"{}","lookup":"{}"}' AS VARIANT), ARRAY('search'), ARRAY('search'),
            10, 5, 0.125, 'gpt-4')`,
         [
           spanId,
@@ -64,6 +72,7 @@ describeDoris("Doris analytics query engine integration", () => {
           completionStart,
           start,
           start,
+          JSON.stringify(metadata),
         ],
       );
     await insertEvent(
@@ -72,6 +81,7 @@ describeDoris("Doris analytics query engine integration", () => {
       "2026-07-17 10:00:01.000000",
       "2026-07-17 10:00:00.100000",
       null,
+      { region: "eu", quality: 0.8, approved: true, category: "a" },
     );
     await insertEvent(
       "child",
@@ -79,6 +89,7 @@ describeDoris("Doris analytics query engine integration", () => {
       "2026-07-17 10:00:03.000000",
       "2026-07-17 10:00:02.100000",
       "root",
+      { region: "eu", quality: 0.4, approved: false, category: "b" },
     );
     await db.execute(
       `INSERT INTO scores_current
@@ -340,4 +351,145 @@ describeDoris("Doris analytics query engine integration", () => {
       }
     }
   }, 120_000);
+
+  it.each([
+    [
+      {
+        type: "numberObject",
+        column: "metadata",
+        key: "quality",
+        operator: ">",
+        value: 0.5,
+      },
+      "root",
+    ],
+    [
+      {
+        type: "booleanObject",
+        column: "metadata",
+        key: "approved",
+        operator: "=",
+        value: true,
+      },
+      "root",
+    ],
+    [
+      {
+        type: "categoryOptions",
+        column: "metadata",
+        key: "category",
+        operator: "any of",
+        value: ["b"] as string[],
+      },
+      "child",
+    ],
+  ] as const)("executes typed metadata filter %#", async (filter, id) => {
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor,
+        projectId: "analytics-engine-project",
+        version: "v2",
+        query: {
+          view: "observations",
+          dimensions: [{ field: "id" }],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [filter],
+          timeDimension: null,
+          fromTimestamp: "2026-07-17T00:00:00.000Z",
+          toTimestamp: "2026-07-18T00:00:00.000Z",
+          chartConfig: { type: "TABLE", row_limit: 10 },
+          orderBy: [{ field: "count_count", direction: "desc" }],
+        },
+      }),
+    ).resolves.toEqual([{ id, count_count: 1 }]);
+  });
+
+  it.each([
+    ["first", "root"],
+    ["last", "child"],
+  ] as const)("executes the %s position before grouping", async (key, id) => {
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor,
+        projectId: "analytics-engine-project",
+        version: "v2",
+        query: {
+          view: "observations",
+          dimensions: [{ field: "id" }],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [
+            {
+              type: "positionInTrace",
+              column: "startTime",
+              operator: "=",
+              key,
+            },
+          ],
+          timeDimension: null,
+          fromTimestamp: "2026-07-17T00:00:00.000Z",
+          toTimestamp: "2026-07-18T00:00:00.000Z",
+          chartConfig: { type: "TABLE", row_limit: 10 },
+          orderBy: [{ field: "count_count", direction: "desc" }],
+        },
+      }),
+    ).resolves.toEqual([{ id, count_count: 1 }]);
+  });
+
+  it("keeps all exploded values for the selected observation position", async () => {
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor,
+        projectId: "analytics-engine-project",
+        version: "v2",
+        query: {
+          view: "observations",
+          dimensions: [{ field: "toolNames" }],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [
+            {
+              type: "positionInTrace",
+              column: "startTime",
+              operator: "=",
+              key: "first",
+            },
+          ],
+          timeDimension: null,
+          fromTimestamp: "2026-07-17T00:00:00.000Z",
+          toTimestamp: "2026-07-18T00:00:00.000Z",
+          chartConfig: { type: "TABLE", row_limit: 10 },
+          orderBy: [{ field: "toolNames", direction: "asc" }],
+        },
+      }),
+    ).resolves.toEqual([
+      { toolNames: "lookup", count_count: 1 },
+      { toolNames: "search", count_count: 1 },
+    ]);
+  });
+
+  it("filters a dynamic cost key without selecting it", async () => {
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor,
+        projectId: "analytics-engine-project",
+        version: "v2",
+        query: {
+          view: "observations",
+          dimensions: [],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [
+            {
+              type: "string",
+              column: "costType",
+              operator: "=",
+              value: "input",
+            },
+          ],
+          timeDimension: null,
+          fromTimestamp: "2026-07-17T00:00:00.000Z",
+          toTimestamp: "2026-07-18T00:00:00.000Z",
+          orderBy: null,
+        },
+      }),
+    ).resolves.toEqual([{ count_count: 2 }]);
+  });
 });

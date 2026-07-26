@@ -18,7 +18,7 @@ type ComparisonInput = {
   toTimestamp: Date;
   interval: IntervalConfig;
   nBins: number;
-  objectType: DorisScoreAnalyticsObjectType | "dataset_run";
+  objectType: DorisScoreAnalyticsObjectType;
   mode: "single" | "two";
 };
 
@@ -28,11 +28,6 @@ function assertInput(input: ComparisonInput) {
   if (input.fromTimestamp >= input.toTimestamp) {
     throw new InvalidRequestError("fromTimestamp must be before toTimestamp");
   }
-  if (input.objectType === "dataset_run") {
-    throw new InvalidRequestError(
-      "Dataset-run score analytics are unavailable in Doris R1A",
-    );
-  }
 }
 
 function attachmentKey(score: ScoreDomain): string {
@@ -40,6 +35,7 @@ function attachmentKey(score: ScoreDomain): string {
     score.traceId ?? null,
     score.observationId ?? null,
     score.sessionId ?? null,
+    score.datasetRunId ?? null,
   ]);
 }
 
@@ -290,13 +286,13 @@ export async function estimateDorisScoreComparison(
     range: { from: input.fromTimestamp, to: input.toTimestamp },
     score1: input.score1,
     score2: input.score2,
-    objectType: input.objectType as DorisScoreAnalyticsObjectType,
+    objectType: input.objectType,
   });
 }
 
 export async function getDorisScoreComparisonAnalytics(input: ComparisonInput) {
   assertInput(input);
-  const objectType = input.objectType as DorisScoreAnalyticsObjectType;
+  const objectType = input.objectType;
   const repository = getDorisTelemetryRepositories().scores;
   const counts = await repository.comparisonCounts({
     projectId: input.projectId,
@@ -373,7 +369,11 @@ export async function getDorisScoreComparisonAnalytics(input: ComparisonInput) {
         globalMax,
       }))
     : [];
-  const confusionMatrix = isNumeric
+  const confusionMatrix: Array<{
+    rowCategory: string;
+    colCategory: string;
+    count: number;
+  }> = isNumeric
     ? []
     : groupedRows(
         pairs.map(({ first: left, second: right }) => ({
@@ -381,7 +381,11 @@ export async function getDorisScoreComparisonAnalytics(input: ComparisonInput) {
           colCategory: scoreCategory(right),
         })),
         ["rowCategory", "colCategory"],
-      );
+      ).map(({ rowCategory, colCategory, count }) => ({
+        rowCategory,
+        colCategory,
+        count,
+      }));
 
   const secondByAttachment = new Map<string, ScoreDomain[]>();
   for (const score of secondRows) {

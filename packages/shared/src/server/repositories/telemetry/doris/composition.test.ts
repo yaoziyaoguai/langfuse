@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createDorisTelemetryRepositories } from "./composition";
+import { DorisDatasetRunItemsRepository } from "./datasetRunItems";
+import { DorisExperimentsRepository } from "./experiments";
 import { DorisObservationsRepository } from "./observations";
 import { DorisSessionsRepository } from "./sessions";
 import { DorisTracesRepository } from "./traces";
@@ -12,6 +14,10 @@ describe("Doris telemetry repository composition", () => {
 
     const repositories = createDorisTelemetryRepositories({ query });
 
+    expect(repositories.datasetRunItems).toBeInstanceOf(
+      DorisDatasetRunItemsRepository,
+    );
+    expect(repositories.experiments).toBeInstanceOf(DorisExperimentsRepository);
     expect(repositories.observations).toBeInstanceOf(
       DorisObservationsRepository,
     );

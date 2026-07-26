@@ -53,13 +53,14 @@ import {
   logger,
   getTraceById,
   getScoreById,
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
   convertDateToClickhouseDateTime,
   searchExistingAnnotationScore,
   hasAnyScore,
   ScoreDeleteQueue,
   QueueJobs,
   getScoreMetadataById,
-  deleteScores,
   getTracesIdentifierForSession,
   validateConfigAgainstBody,
 } from "@langfuse/shared/src/server";
@@ -73,6 +74,10 @@ import {
   isTraceScore,
 } from "@/src/features/scores/lib/helpers";
 import { toDomainWithStringifiedMetadata } from "@/src/utils/clientSideDomainTypes";
+import {
+  managedScoreDeletionReference,
+  withScoreDeletionAdmission,
+} from "@/src/features/scores/server/scoreDeletionAdmission";
 
 const ScoreFilterOptions = z.object({
   projectId: z.string(), // Required for protectedProjectProcedure
@@ -101,6 +106,42 @@ type AllScoresFromEventsReturnType = Omit<ScoreDomain, "metadata"> & {
 };
 
 const BOOLEAN_SCORE_VALUE_OPTIONS = [{ value: "true" }, { value: "false" }];
+
+async function publishDirectScoreDeletion(input: {
+  readonly projectId: string;
+  readonly scoreIds: readonly string[];
+  readonly beforePublish: () => Promise<void>;
+}): Promise<void> {
+  const event = {
+    timestamp: new Date(),
+    id: randomUUID(),
+    payload: { projectId: input.projectId, scoreIds: [...input.scoreIds] },
+    name: QueueJobs.ScoreDelete as const,
+  };
+  await withScoreDeletionAdmission({
+    resourceIdentity: event.id,
+    publish: async (guard) => {
+      const queue = ScoreDeleteQueue.getInstance();
+      if (!queue) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "ScoreDeleteQueue not initialized",
+        });
+      }
+      await input.beforePublish();
+      const queuedEvent = {
+        ...event,
+        payload: {
+          ...event.payload,
+          ...managedScoreDeletionReference(guard, event.id),
+        },
+      };
+      await guard.withIoFence(() =>
+        queue.add(QueueJobs.ScoreDelete, queuedEvent, { jobId: event.id }),
+      );
+    },
+  });
+}
 
 export const scoresRouter = createTRPCRouter({
   /**
@@ -451,33 +492,20 @@ export const scoresRouter = createTRPCRouter({
         });
       }
       if (input.scoreIds) {
-        const scoreDeleteQueue = ScoreDeleteQueue.getInstance();
-        if (!scoreDeleteQueue) {
-          throw new TRPCError({
-            code: "INTERNAL_SERVER_ERROR",
-            message: "ScoreDeleteQueue not initialized",
-          });
-        }
-
-        await Promise.all(
-          input.scoreIds.map((scoreId) =>
-            auditLog({
-              resourceType: "score",
-              resourceId: scoreId,
-              action: "delete",
-              session: ctx.session,
-            }),
-          ),
-        );
-
-        return scoreDeleteQueue.add(QueueJobs.ScoreDelete, {
-          timestamp: new Date(),
-          id: randomUUID(),
-          payload: {
-            projectId: input.projectId,
-            scoreIds: input.scoreIds,
-          },
-          name: QueueJobs.ScoreDelete,
+        return publishDirectScoreDeletion({
+          projectId: input.projectId,
+          scoreIds: input.scoreIds,
+          beforePublish: () =>
+            Promise.all(
+              input.scoreIds!.map((scoreId) =>
+                auditLog({
+                  resourceType: "score",
+                  resourceId: scoreId,
+                  action: "delete",
+                  session: ctx.session,
+                }),
+              ),
+            ).then(() => undefined),
         });
       }
       throw new TRPCError({
@@ -888,32 +916,60 @@ export const scoresRouter = createTRPCRouter({
         scope: "scores:CUD",
       });
 
-      // Fetch the current score from Clickhouse
-      const clickhouseScore = await getScoreById({
-        projectId: input.projectId,
-        scoreId: input.id,
-        source: ScoreSourceEnum.ANNOTATION,
+      const deletionEventId = randomUUID();
+      const score = await withScoreDeletionAdmission({
+        resourceIdentity: deletionEventId,
+        publish: async (guard) => {
+          const score = isDorisAnalyticsBackend()
+            ? await getDorisTelemetryRepositories().scores.get({
+                projectId: input.projectId,
+                scoreId: input.id,
+              })
+            : await getScoreById({
+                projectId: input.projectId,
+                scoreId: input.id,
+                source: ScoreSourceEnum.ANNOTATION,
+              });
+          if (!score || score.source !== ScoreSourceEnum.ANNOTATION) {
+            logger.warn(
+              `No annotation score with id ${input.id} in project ${input.projectId}`,
+            );
+            throw new LangfuseNotFoundError(
+              `No annotation score with id ${input.id} in project ${input.projectId}`,
+            );
+          }
+
+          await auditLog({
+            session: ctx.session,
+            resourceType: "score",
+            resourceId: input.id,
+            action: "delete",
+            before: score,
+          });
+          const queue = ScoreDeleteQueue.getInstance();
+          if (!queue) {
+            throw new InternalServerError("ScoreDeleteQueue not initialized");
+          }
+          const event = {
+            timestamp: new Date(),
+            id: deletionEventId,
+            payload: {
+              projectId: input.projectId,
+              scoreIds: [score.id],
+              ...managedScoreDeletionReference(guard, deletionEventId),
+            },
+            name: QueueJobs.ScoreDelete as const,
+          };
+          await guard.withIoFence(() =>
+            queue.add(QueueJobs.ScoreDelete, event, {
+              jobId: deletionEventId,
+            }),
+          );
+          return score;
+        },
       });
-      if (!clickhouseScore) {
-        logger.warn(
-          `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse`,
-        );
-        throw new LangfuseNotFoundError(
-          `No annotation score with id ${input.id} in project ${input.projectId} in Clickhouse`,
-        );
-      }
 
-      await auditLog({
-        session: ctx.session,
-        resourceType: "score",
-        resourceId: input.id,
-        action: "delete",
-        before: clickhouseScore,
-      });
-
-      await deleteScores(input.projectId, [clickhouseScore.id]);
-
-      return validateDbScore(clickhouseScore);
+      return validateDbScore(score);
     }),
   upsertCorrection: protectedProjectProcedure
     .input(

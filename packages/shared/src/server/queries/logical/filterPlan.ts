@@ -21,6 +21,10 @@ const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
   userId: { expression: "e.user_id" },
   sessionId: { expression: "e.session_id" },
   traceName: { expression: "e.trace_name" },
+  experimentId: { expression: "e.experiment_id" },
+  experimentName: { expression: "e.experiment_name" },
+  experimentDatasetId: { expression: "e.experiment_dataset_id" },
+  experimentItemId: { expression: "e.experiment_item_id" },
   level: { expression: "e.`level`" },
   statusMessage: { expression: "e.status_message" },
   promptName: { expression: "e.prompt_name" },
@@ -42,16 +46,15 @@ const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
     expression: "JSON_EXTRACT_DOUBLE(e.cost_details, '$.output')",
   },
   latency: {
-    expression:
-      "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0",
+    expression: "MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0",
   },
   timeToFirstToken: {
     expression:
-      "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.completion_start_time) / 1000000.0",
+      "MICROSECONDS_DIFF(e.completion_start_time, e.start_time) / 1000000.0",
   },
   tokensPerSecond: {
     expression:
-      "e.total_output_tokens / NULLIF(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0, 0)",
+      "e.total_output_tokens / NULLIF(MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0, 0)",
   },
   input: { expression: "e.input", requiresFullContent: true },
   output: { expression: "e.output", requiresFullContent: true },
@@ -90,15 +93,15 @@ const EVENT_COLUMNS: Readonly<Record<string, DorisEventColumn>> = {
   },
 };
 
-const U6_COLUMNS = new Set([
-  "scores",
-  "scores_avg",
-  "score_categories",
-  "score_booleans",
-  "trace_scores_avg",
-  "trace_score_categories",
-  "trace_score_booleans",
-]);
+const SCORE_FILTER_LEVELS: Readonly<Record<string, "observation" | "trace">> = {
+  scores: "observation",
+  scores_avg: "observation",
+  score_categories: "observation",
+  score_booleans: "observation",
+  trace_scores_avg: "trace",
+  trace_score_categories: "trace",
+  trace_score_booleans: "trace",
+};
 
 const EVENT_COLUMN_ALIASES: Readonly<Record<string, string>> = {
   "Trace Tags": "traceTags",
@@ -138,7 +141,72 @@ const EVENT_COLUMN_ALIASES: Readonly<Record<string, string>> = {
   tokens: "totalTokens",
   tags: "traceTags",
   traceEnvironment: "environment",
+  Scores: "scores_avg",
+  SCORES: "scores_avg",
+  "Scores (numeric)": "scores_avg",
+  "Scores (categorical)": "score_categories",
+  "Scores (boolean)": "score_booleans",
+  "Trace Scores (numeric)": "trace_scores_avg",
+  "Trace Scores (categorical)": "trace_score_categories",
+  "Trace Scores (boolean)": "trace_score_booleans",
 };
+
+const MAX_DORIS_FILTERS = 100;
+const MAX_DORIS_FILTER_VALUES = 1_000;
+const MAX_DORIS_FILTER_VALUE_LENGTH = 10_000;
+const MAX_DORIS_OBJECT_KEY_LENGTH = 256;
+const MAX_DORIS_OBJECT_KEY_DEPTH = 16;
+
+type DorisFilterBudgetInput = {
+  readonly column: string;
+  readonly value?: unknown;
+  readonly key?: string;
+};
+
+export function assertDorisFilterBudget(
+  filters: readonly DorisFilterBudgetInput[],
+  queryLabel = "Doris analytics query",
+): void {
+  if (filters.length > MAX_DORIS_FILTERS) {
+    throw new InvalidRequestError(`${queryLabel} has too many filters`);
+  }
+
+  let valueCount = 0;
+  for (const filter of filters) {
+    const values = Array.isArray(filter.value)
+      ? filter.value
+      : filter.value === undefined
+        ? []
+        : [filter.value];
+    valueCount += values.length;
+    if (valueCount > MAX_DORIS_FILTER_VALUES) {
+      throw new InvalidRequestError(`${queryLabel} has too many filter values`);
+    }
+    if (
+      values.some(
+        (value) =>
+          typeof value === "string" &&
+          value.length > MAX_DORIS_FILTER_VALUE_LENGTH,
+      )
+    ) {
+      throw new InvalidRequestError(`${queryLabel} filter value is too long`);
+    }
+    if (
+      filter.column.length === 0 ||
+      filter.column.length > MAX_DORIS_OBJECT_KEY_LENGTH
+    ) {
+      throw new InvalidRequestError(`Invalid ${queryLabel} filter column`);
+    }
+    if (
+      filter.key !== undefined &&
+      (filter.key.length === 0 ||
+        filter.key.length > MAX_DORIS_OBJECT_KEY_LENGTH ||
+        filter.key.split(".").length > MAX_DORIS_OBJECT_KEY_DEPTH)
+    ) {
+      throw new InvalidRequestError(`Invalid ${queryLabel} object key`);
+    }
+  }
+}
 
 export function normalizeDorisEventFilters(
   filters: EventsTableFilterState,
@@ -160,11 +228,23 @@ export type LogicalPositionFilter = Extract<
   { readonly type: "positionInTrace" }
 >;
 
+export type LogicalEventScoreFilter = {
+  readonly filter: Extract<
+    EventsTableFilterState[number],
+    {
+      readonly type: "numberObject" | "booleanObject" | "categoryOptions";
+    }
+  >;
+  readonly level: "observation" | "trace";
+};
+
 export function buildEventFilterPlan(filters: EventsTableFilterState): {
   readonly filters: readonly LogicalEventFilter[];
+  readonly scoreFilters: readonly LogicalEventScoreFilter[];
   readonly positionFilter?: LogicalPositionFilter;
   readonly requiresFullContent: boolean;
 } {
+  assertDorisFilterBudget(filters, "Doris event query");
   const parsed = eventsTableFilterState.safeParse(
     normalizeDorisEventFilters(filters),
   );
@@ -176,14 +256,29 @@ export function buildEventFilterPlan(filters: EventsTableFilterState): {
     (filter): filter is LogicalPositionFilter =>
       filter.type === "positionInTrace",
   );
-  const planned = parsed.data
-    .filter((filter) => filter.type !== "positionInTrace")
-    .map((filter): LogicalEventFilter => {
-      if (U6_COLUMNS.has(filter.column)) {
+  const scoreFilters = parsed.data.flatMap(
+    (filter): LogicalEventScoreFilter[] => {
+      const level = SCORE_FILTER_LEVELS[filter.column];
+      if (!level) return [];
+      if (
+        filter.type !== "numberObject" &&
+        filter.type !== "booleanObject" &&
+        filter.type !== "categoryOptions"
+      ) {
         throw new InvalidRequestError(
-          "Score filters are unavailable until the Doris score query plan is active",
+          `Unsupported Doris score filter type: ${filter.type}`,
         );
       }
+      return [{ filter, level }];
+    },
+  );
+  const planned = parsed.data
+    .filter(
+      (filter) =>
+        filter.type !== "positionInTrace" &&
+        SCORE_FILTER_LEVELS[filter.column] === undefined,
+    )
+    .map((filter): LogicalEventFilter => {
       const column = EVENT_COLUMNS[filter.column];
       if (!column) {
         throw new InvalidRequestError(
@@ -197,18 +292,29 @@ export function buildEventFilterPlan(filters: EventsTableFilterState): {
         filter.type === "booleanObject" ||
         filter.type === "categoryOptions"
       ) {
-        if (filter.column !== "metadata" || filter.type !== "stringObject") {
+        if (filter.column !== "metadata") {
           throw new InvalidRequestError(
             `Unsupported Doris analytics object filter: ${filter.column}`,
           );
         }
+        const castType =
+          filter.type === "numberObject"
+            ? "DOUBLE"
+            : filter.type === "booleanObject"
+              ? "BOOLEAN"
+              : "STRING";
         return {
           filter,
-          expression: "JSON_UNQUOTE(CAST(ELEMENT_AT(e.metadata, ?) AS STRING))",
+          expression: `${castType === "STRING" ? "JSON_UNQUOTE(" : ""}CAST(ELEMENT_AT(e.metadata, ?) AS ${castType})${castType === "STRING" ? ")" : ""}`,
           objectKey: filter.key,
         };
       }
       return { filter, expression: column.expression };
     });
-  return { filters: planned, positionFilter, requiresFullContent };
+  return {
+    filters: planned,
+    scoreFilters,
+    positionFilter,
+    requiresFullContent,
+  };
 }

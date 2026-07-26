@@ -91,6 +91,14 @@ export type DorisObservation = {
   readonly toolDefinitions?: Readonly<Record<string, unknown>>;
   readonly toolCalls?: readonly string[];
   readonly toolCallNames?: readonly string[];
+  readonly experimentId?: string | null;
+  readonly experimentName?: string | null;
+  readonly experimentDescription?: string | null;
+  readonly experimentDatasetId?: string | null;
+  readonly experimentItemId?: string | null;
+  readonly experimentItemExpectedOutput?: string | null;
+  readonly experimentItemMetadata?: Readonly<Record<string, unknown>> | null;
+  readonly experimentItemRootSpanId?: string | null;
 };
 
 export type DorisObservationsPage = {
@@ -111,6 +119,9 @@ export type DorisEventFilterOptionColumn =
   | "sessionId"
   | "level"
   | "environment"
+  | "experimentDatasetId"
+  | "experimentId"
+  | "experimentName"
   | "isRootObservation"
   | "hasParentObservation"
   | "toolNames"
@@ -211,6 +222,25 @@ const EVENT_FACETS: Readonly<
     includeWhen: "e.environment IS NOT NULL AND e.environment != ''",
     order: "count",
   },
+  experimentDatasetId: {
+    kind: "scalar",
+    expression: "e.experiment_dataset_id",
+    includeWhen:
+      "e.experiment_dataset_id IS NOT NULL AND e.experiment_dataset_id != ''",
+    order: "count",
+  },
+  experimentId: {
+    kind: "scalar",
+    expression: "e.experiment_id",
+    includeWhen: "e.experiment_id IS NOT NULL AND e.experiment_id != ''",
+    order: "count",
+  },
+  experimentName: {
+    kind: "scalar",
+    expression: "e.experiment_name",
+    includeWhen: "e.experiment_name IS NOT NULL AND e.experiment_name != ''",
+    order: "count",
+  },
   isRootObservation: {
     kind: "boolean",
     expression:
@@ -243,11 +273,11 @@ const EVENT_NUMERIC_EXPRESSIONS: Readonly<
   totalCost: "e.total_cost",
   totalTokens:
     "COALESCE(e.total_input_tokens, 0) + COALESCE(e.total_output_tokens, 0)",
-  latency: "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0",
+  latency: "MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0",
   timeToFirstToken:
-    "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.completion_start_time) / 1000000.0",
+    "MICROSECONDS_DIFF(e.completion_start_time, e.start_time) / 1000000.0",
   tokensPerSecond:
-    "e.total_output_tokens / NULLIF(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0, 0)",
+    "e.total_output_tokens / NULLIF(MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0, 0)",
   toolDefinitions: "CARDINALITY(JSON_KEYS(e.tool_definitions))",
   toolCalls: "CARDINALITY(e.tool_calls)",
 };
@@ -351,6 +381,12 @@ function objectValue(value: unknown): Readonly<Record<string, unknown>> {
     : {};
 }
 
+function nullableObjectValue(
+  value: unknown,
+): Readonly<Record<string, unknown>> | null {
+  return value === null || value === undefined ? null : objectValue(value);
+}
+
 function numericRecord(value: unknown): Readonly<Record<string, number>> {
   return Object.fromEntries(
     Object.entries(objectValue(value)).flatMap(([key, item]) => {
@@ -441,12 +477,26 @@ function decodeObservation(row: DorisEventRow): DorisObservation {
     ...(Object.hasOwn(row, "tool_call_names") && {
       toolCallNames: stringArray(row.tool_call_names),
     }),
+    ...(Object.hasOwn(row, "experiment_id") && {
+      experimentId: nullableString(row.experiment_id),
+      experimentName: nullableString(row.experiment_name),
+      experimentDescription: nullableString(row.experiment_description),
+      experimentDatasetId: nullableString(row.experiment_dataset_id),
+      experimentItemId: nullableString(row.experiment_item_id),
+      experimentItemExpectedOutput: nullableString(
+        row.experiment_item_expected_output,
+      ),
+      experimentItemMetadata: nullableObjectValue(row.experiment_item_metadata),
+      experimentItemRootSpanId: nullableString(
+        row.experiment_item_root_span_id,
+      ),
+    }),
   };
   return observation;
 }
 
 export function encodeDorisObservationCursor(
-  observation: DorisObservation,
+  observation: Pick<DorisObservation, "startTime" | "traceId" | "id">,
 ): string {
   return Buffer.from(
     JSON.stringify({
@@ -503,6 +553,7 @@ export class DorisObservationsRepository {
   constructor(
     private readonly dependencies: {
       readonly query: DorisQueryExecutor["query"];
+      readonly streamQuery?: NonNullable<DorisQueryExecutor["streamQuery"]>;
       readonly locateObservation?: LocateObservation;
       readonly locateTrace?: LocateTrace;
     },
@@ -558,6 +609,7 @@ export class DorisObservationsRepository {
       orderBy: input.orderBy,
       offset: input.offset,
       limit: input.limit + 1,
+      allowUnboundedFullContent: !enforceFullContentRange,
     });
     const rows = await this.dependencies.query<DorisEventRow>(
       compiled.sql,
@@ -589,6 +641,41 @@ export class DorisObservationsRepository {
     readonly partitionDates?: readonly string[];
   }): Promise<DorisObservationsPage> {
     return this.listInternal(input, true);
+  }
+
+  async *scanIdentities(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly limit: number;
+    readonly signal?: AbortSignal;
+  }): AsyncIterable<{ readonly id: string; readonly traceId: string }> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Doris observation identity limit is invalid");
+    }
+    const scope = compileDorisVisibleEventScope(input);
+    const streamQuery = this.dependencies.streamQuery;
+    const rows = streamQuery
+      ? streamQuery<{ readonly span_id: string; readonly trace_id: string }>(
+          `SELECT e.span_id, e.trace_id\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY e.trace_id ASC, e.span_id ASC\nLIMIT ?`,
+          scope.params.concat(input.limit),
+          { signal: input.signal },
+        )
+      : await this.dependencies.query<{
+          readonly span_id: string;
+          readonly trace_id: string;
+        }>(
+          `SELECT e.span_id, e.trace_id\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY e.trace_id ASC, e.span_id ASC\nLIMIT ?`,
+          scope.params.concat(input.limit),
+          { signal: input.signal },
+        );
+    for await (const row of rows) {
+      yield { id: String(row.span_id), traceId: String(row.trace_id) };
+    }
   }
 
   /**
@@ -880,7 +967,7 @@ export class DorisObservationsRepository {
   PERCENTILE_APPROX(COALESCE(e.total_input_tokens, 0), 0.5) AS median_input_usage,
   PERCENTILE_APPROX(COALESCE(e.total_output_tokens, 0), 0.5) AS median_output_usage,
   PERCENTILE_APPROX(COALESCE(e.total_cost, 0), 0.5) AS median_total_cost,
-  PERCENTILE_APPROX(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000.0, 0.5) AS median_latency_ms
+  PERCENTILE_APPROX(MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000.0, 0.5) AS median_latency_ms
 ${scope.fromSql}
 WHERE ${scope.whereSql}
 GROUP BY e.prompt_id, e.prompt_version
@@ -938,6 +1025,69 @@ ORDER BY e.prompt_version DESC`,
     }));
   }
 
+  async evaluatorCostMetrics(input: {
+    readonly projectId: string;
+    readonly evaluatorIds: readonly string[];
+    readonly now?: Date;
+  }): Promise<
+    readonly {
+      readonly evaluatorId: string;
+      readonly totalCost: number;
+      readonly avgCost: number;
+      readonly executionCount: number;
+    }[]
+  > {
+    const evaluatorIds = [...new Set(input.evaluatorIds)];
+    if (evaluatorIds.length === 0) return [];
+    if (evaluatorIds.some((evaluatorId) => !evaluatorId)) {
+      throw new InvalidRequestError("Invalid evaluator cost query");
+    }
+
+    const today = input.now ? new Date(input.now) : new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const from = new Date(today);
+    from.setUTCDate(from.getUTCDate() - 7);
+    const to = new Date(today);
+    to.setUTCDate(to.getUTCDate() + 1);
+    const scope = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: { from, to },
+      filters: [
+        {
+          type: "string",
+          column: "type",
+          operator: "=",
+          value: "GENERATION",
+        },
+      ],
+    });
+    const evaluatorPlaceholders = evaluatorIds.map(() => "?").join(", ");
+    const rows = await this.dependencies.query<Record<string, unknown>>(
+      `WITH evaluator_events AS (
+  SELECT
+    JSON_UNQUOTE(CAST(ELEMENT_AT(e.metadata, ?) AS STRING)) AS evaluator_id,
+    COALESCE(e.total_cost, 0) AS total_cost
+${scope.fromSql}
+WHERE ${scope.whereSql}
+)
+SELECT
+  evaluator_id,
+  SUM(total_cost) AS total_cost,
+  AVG(total_cost) AS avg_cost,
+  COUNT(*) AS execution_count
+FROM evaluator_events
+WHERE evaluator_id IN (${evaluatorPlaceholders})
+GROUP BY evaluator_id`,
+      ["job_configuration_id", ...scope.params, ...evaluatorIds],
+    );
+    return rows.map((row) => ({
+      evaluatorId: String(row.evaluator_id),
+      totalCost: numberValue(row.total_cost),
+      avgCost: numberValue(row.avg_cost),
+      executionCount: numberValue(row.execution_count),
+    }));
+  }
+
   async costAndLatencyByIds(input: {
     readonly projectId: string;
     readonly observationIds: readonly string[];
@@ -963,7 +1113,7 @@ ORDER BY e.prompt_version DESC`,
       ],
     });
     const rows = await this.dependencies.query<Record<string, unknown>>(
-      `SELECT e.span_id, e.total_cost, TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0 AS latency\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
+      `SELECT e.span_id, e.total_cost, MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0 AS latency\n${scope.fromSql}\nWHERE ${scope.whereSql}`,
       scope.params,
     );
     return rows.map((row) => ({

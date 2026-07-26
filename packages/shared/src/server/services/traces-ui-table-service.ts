@@ -38,7 +38,10 @@ import {
   getDorisTelemetryRepositories,
   isDorisAnalyticsBackend,
 } from "../repositories/telemetry/doris/runtime";
-import type { DorisTraceOrderBy } from "../repositories/telemetry/doris/traces";
+import {
+  encodeDorisTraceCursor,
+  type DorisTraceOrderBy,
+} from "../repositories/telemetry/doris/traces";
 
 export type TracesTableReturnType = Pick<
   TraceRecordReadType,
@@ -120,7 +123,7 @@ export const convertToUITableMetrics = (
   return {
     id: row.id,
     projectId: row.project_id,
-    latency: Number(row.latency),
+    latency: row.latency === null ? null : Number(row.latency),
     promptTokens: BigInt(usageDetails.input ?? 0),
     completionTokens: BigInt(usageDetails.output ?? 0),
     totalTokens: BigInt(usageDetails.total ?? 0),
@@ -193,7 +196,7 @@ type SelectReturnTypeMap = {
   identifiers: { id: string; projectId: string; timestamp: string };
 };
 
-async function buildDorisTraceReadQuery(
+export async function buildDorisTraceReadQuery(
   projectId: string,
   filter: FilterState,
 ): Promise<{
@@ -233,7 +236,7 @@ async function buildDorisTraceReadQuery(
     const column =
       item.column === "timestamp"
         ? "startTime"
-        : item.column === "id"
+        : item.column === "id" || item.column === "ID"
           ? "traceId"
           : item.column === "traceName"
             ? "name"
@@ -297,16 +300,6 @@ function toDorisTraceOrderBy(
 async function getDorisTracesTableGeneric(
   props: FetchTracesTableProps,
 ): Promise<Array<SelectReturnTypeMap[keyof SelectReturnTypeMap]>> {
-  if (props.select === "metrics") {
-    throw new InvalidRequestError(
-      "Doris trace metrics are unavailable until the score/metrics query plan is active",
-    );
-  }
-  if (props.traceDeleteCursor) {
-    throw new InvalidRequestError(
-      "Doris trace deletion cursor is unavailable until the lifecycle query plan is active",
-    );
-  }
   const query = await buildDorisTraceReadQuery(props.projectId, props.filter);
   if (query.impossible) {
     return props.select === "count" ? [{ count: "0" }] : [];
@@ -324,13 +317,49 @@ async function getDorisTracesTableGeneric(
     });
     return [{ count: String(count) }];
   }
+  if (props.select === "metrics") {
+    const metrics = await repository.metrics({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+      search,
+      orderBy: toDorisTraceOrderBy(props.orderBy),
+      offset: (props.page ?? 0) * (props.limit ?? 999),
+      limit: props.limit ?? 999,
+    });
+    return metrics.map((metric) => ({
+      id: metric.id,
+      project_id: metric.projectId,
+      timestamp: metric.timestamp,
+      latency: metric.latency === null ? null : String(metric.latency),
+      level: metric.level,
+      observation_count: metric.observationCount,
+      usage_details: { ...metric.usageDetails },
+      cost_details: { ...metric.costDetails },
+      scores_avg: [],
+      error_count: metric.errorCount,
+      warning_count: metric.warningCount,
+      default_count: metric.defaultCount,
+      debug_count: metric.debugCount,
+    }));
+  }
   const page = await repository.list({
     projectId: props.projectId,
     range: query.range,
     filters: query.filters,
     search,
-    orderBy: toDorisTraceOrderBy(props.orderBy),
-    offset: (props.page ?? 0) * (props.limit ?? 999),
+    cursor: props.traceDeleteCursor
+      ? encodeDorisTraceCursor({
+          id: props.traceDeleteCursor.traceId,
+          timestamp: new Date(props.traceDeleteCursor.timestamp),
+        })
+      : undefined,
+    orderBy: props.traceDeleteCursorOrder
+      ? undefined
+      : toDorisTraceOrderBy(props.orderBy),
+    offset: props.traceDeleteCursorOrder
+      ? 0
+      : (props.page ?? 0) * (props.limit ?? 999),
     limit: props.limit ?? 999,
   });
   if (props.select === "identifiers") {
@@ -867,6 +896,9 @@ export const getTraceDeleteCursorPageFromTraces = async (props: {
 
   return identifiers.map((row) => ({
     traceId: row.id,
-    timestamp: parseClickhouseUTCDateTimeFormat(row.timestamp).toISOString(),
+    timestamp: (isDorisAnalyticsBackend()
+      ? new Date(row.timestamp)
+      : parseClickhouseUTCDateTimeFormat(row.timestamp)
+    ).toISOString(),
   }));
 };

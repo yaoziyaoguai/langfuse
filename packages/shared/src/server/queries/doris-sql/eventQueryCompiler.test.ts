@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { EventsTableFilterState } from "../../../types";
 import { AnalyticsQueryValidationError } from "../logical/searchPlan";
 import {
   compileDorisVisibleEventScope,
@@ -101,6 +102,26 @@ describe("Doris event query compiler", () => {
     expect(compiled.selectsFullContent).toBe(false);
     expect(compiled.sql).not.toContain("e.input AS input");
     expect(compiled.sql).not.toContain("e.output AS output");
+    expect(compiled.sql).toContain(
+      "COALESCE(e.usage_details_json, CAST(e.usage_details AS STRING)) AS usage_details",
+    );
+  });
+
+  it("reads exact dynamic JSON for detail responses with a legacy fallback", () => {
+    const compiled = compileDorisVisibleEventsQuery({
+      projectId: "project-1",
+      range,
+      projection: "detail",
+      filters: [],
+      limit: 10,
+    });
+
+    expect(compiled.sql).toContain(
+      "COALESCE(e.metadata_json, CAST(e.metadata AS STRING)) AS metadata",
+    );
+    expect(compiled.sql).toContain(
+      "COALESCE(e.tool_definitions_json, CAST(e.tool_definitions AS STRING)) AS tool_definitions",
+    );
   });
 
   it("compiles an allowlisted order with stable tie-breakers and offset", () => {
@@ -176,6 +197,10 @@ describe("Doris event query compiler", () => {
     expect(compiled.sql).toContain(
       "CARDINALITY(JSON_KEYS(e.tool_definitions))",
     );
+    expect(compiled.sql).toContain(
+      "MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0",
+    );
+    expect(compiled.sql).not.toContain("TIMESTAMPDIFF(MICROSECOND");
     expect(compiled.sql).toContain("NOT (ARRAY_CONTAINS(");
     expect(compiled.sql).toContain(
       "(e.input IS NOT NULL AND e.input != '') = ?",
@@ -185,6 +210,44 @@ describe("Doris event query compiler", () => {
       expect.arrayContaining([1, 2, "GENERATION", "SPAN", "dangerous", true]),
     );
   });
+
+  it.each([
+    ["stringObject", "CAST(ELEMENT_AT(e.metadata, ?) AS STRING)", "eu"],
+    ["numberObject", "CAST(ELEMENT_AT(e.metadata, ?) AS DOUBLE)", 0.75],
+    ["booleanObject", "CAST(ELEMENT_AT(e.metadata, ?) AS BOOLEAN)", true],
+    ["categoryOptions", "CAST(ELEMENT_AT(e.metadata, ?) AS STRING)", ["a"]],
+  ] as const)(
+    "compiles typed %s event metadata filters with a bound key",
+    (type, expectedExpression, value) => {
+      const filter =
+        type === "categoryOptions"
+          ? {
+              type,
+              column: "metadata",
+              key: 'nested."quoted"',
+              operator: "any of" as const,
+              value: [...value],
+            }
+          : {
+              type,
+              column: "metadata",
+              key: 'nested."quoted"',
+              operator: "=" as const,
+              value,
+            };
+      const compiled = compileDorisVisibleEventsQuery({
+        projectId: "project-1",
+        range,
+        projection: "list",
+        filters: [filter as EventsTableFilterState[number]],
+        limit: 10,
+      });
+
+      expect(compiled.sql).toContain(expectedExpression);
+      expect(compiled.sql).not.toContain('nested."quoted"');
+      expect(compiled.params).toContain('nested."quoted"');
+    },
+  );
 
   it.each([
     ["root", "ASC", 1],
@@ -231,6 +294,109 @@ describe("Doris event query compiler", () => {
       expect(compiled.sql).not.toContain("position_event.input AS input");
     },
   );
+
+  it("pushes typed observation and trace score filters into correlated Doris subqueries", () => {
+    const compiled = compileDorisVisibleEventsQuery({
+      projectId: "project-1",
+      range,
+      projection: "list",
+      filters: [
+        {
+          type: "numberObject",
+          column: "scores_avg",
+          key: "quality",
+          operator: ">",
+          value: 0.5,
+        },
+        {
+          type: "categoryOptions",
+          column: "trace_score_categories",
+          key: "topic",
+          operator: "none of",
+          value: ["unsafe", "unknown"],
+        },
+        {
+          type: "booleanObject",
+          column: "score_booleans",
+          key: "approved",
+          operator: "<>",
+          value: true,
+        },
+      ],
+      limit: 10,
+    });
+
+    expect(compiled.sql).toContain("FROM scores_current score_filter");
+    expect(compiled.sql).toContain("score_filter.observation_id = e.span_id");
+    expect(compiled.sql).toContain("score_filter.observation_id IS NULL");
+    expect(compiled.sql).toContain("AVG(score_filter.`value`) > ?");
+    expect(compiled.sql).toContain("NOT EXISTS (");
+    expect(compiled.sql).not.toContain("quality");
+    expect(compiled.params).toEqual(
+      expect.arrayContaining([
+        "project-1",
+        "quality",
+        0.5,
+        "topic",
+        "unsafe",
+        "unknown",
+        "approved",
+        true,
+      ]),
+    );
+  });
+
+  it("rejects event filters that exceed the shared Doris resource budget", () => {
+    expect(() =>
+      compileDorisVisibleEventsQuery({
+        projectId: "project-1",
+        range,
+        projection: "list",
+        filters: Array.from({ length: 101 }, (_, index) => ({
+          type: "string" as const,
+          column: "name",
+          operator: "=" as const,
+          value: `name-${index}`,
+        })),
+        limit: 10,
+      }),
+    ).toThrow("too many filters");
+
+    expect(() =>
+      compileDorisVisibleEventsQuery({
+        projectId: "project-1",
+        range,
+        projection: "list",
+        filters: [
+          {
+            type: "stringOptions",
+            column: "name",
+            operator: "any of",
+            value: Array.from({ length: 1_001 }, (_, index) => `name-${index}`),
+          },
+        ],
+        limit: 10,
+      }),
+    ).toThrow("too many filter values");
+
+    expect(() =>
+      compileDorisVisibleEventsQuery({
+        projectId: "project-1",
+        range,
+        projection: "list",
+        filters: [
+          {
+            type: "stringObject",
+            column: "metadata",
+            key: Array.from({ length: 17 }, () => "nested").join("."),
+            operator: "=",
+            value: "eu",
+          },
+        ],
+        limit: 10,
+      }),
+    ).toThrow("object key");
+  });
 
   it("rejects unbounded and over-30-day full-content predicates consistently", () => {
     expect(() =>

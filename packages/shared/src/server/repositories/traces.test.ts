@@ -18,7 +18,11 @@ vi.mock("../queries/clickhouse-sql/query-options", () => ({
   shouldSkipObservationsFinal: mockShouldSkipObservationsFinal,
 }));
 
-import { getTracesCountForPublicApi } from "./traces";
+vi.mock("./telemetry/doris/runtime", () => ({
+  isDorisAnalyticsBackend: () => false,
+}));
+
+import { getTracesByIds, getTracesCountForPublicApi } from "./traces";
 import {
   FilterList,
   StringFilter,
@@ -81,5 +85,35 @@ describe("getTracesCountForPublicApi — FINAL modifier", () => {
     expect(mockQueryClickhouse).toHaveBeenCalledOnce();
     const { query } = mockQueryClickhouse.mock.calls[0][0];
     expect(query).toMatch(/FROM\s+traces\s+t\s+FINAL/);
+  });
+});
+
+describe("getTracesByIds — ClickHouse routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps the existing ClickHouse exact-ID query when ClickHouse is selected", async () => {
+    mockQueryClickhouse.mockResolvedValueOnce([]);
+
+    await expect(
+      getTracesByIds(
+        ["trace-1"],
+        "project-1",
+        new Date("2026-07-17T00:00:00.000Z"),
+      ),
+    ).resolves.toEqual([]);
+    expect(mockQueryClickhouse).toHaveBeenCalledOnce();
+    expect(mockQueryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.stringContaining(
+          "FROM traces\n        WHERE id IN ({traceIds: Array(String)})",
+        ),
+        params: expect.objectContaining({
+          traceIds: ["trace-1"],
+          projectId: "project-1",
+        }),
+      }),
+    );
   });
 });

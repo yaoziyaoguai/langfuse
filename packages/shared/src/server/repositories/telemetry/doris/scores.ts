@@ -9,7 +9,10 @@ import type { EventsTableFilterState } from "../../../../types";
 import { parseJsonIfString } from "../../../../utils/json";
 import type { DorisQueryExecutor } from "../../../doris/client";
 import { compileDorisEventFilters } from "../../../queries/doris-sql/filterCompiler";
-import type { LogicalEventFilter } from "../../../queries/logical/filterPlan";
+import {
+  assertDorisFilterBudget,
+  type LogicalEventFilter,
+} from "../../../queries/logical/filterPlan";
 import {
   assertAnalyticsTimeRange,
   type AnalyticsTimeRange,
@@ -28,6 +31,8 @@ const SCORE_PROJECTION = `
   s.trace_id,
   s.observation_id,
   s.session_id,
+  s.dataset_run_id,
+  s.execution_trace_id,
   s.\`name\`,
   s.\`source\`,
   s.data_type,
@@ -40,7 +45,7 @@ const SCORE_PROJECTION = `
   s.config_id,
   s.queue_id,
   s.environment,
-  s.metadata,
+  COALESCE(s.metadata_json, CAST(s.metadata AS STRING)) AS metadata,
   s.\`timestamp\`,
   s.created_at,
   s.updated_at`;
@@ -51,6 +56,10 @@ const SCORE_COLUMNS: Readonly<Record<string, string>> = {
   traceId: "s.trace_id",
   observationId: "s.observation_id",
   sessionId: "s.session_id",
+  datasetRunId: "s.dataset_run_id",
+  datasetRunIds: "s.dataset_run_id",
+  experimentId: "s.dataset_run_id",
+  executionTraceId: "s.execution_trace_id",
   name: "s.`name`",
   source: "s.`source`",
   dataType: "s.data_type",
@@ -86,6 +95,29 @@ const SCORE_ORDER_COLUMNS: Readonly<Record<string, string>> = {
   updatedAt: "s.updated_at",
 };
 
+const TRACE_CONTEXT_COLUMNS: Readonly<Record<string, string>> = {
+  traceName: "trace_ctx.trace_name",
+  userId: "trace_ctx.trace_user_id",
+  trace_tags: "trace_ctx.trace_tags",
+  tags: "trace_ctx.trace_tags",
+  traceEnvironment: "trace_ctx.trace_environment",
+};
+
+const DATASET_RUN_CONTEXT_COLUMNS: Readonly<Record<string, string>> = {
+  datasetRunItemRunIds: "dri.dataset_run_id",
+  datasetId: "dri.dataset_id",
+  datasetItemIds: "dri.dataset_item_id",
+  experimentIds: "dri.dataset_run_id",
+};
+
+const TRACE_CONTEXT_PROJECTION = `,
+  trace_ctx.trace_id AS context_trace_id,
+  trace_ctx.trace_name,
+  trace_ctx.trace_user_id,
+  trace_ctx.trace_tags,
+  trace_ctx.trace_environment,
+  trace_ctx.trace_session_id`;
+
 type LocateScore = (input: {
   readonly projectId: string;
   readonly scoreId: string;
@@ -106,11 +138,24 @@ export type DorisScoreAnalyticsObjectType =
   | "all"
   | "trace"
   | "session"
-  | "observation";
+  | "observation"
+  | "dataset_run";
 
 export type DorisScoresPage = {
-  readonly items: readonly ScoreDomain[];
+  readonly items: readonly DorisScoreWithTraceContext[];
   readonly nextCursor: string | null;
+};
+
+export type DorisScoreTraceContext = {
+  readonly name: string | null;
+  readonly userId: string | null;
+  readonly tags: readonly string[];
+  readonly environment: string | null;
+  readonly sessionId: string | null;
+};
+
+export type DorisScoreWithTraceContext = ScoreDomain & {
+  readonly trace?: DorisScoreTraceContext | null;
 };
 
 export type DorisPromptScore = ListableScore & {
@@ -175,13 +220,13 @@ function decodeScore(row: DorisScoreRow): ScoreDomain {
     metadata: metadataValue(row.metadata),
     configId: nullableString(row.config_id),
     queueId: nullableString(row.queue_id),
-    executionTraceId: null,
+    executionTraceId: nullableString(row.execution_trace_id),
     createdAt: dateTime(row.created_at),
     updatedAt: dateTime(row.updated_at),
     timestamp: dateTime(row.timestamp),
     traceId: nullableString(row.trace_id),
     sessionId: nullableString(row.session_id),
-    datasetRunId: null,
+    datasetRunId: nullableString(row.dataset_run_id),
     observationId: nullableString(row.observation_id),
     longStringValue: nullableString(row.long_string_value) ?? "",
   };
@@ -193,6 +238,33 @@ function decodeScore(row: DorisScoreRow): ScoreDomain {
     nullableString(row.string_value) ??
     (dataType === "BOOLEAN" ? (numericValue === 1 ? "True" : "False") : "");
   return { ...base, dataType, stringValue } as ScoreDomain;
+}
+
+function stringArray(value: unknown): readonly string[] {
+  if (Array.isArray(value)) return value.map(String);
+  const parsed = parseJsonIfString(value);
+  return Array.isArray(parsed) ? parsed.map(String) : [];
+}
+
+function decodeScoreWithTraceContext(
+  row: DorisScoreRow,
+  includeTraceContext: boolean,
+): DorisScoreWithTraceContext {
+  const score = decodeScore(row);
+  if (!includeTraceContext) return score;
+  if (row.context_trace_id === null || row.context_trace_id === undefined) {
+    return { ...score, trace: null };
+  }
+  return {
+    ...score,
+    trace: {
+      name: nullableString(row.trace_name),
+      userId: nullableString(row.trace_user_id),
+      tags: stringArray(row.trace_tags),
+      environment: nullableString(row.trace_environment),
+      sessionId: nullableString(row.trace_session_id),
+    },
+  };
 }
 
 function utcDate(value: Date): string {
@@ -250,6 +322,7 @@ function decodeCursor(
 function scoreFilterPlans(
   filters: EventsTableFilterState,
 ): LogicalEventFilter[] {
+  assertDorisFilterBudget(filters, "Doris score query");
   return filters.map((filter) => {
     if (filter.type === "positionInTrace") {
       throw new InvalidRequestError("Unsupported Doris score position filter");
@@ -271,7 +344,10 @@ function scoreFilterPlans(
         objectKey: filter.key,
       };
     }
-    const expression = SCORE_COLUMNS[filter.column];
+    const expression =
+      SCORE_COLUMNS[filter.column] ??
+      TRACE_CONTEXT_COLUMNS[filter.column] ??
+      DATASET_RUN_CONTEXT_COLUMNS[filter.column];
     if (!expression) {
       throw new InvalidRequestError(
         `Unsupported Doris score filter column: ${filter.column}`,
@@ -286,6 +362,7 @@ function compileScope(input: {
   readonly range: AnalyticsTimeRange;
   readonly filters: EventsTableFilterState;
   readonly cursor?: { readonly timestamp: Date; readonly scoreId: string };
+  readonly includeTraceContext?: boolean;
 }): {
   readonly fromSql: string;
   readonly whereSql: string;
@@ -303,6 +380,79 @@ function compileScope(input: {
       return "?";
     },
   };
+  const needsTraceContext =
+    input.includeTraceContext === true ||
+    input.filters.some(
+      (filter) => TRACE_CONTEXT_COLUMNS[filter.column] !== undefined,
+    );
+  const datasetRunFilters = input.filters.filter(
+    (filter) => DATASET_RUN_CONTEXT_COLUMNS[filter.column] !== undefined,
+  );
+  const directFilters = input.filters.filter(
+    (filter) => DATASET_RUN_CONTEXT_COLUMNS[filter.column] === undefined,
+  );
+  let traceContextJoin = "";
+  if (needsTraceContext) {
+    const candidateProjectId = bound.bind(input.projectId);
+    const candidatePartitionFrom = bound.bind(utcDate(input.range.from));
+    const candidatePartitionTo = bound.bind(
+      exclusivePartitionTo(input.range.to),
+    );
+    const candidateTimestampFrom = bound.bind(input.range.from);
+    const candidateTimestampTo = bound.bind(input.range.to);
+    const traceProjectId = bound.bind(input.projectId);
+    traceContextJoin = `LEFT JOIN (
+  SELECT
+    ranked_trace_event.project_id,
+    ranked_trace_event.trace_id,
+    NULLIF(ranked_trace_event.\`name\`, '') AS trace_name,
+    NULLIF(ranked_trace_event.user_id, '') AS trace_user_id,
+    ranked_trace_event.tags AS trace_tags,
+    NULLIF(ranked_trace_event.environment, '') AS trace_environment,
+    NULLIF(ranked_trace_event.session_id, '') AS trace_session_id
+  FROM (
+    SELECT
+      trace_event.project_id,
+      trace_event.trace_id,
+      trace_event.\`name\`,
+      trace_event.user_id,
+      trace_event.tags,
+      trace_event.environment,
+      trace_event.session_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY trace_event.project_id, trace_event.trace_id
+        ORDER BY trace_event.is_app_root DESC,
+          CASE WHEN trace_event.parent_span_id IS NULL OR trace_event.parent_span_id = '' THEN 0 ELSE 1 END,
+          trace_event.start_time ASC,
+          trace_event.span_id ASC
+      ) AS representative_rank
+    FROM events_current trace_event
+    INNER JOIN (
+      SELECT DISTINCT candidate_score.trace_id
+      FROM scores_current candidate_score
+      WHERE candidate_score.project_id = ${candidateProjectId}
+        AND candidate_score.score_date >= ${candidatePartitionFrom}
+        AND candidate_score.score_date < ${candidatePartitionTo}
+        AND candidate_score.\`timestamp\` >= ${candidateTimestampFrom}
+        AND candidate_score.\`timestamp\` < ${candidateTimestampTo}
+        AND candidate_score.trace_id IS NOT NULL
+    ) candidate_trace
+      ON candidate_trace.trace_id = trace_event.trace_id
+    LEFT JOIN trace_tombstones context_trace_deletion
+      ON context_trace_deletion.project_id = trace_event.project_id
+     AND context_trace_deletion.trace_id = trace_event.trace_id
+    LEFT JOIN project_tombstones context_project_deletion
+      ON context_project_deletion.project_id = trace_event.project_id
+    WHERE trace_event.project_id = ${traceProjectId}
+      AND context_trace_deletion.trace_id IS NULL
+      AND context_project_deletion.project_id IS NULL
+  ) ranked_trace_event
+  WHERE representative_rank = 1
+) trace_ctx
+  ON trace_ctx.project_id = s.project_id
+ AND trace_ctx.trace_id = s.trace_id
+`;
+  }
   const predicates = [
     `s.project_id = ${bound.bind(input.projectId)}`,
     `s.score_date >= ${bound.bind(utcDate(input.range.from))}`,
@@ -311,8 +461,35 @@ function compileScope(input: {
     `s.\`timestamp\` < ${bound.bind(input.range.to)}`,
     "trace_deletion.trace_id IS NULL",
     "project_deletion.project_id IS NULL",
-    ...compileDorisEventFilters(scoreFilterPlans(input.filters), bound),
+    ...compileDorisEventFilters(scoreFilterPlans(directFilters), bound),
   ];
+  if (datasetRunFilters.length > 0) {
+    const datasetRunPredicates = compileDorisEventFilters(
+      scoreFilterPlans(datasetRunFilters),
+      bound,
+    );
+    predicates.push(`EXISTS (
+      SELECT 1
+      FROM dataset_run_items_current dri
+      WHERE dri.project_id = s.project_id
+        AND dri.trace_id = s.trace_id
+        AND ${datasetRunPredicates.join("\n        AND ")}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM dataset_tombstones dataset_deletion
+          WHERE dataset_deletion.project_id = dri.project_id
+            AND dataset_deletion.dataset_id = dri.dataset_id
+            AND dataset_deletion.deletion_generation > dri.dataset_deletion_generation
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM dataset_run_tombstones run_deletion
+          WHERE run_deletion.project_id = dri.project_id
+            AND run_deletion.dataset_run_id = dri.dataset_run_id
+            AND run_deletion.deletion_generation > dri.run_deletion_generation
+        )
+    )`);
+  }
   if (input.cursor) {
     predicates.push(
       `(s.\`timestamp\` < ${bound.bind(input.cursor.timestamp)} OR (s.\`timestamp\` = ${bound.bind(input.cursor.timestamp)} AND s.score_id < ${bound.bind(input.cursor.scoreId)}))`,
@@ -320,7 +497,7 @@ function compileScope(input: {
   }
   return {
     fromSql: `FROM scores_current s
-LEFT JOIN trace_tombstones trace_deletion
+${traceContextJoin}LEFT JOIN trace_tombstones trace_deletion
   ON trace_deletion.project_id = s.project_id
  AND trace_deletion.trace_id = s.trace_id
 LEFT JOIN project_tombstones project_deletion
@@ -354,6 +531,7 @@ function analyticsFilters(
       { type: "null", column: "traceId", operator: "is not null", value: "" },
       { type: "null", column: "observationId", operator: "is null", value: "" },
       { type: "null", column: "sessionId", operator: "is null", value: "" },
+      { type: "null", column: "datasetRunId", operator: "is null", value: "" },
     );
   } else if (objectType === "observation") {
     filters.push({
@@ -367,6 +545,19 @@ function analyticsFilters(
       { type: "null", column: "sessionId", operator: "is not null", value: "" },
       { type: "null", column: "observationId", operator: "is null", value: "" },
       { type: "null", column: "traceId", operator: "is null", value: "" },
+      { type: "null", column: "datasetRunId", operator: "is null", value: "" },
+    );
+  } else if (objectType === "dataset_run") {
+    filters.push(
+      {
+        type: "null",
+        column: "datasetRunId",
+        operator: "is not null",
+        value: "",
+      },
+      { type: "null", column: "traceId", operator: "is null", value: "" },
+      { type: "null", column: "observationId", operator: "is null", value: "" },
+      { type: "null", column: "sessionId", operator: "is null", value: "" },
     );
   }
   return filters;
@@ -378,6 +569,7 @@ export class DorisScoresRepository {
   constructor(
     private readonly dependencies: {
       readonly query: DorisQueryExecutor["query"];
+      readonly streamQuery?: NonNullable<DorisQueryExecutor["streamQuery"]>;
       readonly locateScore?: LocateScore;
     },
   ) {
@@ -395,6 +587,7 @@ export class DorisScoresRepository {
       readonly column: string;
       readonly order: "ASC" | "DESC";
     };
+    readonly includeTraceContext?: boolean;
   }): Promise<DorisScoresPage> {
     if (
       !Number.isSafeInteger(input.limit) ||
@@ -416,7 +609,8 @@ export class DorisScoresRepository {
       );
     }
     const orderExpression = input.orderBy
-      ? SCORE_ORDER_COLUMNS[input.orderBy.column]
+      ? (SCORE_ORDER_COLUMNS[input.orderBy.column] ??
+        TRACE_CONTEXT_COLUMNS[input.orderBy.column])
       : undefined;
     if (input.orderBy && !orderExpression) {
       throw new InvalidRequestError(
@@ -426,17 +620,25 @@ export class DorisScoresRepository {
     const scope = compileScope({
       ...input,
       cursor: decodeCursor(input.cursor),
+      includeTraceContext:
+        input.includeTraceContext === true ||
+        (input.orderBy !== undefined &&
+          TRACE_CONTEXT_COLUMNS[input.orderBy.column] !== undefined),
     });
     const offsetSql = input.offset ? " OFFSET ?" : "";
     const rows = await this.dependencies.query<DorisScoreRow>(
-      `SELECT ${SCORE_PROJECTION}\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY ${orderExpression ? `${orderExpression} ${input.orderBy!.order}, ` : ""}s.\`timestamp\` DESC, s.score_id DESC\nLIMIT ?${offsetSql}`,
+      `SELECT ${SCORE_PROJECTION}${input.includeTraceContext ? TRACE_CONTEXT_PROJECTION : ""}\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY ${orderExpression ? `${orderExpression} IS NULL ASC, ${orderExpression} ${input.orderBy!.order}, ` : ""}s.\`timestamp\` DESC, s.score_id DESC\nLIMIT ?${offsetSql}`,
       [
         ...scope.params,
         input.limit + 1,
         ...(input.offset ? [input.offset] : []),
       ],
     );
-    const items = rows.slice(0, input.limit).map(decodeScore);
+    const items = rows
+      .slice(0, input.limit)
+      .map((row) =>
+        decodeScoreWithTraceContext(row, input.includeTraceContext === true),
+      );
     return {
       items,
       nextCursor:
@@ -444,6 +646,33 @@ export class DorisScoresRepository {
           ? encodeCursor(items[items.length - 1]!)
           : null,
     };
+  }
+
+  async *scanIdentities(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange;
+    readonly filters: EventsTableFilterState;
+    readonly limit: number;
+    readonly signal?: AbortSignal;
+  }): AsyncIterable<{ readonly id: string }> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Doris score identity limit is invalid");
+    }
+    const scope = compileScope(input);
+    const sql = `SELECT s.score_id\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY s.score_id ASC\nLIMIT ?`;
+    const params = scope.params.concat(input.limit);
+    const rows = this.dependencies.streamQuery
+      ? this.dependencies.streamQuery<{ readonly score_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        )
+      : await this.dependencies.query<{ readonly score_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        );
+    for await (const row of rows) yield { id: String(row.score_id) };
   }
 
   async count(input: {
@@ -494,11 +723,11 @@ export class DorisScoresRepository {
     });
     const rows = await this.dependencies.query<Record<string, unknown>>(
       `WITH score1 AS (
-  SELECT s.trace_id, s.observation_id, s.session_id
+  SELECT s.trace_id, s.observation_id, s.session_id, s.dataset_run_id
   ${first.fromSql}
   WHERE ${first.whereSql}
 ), score2 AS (
-  SELECT s.trace_id, s.observation_id, s.session_id
+  SELECT s.trace_id, s.observation_id, s.session_id, s.dataset_run_id
   ${second.fromSql}
   WHERE ${second.whereSql}
 ), matched AS (
@@ -508,6 +737,7 @@ export class DorisScoresRepository {
     ON COALESCE(a.trace_id, '') = COALESCE(b.trace_id, '')
    AND COALESCE(a.observation_id, '') = COALESCE(b.observation_id, '')
    AND COALESCE(a.session_id, '') = COALESCE(b.session_id, '')
+   AND COALESCE(a.dataset_run_id, '') = COALESCE(b.dataset_run_id, '')
   LIMIT 1000000
 )
 SELECT
@@ -546,7 +776,7 @@ SELECT
       filters: analyticsFilters(input.score, input.objectType),
     });
     const rows = await this.dependencies.query<DorisScoreRow>(
-      `SELECT ${SCORE_PROJECTION}\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY COALESCE(s.trace_id, ''), COALESCE(s.observation_id, ''), COALESCE(s.session_id, ''), s.score_id ASC\nLIMIT ?`,
+      `SELECT ${SCORE_PROJECTION}\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY COALESCE(s.trace_id, ''), COALESCE(s.observation_id, ''), COALESCE(s.session_id, ''), COALESCE(s.dataset_run_id, ''), s.score_id ASC\nLIMIT ?`,
       [...scope.params, input.limit],
     );
     return rows.map(decodeScore);

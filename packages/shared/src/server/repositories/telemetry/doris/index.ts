@@ -1,5 +1,7 @@
 export * from "./adapters";
 export * from "./composition";
+export * from "./datasetRunItems";
+export * from "./experiments";
 export * from "./derivedUi";
 export * from "./observations";
 export * from "./publicApi";

@@ -17,12 +17,6 @@ const base = {
 
 describe("Doris analytics query engine", () => {
   it("compiles every R1A dimension, measure, and aggregation declared by the shared model", async () => {
-    const deferred = new Set([
-      "datasetRunId",
-      "experimentName",
-      "experimentDatasetId",
-      "experimentId",
-    ]);
     for (const version of ["v1", "v2"] as const) {
       for (const view of [
         "traces",
@@ -31,9 +25,7 @@ describe("Doris analytics query engine", () => {
         "scores-categorical",
       ] as const) {
         const declaration = getViewDeclaration(view, version);
-        for (const field of Object.keys(declaration.dimensions).filter(
-          (candidate) => !deferred.has(candidate),
-        )) {
+        for (const field of Object.keys(declaration.dimensions)) {
           await executeDorisAnalyticsQuery({
             executor: { query: vi.fn().mockResolvedValue([]) },
             projectId: "project-1",
@@ -236,20 +228,404 @@ describe("Doris analytics query engine", () => {
     expect(sql).toContain("COUNT(*) AS count_count");
   });
 
-  it("fails explicitly for deferred experiment dimensions", async () => {
+  it("queries experiment dimensions from the canonical event projection", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        experimentName: "prompt-eval",
+        experimentDatasetId: "dataset-1",
+        experimentId: "run-1",
+        count_count: "2",
+      },
+    ]);
+
     await expect(
       executeDorisAnalyticsQuery({
-        executor: { query: vi.fn() },
+        executor: { query },
         projectId: "project-1",
         version: "v2",
         query: {
           ...base,
           view: "observations",
-          dimensions: [{ field: "experimentName" }],
+          dimensions: [
+            { field: "experimentName" },
+            { field: "experimentDatasetId" },
+            { field: "experimentId" },
+          ],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [
+            {
+              type: "string",
+              column: "experimentId",
+              operator: "=",
+              value: "run-1",
+            },
+          ],
+          timeDimension: null,
+          chartConfig: { type: "TABLE", row_limit: 100 },
+          orderBy: [{ field: "count_count", direction: "desc" }],
+        },
+      }),
+    ).resolves.toEqual([
+      {
+        experimentName: "prompt-eval",
+        experimentDatasetId: "dataset-1",
+        experimentId: "run-1",
+        count_count: 2,
+      },
+    ]);
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("NULLIF(b.experiment_name, '')");
+    expect(sql).toContain("NULLIF(b.experiment_dataset_id, '')");
+    expect(sql).toContain("NULLIF(b.experiment_id, '')");
+    expect(query.mock.calls[0]?.[1]).toContain("run-1");
+  });
+
+  it("queries dataset-run and experiment dimensions for scores", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      query: {
+        ...base,
+        view: "scores-numeric",
+        dimensions: [
+          { field: "datasetRunId" },
+          { field: "experimentName" },
+          { field: "experimentId" },
+        ],
+        metrics: [{ measure: "value", aggregation: "avg" }],
+        filters: [
+          {
+            type: "stringOptions",
+            column: "datasetRunId",
+            operator: "any of",
+            value: ["run-1"],
+          },
+        ],
+        timeDimension: null,
+        chartConfig: { type: "TABLE", row_limit: 100 },
+        orderBy: [{ field: "avg_value", direction: "desc" }],
+      },
+    });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("NULLIF(b.dataset_run_id, '')");
+    expect(sql).toContain("o.experiment_name");
+    expect(sql).toContain("o.experiment_id");
+    expect(query.mock.calls[0]?.[1]).toContain("run-1");
+  });
+
+  it.each([
+    ["root", "ASC", 1],
+    ["first", "ASC", 1],
+    ["last", "DESC", 1],
+    ["nthFromStart", "ASC", 3],
+    ["nthFromEnd", "DESC", 3],
+  ] as const)(
+    "ranks the %s observation position before aggregation",
+    async (key, direction, position) => {
+      const query = vi.fn().mockResolvedValue([]);
+
+      await executeDorisAnalyticsQuery({
+        executor: { query },
+        projectId: "project-1",
+        version: "v2",
+        query: {
+          ...base,
+          view: "observations",
+          dimensions: [{ field: "name" }],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [
+            {
+              type: "stringOptions",
+              column: "environment",
+              operator: "any of",
+              value: ["production"],
+            },
+            {
+              type: "positionInTrace",
+              column: "startTime",
+              operator: "=",
+              key,
+              ...(key === "nthFromStart" || key === "nthFromEnd"
+                ? { value: position }
+                : {}),
+            },
+          ],
+          timeDimension: null,
+        },
+      });
+
+      const sql = String(query.mock.calls[0]?.[0]);
+      expect(sql).toContain("DENSE_RANK() OVER");
+      expect(sql).toContain("PARTITION BY b.project_id, b.trace_id");
+      expect(sql).toContain(`ORDER BY b.event_time ${direction}`);
+      expect(sql).toContain("WHERE _position_rank = ?");
+      expect(query.mock.calls[0]?.[1]).toContain(position);
+    },
+  );
+
+  it("keeps exploded dimension values on one observation position", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      query: {
+        ...base,
+        view: "observations",
+        dimensions: [{ field: "toolNames" }],
+        metrics: [{ measure: "count", aggregation: "count" }],
+        filters: [
+          {
+            type: "positionInTrace",
+            column: "startTime",
+            operator: "=",
+            key: "first",
+          },
+        ],
+        timeDimension: null,
+      },
+    });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("DENSE_RANK() OVER");
+    expect(sql).toMatch(/SELECT\s+b\.\*,\s+tool_name,/);
+  });
+
+  it("adds dynamic-key expansion when costType is filtered but not selected", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      query: {
+        ...base,
+        view: "observations",
+        dimensions: [],
+        metrics: [{ measure: "count", aggregation: "count" }],
+        filters: [
+          {
+            type: "string",
+            column: "costType",
+            operator: "=",
+            value: "input",
+          },
+        ],
+        timeDimension: null,
+      },
+    });
+
+    expect(String(query.mock.calls[0]?.[0])).toContain(
+      "LATERAL VIEW EXPLODE(JSON_KEYS(b.cost_details))",
+    );
+  });
+
+  it.each([
+    ["stringObject", "CAST(ELEMENT_AT(b.metadata, ?) AS STRING)", "eu"],
+    ["numberObject", "CAST(ELEMENT_AT(b.metadata, ?) AS DOUBLE)", 0.75],
+    ["booleanObject", "CAST(ELEMENT_AT(b.metadata, ?) AS BOOLEAN)", true],
+    [
+      "categoryOptions",
+      "CAST(ELEMENT_AT(b.metadata, ?) AS STRING)",
+      ["a", "b"],
+    ],
+  ] as const)(
+    "keeps %s metadata extraction typed and binds the object key",
+    async (type, expectedExpression, value) => {
+      const query = vi.fn().mockResolvedValue([]);
+      const filter =
+        type === "categoryOptions"
+          ? {
+              type,
+              column: "metadata",
+              key: 'nested."quoted"',
+              operator: "any of" as const,
+              value: [...value],
+            }
+          : {
+              type,
+              column: "metadata",
+              key: 'nested."quoted"',
+              operator: "=" as const,
+              value,
+            };
+
+      await executeDorisAnalyticsQuery({
+        executor: { query },
+        projectId: "project-1",
+        version: "v2",
+        query: {
+          ...base,
+          view: "observations",
+          dimensions: [],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters: [filter as QueryType["filters"][number]],
+          timeDimension: null,
+        },
+      });
+
+      const sql = String(query.mock.calls[0]?.[0]);
+      expect(sql).toContain(expectedExpression);
+      expect(sql).not.toContain('nested."quoted"');
+      expect(query.mock.calls[0]?.[1]).toContain('nested."quoted"');
+    },
+  );
+
+  it.each([
+    [
+      "arrayOptions on a scalar string dimension",
+      "observations",
+      {
+        type: "arrayOptions",
+        column: "name",
+        operator: "any of",
+        value: ["checkout"],
+      },
+    ],
+    [
+      "number on a scalar string dimension",
+      "observations",
+      { type: "number", column: "name", operator: ">", value: 1 },
+    ],
+    [
+      "string on a numeric dimension",
+      "scores-numeric",
+      { type: "string", column: "value", operator: "=", value: "1" },
+    ],
+    [
+      "string on the time dimension",
+      "observations",
+      {
+        type: "string",
+        column: "start_time",
+        operator: "=",
+        value: "2026-07-17",
+      },
+    ],
+    [
+      "stringOptions on an array dimension",
+      "observations",
+      {
+        type: "stringOptions",
+        column: "tags",
+        operator: "any of",
+        value: ["production"],
+      },
+    ],
+  ] as const)(
+    "rejects incompatible filter type: %s",
+    async (_, view, filter) => {
+      const query = vi.fn().mockResolvedValue([]);
+
+      await expect(
+        executeDorisAnalyticsQuery({
+          executor: { query },
+          projectId: "project-1",
+          version: "v2",
+          query: {
+            ...base,
+            view,
+            dimensions: [],
+            metrics: [{ measure: "count", aggregation: "count" }],
+            filters: [filter as QueryType["filters"][number]],
+            timeDimension: null,
+          },
+        }),
+      ).rejects.toThrow("Invalid Doris analytics filter");
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects analytics queries that exceed the Doris resource budget", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const filters = Array.from({ length: 101 }, (_, index) => ({
+      type: "string" as const,
+      column: "name",
+      operator: "=" as const,
+      value: `name-${index}`,
+    }));
+
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor: { query },
+        projectId: "project-1",
+        version: "v2",
+        query: {
+          ...base,
+          view: "observations",
+          dimensions: [],
+          metrics: [{ measure: "count", aggregation: "count" }],
+          filters,
+          timeDimension: null,
+        },
+      }),
+    ).rejects.toThrow("too many filters");
+
+    await expect(
+      executeDorisAnalyticsQuery({
+        executor: { query },
+        projectId: "project-1",
+        version: "v2",
+        query: {
+          ...base,
+          fromTimestamp: "2025-07-16T00:00:00.000Z",
+          view: "observations",
+          dimensions: [],
           metrics: [{ measure: "count", aggregation: "count" }],
           timeDimension: null,
         },
       }),
-    ).rejects.toThrow("not available on the Doris R1A backend");
+    ).rejects.toThrow("time range exceeds");
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("uses explicit null placement and selected aliases as stable order ties", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      query: {
+        ...base,
+        view: "observations",
+        dimensions: [{ field: "environment" }, { field: "name" }],
+        metrics: [{ measure: "count", aggregation: "count" }],
+        timeDimension: null,
+        orderBy: [{ field: "count_count", direction: "desc" }],
+      },
+    });
+
+    expect(String(query.mock.calls[0]?.[0])).toContain(
+      "ORDER BY count_count IS NULL ASC, count_count DESC, `environment` IS NULL ASC, `environment` ASC, `name` IS NULL ASC, `name` ASC",
+    );
+  });
+
+  it("forwards cancellation to the Doris executor", async () => {
+    const controller = new AbortController();
+    const query = vi.fn().mockResolvedValue([]);
+    controller.abort(new Error("cancelled by caller"));
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      signal: controller.signal,
+      query: {
+        ...base,
+        view: "observations",
+        dimensions: [],
+        metrics: [{ measure: "count", aggregation: "count" }],
+        timeDimension: null,
+      },
+    });
+
+    expect(query.mock.calls[0]?.[2]).toEqual({ signal: controller.signal });
   });
 });
