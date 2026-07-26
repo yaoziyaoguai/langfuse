@@ -12,7 +12,12 @@ export const blobStorageIntegrationProcessor: Processor = async (job) => {
   if (job.name === QueueJobs.BlobStorageIntegrationJob) {
     logger.info("Executing Blob Storage Integration Job");
     try {
-      return await handleBlobStorageIntegrationSchedule();
+      return await handleBlobStorageIntegrationSchedule({
+        projectId:
+          typeof job.data?.projectId === "string"
+            ? job.data.projectId
+            : undefined,
+      });
     } catch (error) {
       logger.error("Error executing BlobStorageIntegrationJob", error);
       throw error;

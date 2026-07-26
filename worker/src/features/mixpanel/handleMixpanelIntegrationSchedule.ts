@@ -5,6 +5,8 @@ import {
   logger,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
+import { env } from "../../env";
+import { scheduleDorisAnalyticsIntegrations } from "../analytics-integrations/scheduleDorisAnalyticsIntegrations";
 
 export const handleMixpanelIntegrationSchedule = async () => {
   const mixpanelIntegrationProjects = await prisma.mixpanelIntegration.findMany(
@@ -33,6 +35,16 @@ export const handleMixpanelIntegrationSchedule = async () => {
   logger.info(
     `[MIXPANEL] Scheduling ${mixpanelIntegrationProjects.length} Mixpanel integrations for sync`,
   );
+
+  if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+    await scheduleDorisAnalyticsIntegrations({
+      integrationType: "MIXPANEL",
+      projectIds: mixpanelIntegrationProjects.map(({ projectId }) => projectId),
+      queue: mixpanelIntegrationProcessingQueue,
+      jobName: QueueJobs.MixpanelIntegrationProcessingJob,
+    });
+    return;
+  }
 
   await mixpanelIntegrationProcessingQueue.addBulk(
     mixpanelIntegrationProjects.map(

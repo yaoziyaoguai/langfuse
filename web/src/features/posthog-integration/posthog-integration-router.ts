@@ -18,6 +18,10 @@ import {
   InvalidRequestError,
   validateExportSource,
 } from "@langfuse/shared";
+import {
+  getDorisIntegrationMutationAdmission,
+  syncDorisIntegrationMutation,
+} from "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle";
 
 export const posthogIntegrationRouter = createTRPCRouter({
   get: protectedProjectProcedure
@@ -152,6 +156,7 @@ export const posthogIntegrationRouter = createTRPCRouter({
       const { posthogProjectApiKey, ...config } = input;
 
       const encryptedPosthogApiKey = encrypt(posthogProjectApiKey);
+      const integrationAdmission = getDorisIntegrationMutationAdmission();
 
       await ctx.prisma.$transaction(async (tx) => {
         const result = await tx.posthogIntegration.upsert({
@@ -197,6 +202,13 @@ export const posthogIntegrationRouter = createTRPCRouter({
           });
           if (!validation.ok) throw new InvalidRequestError(validation.message);
         }
+        await syncDorisIntegrationMutation({
+          transaction: tx,
+          admissionContext: integrationAdmission,
+          projectId: input.projectId,
+          integrationType: "POSTHOG",
+          enabled: result.enabled,
+        });
       });
     }),
   delete: protectedProjectProcedure
@@ -215,10 +227,20 @@ export const posthogIntegrationRouter = createTRPCRouter({
           resourceId: input.projectId,
         });
 
-        await ctx.prisma.posthogIntegration.delete({
-          where: {
+        const integrationAdmission = getDorisIntegrationMutationAdmission();
+        await ctx.prisma.$transaction(async (transaction) => {
+          await syncDorisIntegrationMutation({
+            transaction,
+            admissionContext: integrationAdmission,
             projectId: input.projectId,
-          },
+            integrationType: "POSTHOG",
+            enabled: false,
+          });
+          await transaction.posthogIntegration.delete({
+            where: {
+              projectId: input.projectId,
+            },
+          });
         });
       } catch (e) {
         console.log("posthog integration delete", e);

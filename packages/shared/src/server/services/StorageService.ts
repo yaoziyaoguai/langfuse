@@ -92,6 +92,26 @@ type UploadWithSignedUrl = UploadFile & {
   expiresInSeconds: number;
 };
 
+export type StorageFile = { file: string; createdAt: Date };
+
+export type StorageListFilesPage = {
+  files: StorageFile[];
+  nextCursor?: string;
+};
+
+export type StorageListFilesPageOptions = {
+  cursor?: string;
+  limit?: number;
+};
+
+function resolveStorageListPageSize(limit?: number): number {
+  const requested = limit ?? env.LANGFUSE_S3_LIST_MAX_KEYS;
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    throw new TypeError("Invalid storage list page size");
+  }
+  return Math.min(requested, env.LANGFUSE_S3_LIST_MAX_KEYS);
+}
+
 /**
  * Check if an error is a DNS lookup failure (EAI_AGAIN)
  * and throw ServiceUnavailableError if so, otherwise rethrow the original error
@@ -167,6 +187,19 @@ function isStorageObjectNotFound(error: unknown): boolean {
     code === "BlobNotFound" ||
     code === "ObjectNotFound"
   );
+}
+
+function requireNodeReadable(body: unknown): Readable {
+  if (
+    body instanceof Readable ||
+    (typeof body === "object" &&
+      body !== null &&
+      "pipe" in body &&
+      typeof body.pipe === "function")
+  ) {
+    return body as Readable;
+  }
+  throw new TypeError("Storage response does not contain a Node.js stream");
 }
 
 function createS3RequestHandler(
@@ -307,7 +340,14 @@ export interface StorageService {
 
   downloadIfExists(path: string): Promise<string | null>;
 
-  listFiles(prefix: string): Promise<{ file: string; createdAt: Date }[]>;
+  downloadStreamIfExists(path: string): Promise<Readable | null>;
+
+  listFiles(prefix: string): Promise<StorageFile[]>;
+
+  listFilesPage(
+    prefix: string,
+    options?: StorageListFilesPageOptions,
+  ): Promise<StorageListFilesPage>;
 
   getSignedUrl(
     fileName: string,
@@ -645,6 +685,24 @@ class AzureBlobStorageService implements StorageService {
     }
   }
 
+  public async downloadStreamIfExists(path: string): Promise<Readable | null> {
+    try {
+      await this.createContainerIfNotExists();
+      const response = await this.client.getBlobClient(path).download();
+      return requireNodeReadable(response.readableStreamBody);
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally stream file from Azure Blob Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally stream file from Azure Blob Storage",
+      );
+    }
+  }
+
   public async deleteFiles(paths: string[]): Promise<void> {
     await backOff(() => this.deleteFileNonRetrying(paths), {
       numOfAttempts: 3,
@@ -696,6 +754,46 @@ class AzureBlobStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "list files from Azure Blob Storage");
+    }
+  }
+
+  public async listFilesPage(
+    prefix: string,
+    options: StorageListFilesPageOptions = {},
+  ): Promise<StorageListFilesPage> {
+    try {
+      await this.createContainerIfNotExists();
+
+      const pages = this.client.listBlobsFlat({ prefix }).byPage({
+        ...(options.cursor === undefined
+          ? {}
+          : { continuationToken: options.cursor }),
+        maxPageSize: resolveStorageListPageSize(options.limit),
+      });
+      const page = await pages.next();
+      if (page.done) return { files: [] };
+
+      return {
+        files: page.value.segment.blobItems.flatMap((blob) =>
+          blob.name.startsWith(prefix)
+            ? [
+                {
+                  file: blob.name,
+                  createdAt: blob.properties.createdOn ?? new Date(),
+                },
+              ]
+            : [],
+        ),
+        ...(page.value.continuationToken === undefined
+          ? {}
+          : { nextCursor: page.value.continuationToken }),
+      };
+    } catch (err) {
+      logger.error(
+        `Failed to list a page of files from Azure Blob Storage ${prefix}`,
+        err,
+      );
+      handleStorageError(err, "list a page of files from Azure Blob Storage");
     }
   }
 
@@ -1021,6 +1119,21 @@ class S3StorageService implements StorageService {
     }
   }
 
+  public async downloadStreamIfExists(path: string): Promise<Readable | null> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: path,
+    });
+    try {
+      const response = await this.client.send(command);
+      return requireNodeReadable(response.Body);
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(`Failed to conditionally stream file from S3 ${path}`, err);
+      handleStorageError(err, "conditionally stream file from S3");
+    }
+  }
+
   public async listFiles(
     prefix: string,
   ): Promise<{ file: string; createdAt: Date }[]> {
@@ -1042,6 +1155,38 @@ class S3StorageService implements StorageService {
     } catch (err) {
       logger.error(`Failed to list files from S3 ${prefix}`, err);
       handleStorageError(err, "list files from S3");
+    }
+  }
+
+  public async listFilesPage(
+    prefix: string,
+    options: StorageListFilesPageOptions = {},
+  ): Promise<StorageListFilesPage> {
+    const listCommand = new ListObjectsV2Command({
+      Bucket: this.bucketName,
+      Prefix: prefix,
+      MaxKeys: resolveStorageListPageSize(options.limit),
+      ...(options.cursor === undefined
+        ? {}
+        : { ContinuationToken: options.cursor }),
+    });
+
+    try {
+      const response = await this.client.send(listCommand);
+      return {
+        files:
+          response.Contents?.flatMap((file) =>
+            file.Key
+              ? [{ file: file.Key, createdAt: file.LastModified ?? new Date() }]
+              : [],
+          ) ?? [],
+        ...(response.NextContinuationToken === undefined
+          ? {}
+          : { nextCursor: response.NextContinuationToken }),
+      };
+    } catch (err) {
+      logger.error(`Failed to list a page of files from S3 ${prefix}`, err);
+      handleStorageError(err, "list a page of files from S3");
     }
   }
 
@@ -1329,6 +1474,24 @@ class GoogleCloudStorageService implements StorageService {
     }
   }
 
+  public async downloadStreamIfExists(path: string): Promise<Readable | null> {
+    try {
+      const file = this.bucket.file(path);
+      const [exists] = await file.exists();
+      return exists ? file.createReadStream() : null;
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally stream file from Google Cloud Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally stream file from Google Cloud Storage",
+      );
+    }
+  }
+
   public async listFiles(
     prefix: string,
   ): Promise<{ file: string; createdAt: Date }[]> {
@@ -1348,6 +1511,35 @@ class GoogleCloudStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "list files from Google Cloud Storage");
+    }
+  }
+
+  public async listFilesPage(
+    prefix: string,
+    options: StorageListFilesPageOptions = {},
+  ): Promise<StorageListFilesPage> {
+    try {
+      const [files, nextQuery] = await this.bucket.getFiles({
+        prefix,
+        maxResults: resolveStorageListPageSize(options.limit),
+        autoPaginate: false,
+        ...(options.cursor === undefined ? {} : { pageToken: options.cursor }),
+      });
+      const nextCursor = nextQuery?.pageToken;
+
+      return {
+        files: files.map((file) => ({
+          file: file.name,
+          createdAt: new Date(file.metadata.timeCreated ?? new Date()),
+        })),
+        ...(nextCursor === undefined ? {} : { nextCursor }),
+      };
+    } catch (err) {
+      logger.error(
+        `Failed to list a page of files from Google Cloud Storage ${prefix}`,
+        err,
+      );
+      handleStorageError(err, "list a page of files from Google Cloud Storage");
     }
   }
 
@@ -1854,6 +2046,30 @@ class OCIObjectStorageService implements StorageService {
     }
   }
 
+  public async downloadStreamIfExists(path: string): Promise<Readable | null> {
+    try {
+      const { client, namespaceName } = await this.getClientAndNamespace();
+      const response = await client.getObject({
+        namespaceName,
+        bucketName: this.bucketName,
+        objectName: path,
+      });
+      return requireNodeReadable(
+        (response as { value?: NodeJS.ReadableStream }).value,
+      );
+    } catch (err) {
+      if (isStorageObjectNotFound(err)) return null;
+      logger.error(
+        `Failed to conditionally stream file from OCI Object Storage ${path}`,
+        err,
+      );
+      handleStorageError(
+        err,
+        "conditionally stream file from OCI Object Storage",
+      );
+    }
+  }
+
   public async listFiles(
     prefix: string,
   ): Promise<{ file: string; createdAt: Date }[]> {
@@ -1889,6 +2105,47 @@ class OCIObjectStorageService implements StorageService {
         err,
       );
       handleStorageError(err, "list files from OCI Object Storage ");
+    }
+  }
+
+  public async listFilesPage(
+    prefix: string,
+    options: StorageListFilesPageOptions = {},
+  ): Promise<StorageListFilesPage> {
+    try {
+      const { client, namespaceName } = await this.getClientAndNamespace();
+      const req: objectstorage.requests.ListObjectsRequest = {
+        namespaceName,
+        bucketName: this.bucketName,
+        prefix,
+        limit: resolveStorageListPageSize(options.limit),
+        ...(options.cursor === undefined ? {} : { start: options.cursor }),
+      };
+      const response = await client.listObjects(req);
+      const objects = response.listObjects.objects;
+      return {
+        files: objects.flatMap((object) =>
+          object.name
+            ? [
+                {
+                  file: object.name,
+                  createdAt: object.timeCreated
+                    ? new Date(object.timeCreated)
+                    : new Date(),
+                },
+              ]
+            : [],
+        ),
+        ...(response.listObjects.nextStartWith === undefined
+          ? {}
+          : { nextCursor: response.listObjects.nextStartWith }),
+      };
+    } catch (err) {
+      logger.error(
+        `Failed to list a page of files from OCI Object Storage ${prefix}`,
+        err,
+      );
+      handleStorageError(err, "list a page of files from OCI Object Storage");
     }
   }
 

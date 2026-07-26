@@ -104,6 +104,14 @@ export function blobStorageEndpointConnectionValidationOptions(
   };
 }
 
+export function isBlobStorageEndpointConnectionValidationEnabled(
+  whitelist: OutboundUrlValidationWhitelist = blobStorageEndpointWhitelistFromEnv(),
+): boolean {
+  return (
+    blobStorageEndpointConnectionValidationOptions(whitelist) !== undefined
+  );
+}
+
 function getEffectiveWhitelist(
   whitelist: OutboundUrlValidationWhitelist,
 ): OutboundUrlValidationWhitelist {

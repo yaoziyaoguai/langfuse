@@ -22,6 +22,7 @@ import {
   StorageServiceFactory,
   blobStorageEndpointConnectionValidationOptions,
   validateBlobStorageEndpoint,
+  BlobStorageIntegrationQueue,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
 import { decrypt } from "@langfuse/shared/encryption";
@@ -33,6 +34,10 @@ import {
   InvalidRequestError,
   isEnrichedBlobExportAvailable,
 } from "@langfuse/shared";
+import {
+  getDorisIntegrationMutationAdmission,
+  syncDorisIntegrationMutation,
+} from "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle";
 
 const getAuditLogErrorType = (error: unknown) =>
   error instanceof TRPCError
@@ -237,10 +242,20 @@ export const blobStorageIntegrationRouter = createTRPCRouter({
           resourceId: input.projectId,
         });
 
-        await ctx.prisma.blobStorageIntegration.delete({
-          where: {
+        const integrationAdmission = getDorisIntegrationMutationAdmission();
+        await ctx.prisma.$transaction(async (transaction) => {
+          await syncDorisIntegrationMutation({
+            transaction,
+            admissionContext: integrationAdmission,
             projectId: input.projectId,
-          },
+            integrationType: "BLOB_STORAGE",
+            enabled: false,
+          });
+          await transaction.blobStorageIntegration.delete({
+            where: {
+              projectId: input.projectId,
+            },
+          });
         });
       } catch (e) {
         logger.error(`Failed to delete blob storage integration`, e);
@@ -282,34 +297,50 @@ export const blobStorageIntegrationRouter = createTRPCRouter({
           });
         }
 
-        // Get the processing queue
-        const blobStorageIntegrationProcessingQueue =
-          BlobStorageIntegrationProcessingQueue.getInstance();
-        if (!blobStorageIntegrationProcessingQueue) {
-          throw new TRPCError({
-            code: "INTERNAL_SERVER_ERROR",
-            message: "BlobStorageIntegrationProcessingQueue not initialized",
-          });
-        }
-
         // Create a unique job ID for manual runs to avoid conflicts
         const jobId = `${input.projectId}-manual-${new Date().toISOString()}`;
 
-        // Enqueue the processing job
-        await blobStorageIntegrationProcessingQueue.add(
-          QueueJobs.BlobStorageIntegrationProcessingJob,
-          {
-            id: randomUUID(),
-            name: QueueJobs.BlobStorageIntegrationProcessingJob,
-            timestamp: new Date(),
-            payload: {
-              projectId: input.projectId,
+        // Get the processing queue
+        if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+          getDorisIntegrationMutationAdmission();
+          const scheduleQueue = BlobStorageIntegrationQueue.getInstance();
+          if (!scheduleQueue) {
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Blob storage integration queue not initialized",
+            });
+          }
+          await scheduleQueue.add(
+            QueueJobs.BlobStorageIntegrationJob,
+            { projectId: input.projectId },
+            { jobId },
+          );
+        } else {
+          const blobStorageIntegrationProcessingQueue =
+            BlobStorageIntegrationProcessingQueue.getInstance();
+          if (!blobStorageIntegrationProcessingQueue) {
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "BlobStorageIntegrationProcessingQueue not initialized",
+            });
+          }
+
+          // Enqueue the processing job
+          await blobStorageIntegrationProcessingQueue.add(
+            QueueJobs.BlobStorageIntegrationProcessingJob,
+            {
+              id: randomUUID(),
+              name: QueueJobs.BlobStorageIntegrationProcessingJob,
+              timestamp: new Date(),
+              payload: {
+                projectId: input.projectId,
+              },
             },
-          },
-          {
-            jobId,
-          },
-        );
+            {
+              jobId,
+            },
+          );
+        }
 
         logger.info(
           `Manual blob storage integration job queued for project ${input.projectId}`,

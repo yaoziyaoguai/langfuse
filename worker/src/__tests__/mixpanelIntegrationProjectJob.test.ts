@@ -55,7 +55,9 @@ const h = vi.hoisted(() => {
 
   // Mutable row returned by the prisma findFirst mock so individual tests can
   // vary exportSource.
-  const db = { integration: defaultIntegration() as Record<string, unknown> };
+  const db: { integration: Record<string, unknown> | null } = {
+    integration: defaultIntegration(),
+  };
 
   return {
     timeline,
@@ -172,6 +174,7 @@ describe("handleMixpanelIntegrationProjectJob throttling (issue #12786)", () => 
 describe("handleMixpanelIntegrationProjectJob events_only legacy guard (LFE-10148)", () => {
   beforeEach(() => {
     h.timeline.length = 0;
+    h.constructed.length = 0;
     h.mixpanelIntegrationUpdate.mockClear();
     h.db.integration = h.defaultIntegration();
     (env as any).LANGFUSE_MIGRATION_V4_WRITE_MODE = "legacy";
@@ -204,5 +207,15 @@ describe("handleMixpanelIntegrationProjectJob events_only legacy guard (LFE-1014
     await handleMixpanelIntegrationProjectJob(makeJob());
 
     expect(h.mixpanelIntegrationUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not export or advance state when no enabled integration exists", async () => {
+    h.db.integration = null;
+
+    await handleMixpanelIntegrationProjectJob(makeJob());
+
+    expect(h.timeline).toHaveLength(0);
+    expect(h.constructed).toHaveLength(0);
+    expect(h.mixpanelIntegrationUpdate).not.toHaveBeenCalled();
   });
 });

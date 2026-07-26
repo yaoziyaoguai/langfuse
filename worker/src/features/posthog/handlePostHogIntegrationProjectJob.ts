@@ -10,6 +10,9 @@ import {
   getEventsForAnalyticsIntegrations,
   getCurrentSpan,
   validateWebhookURL,
+  fetchWithSecureRedirects,
+  whitelistFromEnv,
+  type AnalyticsIntegrationSemanticRecord,
 } from "@langfuse/shared/src/server";
 import {
   transformTraceForPostHog,
@@ -21,6 +24,10 @@ import { decrypt } from "@langfuse/shared/encryption";
 import { PostHog } from "posthog-node";
 import { recordExportVolume } from "../../services/exportVolumeMetric";
 import { assertLegacyExportSourceWritable } from "../exportWriteModeGuard";
+import {
+  isManagedAnalyticsIntegrationPayload,
+  processDorisAnalyticsIntegrationExecution,
+} from "../analytics-integrations/processDorisAnalyticsIntegrationExecution";
 
 type PostHogExecutionConfig = {
   projectId: string;
@@ -45,13 +52,36 @@ const postHogSettings = {
 type PostHogClientOptions = NonNullable<
   ConstructorParameters<typeof PostHog>[1]
 >;
+type PostHogFetch = NonNullable<PostHogClientOptions["fetch"]>;
+
+const securePostHogFetch: PostHogFetch = async (url, options) => {
+  const whitelist = whitelistFromEnv();
+  await validateWebhookURL(url, whitelist);
+  const { response } = await fetchWithSecureRedirects(
+    url,
+    options as RequestInit,
+    {
+      maxRedirects: 5,
+      additionalSensitiveHeaders: ["x-posthog-api-key", "x-api-key"],
+      redirectValidation: {
+        validateUrl: validateWebhookURL,
+        whitelist,
+        logContext: "PostHog integration",
+      },
+    },
+  );
+  return response;
+};
 
 // Wrap the SDK's fetch transport to count gzipped on-wire upload volume for
 // the export-volume metric. The SDK gzips the /batch/ body by default and also
 // calls /flags/, so only /batch/ request bodies are measured (LFE-10508).
 export const countingFetch =
-  (volume: { bytes: number }): PostHogClientOptions["fetch"] =>
-  (url, options) => {
+  (
+    volume: { bytes: number },
+    transport: PostHogFetch = securePostHogFetch,
+  ): PostHogFetch =>
+  async (url, options) => {
     if (url.endsWith("/batch/")) {
       const body = options.body;
       if (typeof body === "string") {
@@ -67,7 +97,7 @@ export const countingFetch =
         );
       }
     }
-    return globalThis.fetch(url, options as RequestInit);
+    return transport(url, options);
   };
 
 const processPostHogTraces = async (config: PostHogExecutionConfig) => {
@@ -264,6 +294,63 @@ const processPostHogEvents = async (config: PostHogExecutionConfig) => {
   );
 };
 
+export const sendDorisPostHogRecords = async (
+  records: readonly AnalyticsIntegrationSemanticRecord[],
+  config: Pick<
+    PostHogExecutionConfig,
+    "decryptedPostHogApiKey" | "postHogHost" | "projectId" | "volume"
+  > & {
+    readonly fetch?: PostHogFetch;
+    readonly fetchRetryCount?: number;
+  },
+): Promise<void> => {
+  const posthog = new PostHog(config.decryptedPostHogApiKey, {
+    host: config.postHogHost,
+    ...postHogSettings,
+    fetch: countingFetch(config.volume, config.fetch),
+    fetchRetryCount: config.fetchRetryCount,
+  });
+  let sendError: Error | undefined;
+  posthog.on("error", (error) => {
+    sendError = error instanceof Error ? error : new Error(String(error));
+  });
+  for (const record of records) {
+    if (sendError) throw sendError;
+    const event =
+      record.deliveryKind === "TRACE"
+        ? transformTraceForPostHog(record.event, config.projectId)
+        : record.deliveryKind === "GENERATION"
+          ? transformGenerationForPostHog(record.event, config.projectId)
+          : record.deliveryKind === "OBSERVATION"
+            ? transformEventForPostHog(record.event, config.projectId)
+            : transformScoreForPostHog(record.event, config.projectId);
+    posthog.capture(event);
+  }
+  // `posthog-node` prepares capture payloads asynchronously before enqueueing
+  // them. `flush()` can race that preparation and return with an empty queue;
+  // shutdown waits for pending preparation promises and then drains the queue.
+  await posthog.shutdown();
+  if (sendError) throw sendError;
+};
+
+function recordsForExportSource(
+  records: readonly AnalyticsIntegrationSemanticRecord[],
+  exportSource: string,
+): readonly AnalyticsIntegrationSemanticRecord[] {
+  const includeTraces =
+    exportSource === "TRACES_OBSERVATIONS" ||
+    exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  const includeEvents =
+    exportSource === "EVENTS" || exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  return records.filter(
+    ({ deliveryKind }) =>
+      deliveryKind === "SCORE" ||
+      (includeTraces &&
+        (deliveryKind === "TRACE" || deliveryKind === "GENERATION")) ||
+      (includeEvents && deliveryKind === "OBSERVATION"),
+  );
+}
+
 export const handlePostHogIntegrationProjectJob = async (
   job: Job<TQueueJobTypes[QueueName.PostHogIntegrationProcessingQueue]>,
 ) => {
@@ -316,6 +403,35 @@ export const handlePostHogIntegrationProjectJob = async (
     throw new Error(
       `Invalid PostHog hostname for project ${projectId}: ${error instanceof Error ? error.message : "Unknown error"}`,
     );
+  }
+
+  if (isManagedAnalyticsIntegrationPayload(job.data.payload)) {
+    const volume = { bytes: 0 };
+    const result = await processDorisAnalyticsIntegrationExecution({
+      payload: job.data.payload,
+      expectedIntegrationType: "POSTHOG",
+      projectName: postHogIntegration.project.name,
+      send: (records) =>
+        sendDorisPostHogRecords(
+          recordsForExportSource(records, postHogIntegration.exportSource),
+          {
+            projectId,
+            decryptedPostHogApiKey: decrypt(
+              postHogIntegration.encryptedPosthogApiKey,
+            ),
+            postHogHost: postHogIntegration.posthogHostName,
+            volume,
+          },
+        ),
+    });
+    if (result) {
+      recordExportVolume({
+        integration: "posthog",
+        bytes: volume.bytes,
+        projectId,
+      });
+    }
+    return;
   }
 
   // Resume from lastSyncAt. On first run, fall back to the project's

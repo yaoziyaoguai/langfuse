@@ -9,6 +9,9 @@ type MixpanelClientConfig = {
    * Validated at API layer via MIXPANEL_REGIONS in web/src/features/mixpanel-integration/types.ts
    */
   region: string;
+  fetch?: typeof fetch;
+  allowPartialSuccess?: boolean;
+  redactErrors?: boolean;
 };
 
 export class MixpanelClient {
@@ -74,7 +77,7 @@ export class MixpanelClient {
     const authHeader = `Basic ${Buffer.from(`${this.config.projectToken}:`).toString("base64")}`;
 
     try {
-      const response = await fetch(url, {
+      const response = await (this.config.fetch ?? fetch)(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -102,7 +105,11 @@ export class MixpanelClient {
               }>;
             };
 
-            if (body.num_records_imported && body.num_records_imported > 0) {
+            if (
+              body.num_records_imported &&
+              body.num_records_imported > 0 &&
+              this.config.allowPartialSuccess !== false
+            ) {
               logger.warn(
                 `Mixpanel partial success: ${body.num_records_imported}/${events.length} records imported, ${body.failed_records?.length ?? 0} failed`,
                 { failed_records: body.failed_records },
@@ -114,10 +121,16 @@ export class MixpanelClient {
           }
         }
 
-        logger.error(
-          `Failed to send events to Mixpanel: ${response.status} ${response.statusText}`,
-          { body: errorText },
-        );
+        if (this.config.redactErrors) {
+          logger.error(
+            `Failed to send events to Mixpanel: ${response.status} ${response.statusText}`,
+          );
+        } else {
+          logger.error(
+            `Failed to send events to Mixpanel: ${response.status} ${response.statusText}`,
+            { body: errorText },
+          );
+        }
         throw new Error(
           `Mixpanel API error: ${response.status} ${response.statusText}`,
         );
@@ -129,7 +142,13 @@ export class MixpanelClient {
         result,
       });
     } catch (error) {
-      logger.error("Error sending batch to Mixpanel", error);
+      if (this.config.redactErrors) {
+        logger.error("Error sending batch to Mixpanel", {
+          causeType: error instanceof Error ? error.name : typeof error,
+        });
+      } else {
+        logger.error("Error sending batch to Mixpanel", error);
+      }
       throw error;
     }
   }

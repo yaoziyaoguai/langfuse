@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { OutboundUrlValidationError, parseOutboundUrl } from "../outbound-url";
-import { validateBlobStorageEndpoint } from "./blobStorageEndpointValidation";
+import {
+  isBlobStorageEndpointConnectionValidationEnabled,
+  validateBlobStorageEndpoint,
+} from "./blobStorageEndpointValidation";
 
 // Non-empty whitelist turns on validation in a non-cloud (DEV) deployment; the
 // entries are an *allow* list, so an endpoint outside them is still checked.
@@ -57,5 +60,18 @@ describe("validateBlobStorageEndpoint", () => {
         ip_ranges: [],
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("exposes whether the connection-time policy is enabled for activation census", () => {
+    expect(
+      isBlobStorageEndpointConnectionValidationEnabled(enablingWhitelist),
+    ).toBe(true);
+    expect(
+      isBlobStorageEndpointConnectionValidationEnabled({
+        hosts: [],
+        ips: [],
+        ip_ranges: [],
+      }),
+    ).toBe(false);
   });
 });

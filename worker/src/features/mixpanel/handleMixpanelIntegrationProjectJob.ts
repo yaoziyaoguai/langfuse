@@ -9,6 +9,7 @@ import {
   getScoresForAnalyticsIntegrations,
   getEventsForAnalyticsIntegrations,
   getCurrentSpan,
+  type AnalyticsIntegrationSemanticRecord,
 } from "@langfuse/shared/src/server";
 import { decrypt } from "@langfuse/shared/encryption";
 import { MixpanelClient } from "./mixpanelClient";
@@ -21,6 +22,10 @@ import {
 } from "./transformers";
 import { env } from "../../env";
 import { assertLegacyExportSourceWritable } from "../exportWriteModeGuard";
+import {
+  isManagedAnalyticsIntegrationPayload,
+  processDorisAnalyticsIntegrationExecution,
+} from "../analytics-integrations/processDorisAnalyticsIntegrationExecution";
 
 const sleep = (ms: number) =>
   ms > 0
@@ -192,6 +197,58 @@ const processMixpanelEvents = async (
   );
 };
 
+export const sendDorisMixpanelRecords = async (
+  records: readonly AnalyticsIntegrationSemanticRecord[],
+  config: Pick<
+    MixpanelExecutionConfig,
+    "decryptedMixpanelProjectToken" | "mixpanelRegion" | "projectId"
+  > & { readonly fetch?: typeof fetch },
+): Promise<number> => {
+  const mixpanel = new MixpanelClient({
+    projectToken: config.decryptedMixpanelProjectToken,
+    region: config.mixpanelRegion,
+    fetch: config.fetch,
+    // Durable delivery is all-or-retry: a partial remote import must not
+    // terminalize the sealed pending-delivery manifest.
+    allowPartialSuccess: false,
+    redactErrors: true,
+  });
+  for (const record of records) {
+    const event =
+      record.deliveryKind === "TRACE"
+        ? transformTraceForMixpanel(record.event, config.projectId)
+        : record.deliveryKind === "GENERATION"
+          ? transformGenerationForMixpanel(record.event, config.projectId)
+          : record.deliveryKind === "OBSERVATION"
+            ? transformEventForMixpanel(record.event, config.projectId)
+            : transformScoreForMixpanel(record.event, config.projectId);
+    mixpanel.addEvent(event);
+    if (mixpanel.getBatchSize() >= 1_000) {
+      await flushWithDelay(mixpanel);
+    }
+  }
+  await flushWithDelay(mixpanel);
+  return mixpanel.getSerializedBytes();
+};
+
+function recordsForExportSource(
+  records: readonly AnalyticsIntegrationSemanticRecord[],
+  exportSource: string,
+): readonly AnalyticsIntegrationSemanticRecord[] {
+  const includeTraces =
+    exportSource === "TRACES_OBSERVATIONS" ||
+    exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  const includeEvents =
+    exportSource === "EVENTS" || exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  return records.filter(
+    ({ deliveryKind }) =>
+      deliveryKind === "SCORE" ||
+      (includeTraces &&
+        (deliveryKind === "TRACE" || deliveryKind === "GENERATION")) ||
+      (includeEvents && deliveryKind === "OBSERVATION"),
+  );
+}
+
 export const handleMixpanelIntegrationProjectJob = async (
   job: Job<TQueueJobTypes[QueueName.MixpanelIntegrationProcessingQueue]>,
 ) => {
@@ -231,6 +288,35 @@ export const handleMixpanelIntegrationProjectJob = async (
     logger.warn(
       `[MIXPANEL] Project not found for Mixpanel integration ${projectId}`,
     );
+    return;
+  }
+
+  if (isManagedAnalyticsIntegrationPayload(job.data.payload)) {
+    let serializedBytes = 0;
+    const result = await processDorisAnalyticsIntegrationExecution({
+      payload: job.data.payload,
+      expectedIntegrationType: "MIXPANEL",
+      projectName: mixpanelIntegration.project.name,
+      send: async (records) => {
+        serializedBytes = await sendDorisMixpanelRecords(
+          recordsForExportSource(records, mixpanelIntegration.exportSource),
+          {
+            projectId,
+            decryptedMixpanelProjectToken: decrypt(
+              mixpanelIntegration.encryptedMixpanelProjectToken,
+            ),
+            mixpanelRegion: mixpanelIntegration.mixpanelRegion,
+          },
+        );
+      },
+    });
+    if (result) {
+      recordExportVolume({
+        integration: "mixpanel",
+        bytes: serializedBytes,
+        projectId,
+      });
+    }
     return;
   }
 

@@ -1,6 +1,10 @@
-import { pipeline, Transform, type Readable } from "stream";
+import { createHash, randomUUID } from "crypto";
+import { createReadStream } from "node:fs";
+import { promises as fs } from "node:fs";
+import { pipeline, Readable, Transform } from "stream";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { Job } from "bullmq";
+import type { BlobStorageIntegration } from "@prisma/client";
 import { prisma } from "@langfuse/shared/src/db";
 import {
   QueueName,
@@ -32,6 +36,10 @@ import {
   blobStorageEndpointConnectionValidationOptions,
   validateBlobStorageEndpoint,
   dispatchProjectNotification,
+  type DorisBlobExactReadResult,
+  releaseAnalyticsIntegrationScratch,
+  renewAnalyticsIntegrationScratch,
+  reserveAnalyticsIntegrationScratch,
 } from "@langfuse/shared/src/server";
 import {
   registerInFlightBlobExport,
@@ -69,7 +77,6 @@ import {
 import { decrypt } from "@langfuse/shared/encryption";
 // Shared env for the buffered-upload flag (gates part-level upload stats).
 import { env as sharedEnv } from "@langfuse/shared/src/env";
-import { randomUUID } from "crypto";
 import { SpanKind } from "@opentelemetry/api";
 import { env, v4AllowPreviewOptIn } from "../../env";
 import { assertLegacyExportSourceWritable } from "../exportWriteModeGuard";
@@ -84,6 +91,11 @@ import {
   buildBlobExportDeprecationNotice,
   buildBlobExportDeprecationNoticeKey,
 } from "./deprecationNotice";
+import { isManagedAnalyticsIntegrationPayload } from "../analytics-integrations/processDorisAnalyticsIntegrationExecution";
+import { processDorisBlobIntegrationExecution } from "../analytics-integrations/processDorisBlobIntegrationExecution";
+import { withAnalyticsIntegrationLeaseHeartbeat } from "../analytics-integrations/AnalyticsIntegrationLeaseHeartbeat";
+import { ParquetScratchManager } from "./ParquetScratchManager";
+import { writeDorisParquetFile } from "./dorisParquetWriter";
 
 export const BlobExportFormat = {
   JSON_RAW: "json-raw",
@@ -339,7 +351,7 @@ type BlobStorageConnectionConfig = {
   type: BlobStorageIntegrationType;
 };
 
-const createBlobStorageService = (
+export const createBlobStorageService = (
   config: BlobStorageConnectionConfig,
 ): StorageService =>
   StorageServiceFactory.getInstance({
@@ -1158,6 +1170,330 @@ const removeBlobExportDeprecationNotice = async (params: {
   }
 };
 
+const parquetScratch = new ParquetScratchManager({
+  root: env.LANGFUSE_DORIS_PARQUET_SCRATCH_ROOT,
+  maxBytes: env.LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES,
+});
+
+class HashingByteCounter extends ByteCounter {
+  private readonly hash = createHash("sha256");
+
+  override _transform(
+    chunk: Buffer,
+    encoding: string,
+    callback: (error: Error | null, data?: Buffer) => void,
+  ) {
+    this.hash.update(chunk);
+    super._transform(chunk, encoding, callback);
+  }
+
+  digest(): string {
+    return this.hash.digest("hex");
+  }
+}
+
+async function checksumFile(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) {
+    hash.update(chunk as Buffer);
+  }
+  return hash.digest("hex");
+}
+
+export async function uploadDorisBlobExecution(input: {
+  readonly read: DorisBlobExactReadResult;
+  readonly executionId: string;
+  readonly integration: BlobStorageIntegration;
+  readonly storageService: StorageService;
+  readonly partSizeBytes: number;
+  readonly maxConcurrentParts: number | undefined;
+  readonly maxPartAttempts: number | undefined;
+  readonly gzipLevel: number | undefined;
+}): Promise<void> {
+  const includeTraces =
+    input.integration.exportSource === "TRACES_OBSERVATIONS" ||
+    input.integration.exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  const includeEvents =
+    input.integration.exportSource === "EVENTS" ||
+    input.integration.exportSource === "TRACES_OBSERVATIONS_EVENTS";
+  const isTraceOnlyProject =
+    env.LANGFUSE_BLOB_STORAGE_EXPORT_TRACE_ONLY_PROJECT_IDS.includes(
+      input.integration.projectId,
+    );
+  const selected = input.read.records.flatMap((record) => {
+    if (isTraceOnlyProject) return record.table === "traces" ? [record] : [];
+    if (record.table === "scores") return [record];
+    if (record.table === "traces") return includeTraces ? [record] : [];
+    if (!includeTraces && !includeEvents) return [];
+    if (includeTraces && includeEvents) {
+      return [
+        { ...record, table: "observations" as const },
+        { ...record, table: "observations_v2" as const },
+      ];
+    }
+    return [
+      {
+        ...record,
+        table: includeEvents
+          ? ("observations_v2" as const)
+          : ("observations" as const),
+      },
+    ];
+  });
+  const grouped = Map.groupBy(selected, ({ table }) => table);
+  const files: Array<BlobExportManifestFile & { readonly checksum: string }> =
+    [];
+
+  for (const [table, records] of grouped) {
+    const rows = records.map(({ row }) => row);
+    if (rows.length === 0) continue;
+    const properties = getFileTypeProperties(input.integration.fileType);
+    const compressed =
+      input.integration.fileType !== BlobStorageIntegrationFileType.PARQUET &&
+      input.integration.compressed;
+    const extension = `${properties.extension}${compressed ? ".gz" : ""}`;
+    const key =
+      `${input.integration.prefix ?? ""}${input.integration.projectId}/` +
+      `doris-executions/${input.executionId}/${table}.${extension}`;
+    let sizeBytes = 0;
+    let checksum = "";
+    if (input.integration.fileType === BlobStorageIntegrationFileType.PARQUET) {
+      const estimatedBytes =
+        rows.reduce(
+          (sum, row) => sum + Buffer.byteLength(JSON.stringify(row)),
+          0,
+        ) *
+          2 +
+        1024 * 1024;
+      const scratch = await parquetScratch.allocate({
+        executionId: input.executionId,
+        reservedBytes: estimatedBytes,
+      });
+      const scratchReserved = await reserveAnalyticsIntegrationScratch({
+        executionId: input.executionId,
+        workerId: WORKER_HOST_ID,
+        hostId: WORKER_HOST_ID,
+        relativePath: scratch.relativeDirectory,
+        reservedBytes: BigInt(scratch.reservedBytes),
+        leaseExpiresAt: new Date(Date.now() + 15 * 60_000),
+      });
+      if (!scratchReserved) {
+        await scratch.cleanup();
+        throw new Error("Doris Parquet scratch execution was fenced");
+      }
+      let writeError: unknown;
+      try {
+        await withAnalyticsIntegrationLeaseHeartbeat({
+          intervalMs: 60_000,
+          renew: async () => {
+            const renewed = await renewAnalyticsIntegrationScratch({
+              executionId: input.executionId,
+              workerId: WORKER_HOST_ID,
+              hostId: WORKER_HOST_ID,
+              relativePath: scratch.relativeDirectory,
+              reservedBytes: BigInt(scratch.reservedBytes),
+              leaseExpiresAt: new Date(Date.now() + 15 * 60_000),
+            });
+            if (!renewed) {
+              throw new Error("Doris Parquet scratch renewal was fenced");
+            }
+          },
+          run: async () => {
+            await writeDorisParquetFile({
+              filePath: scratch.filePath,
+              rows,
+            });
+            sizeBytes = (await fs.stat(scratch.filePath)).size;
+            checksum = await checksumFile(scratch.filePath);
+            await input.storageService.uploadFileBuffered({
+              fileName: key,
+              fileType: properties.contentType,
+              data: createReadStream(scratch.filePath),
+              partSizeBytes: input.partSizeBytes,
+              maxConcurrentParts: input.maxConcurrentParts,
+              maxPartAttempts: input.maxPartAttempts,
+            });
+          },
+        });
+      } catch (error) {
+        writeError = error;
+      }
+      let cleanupError: unknown;
+      try {
+        await scratch.cleanup();
+      } catch (error) {
+        cleanupError = error;
+      }
+      let releaseError: unknown;
+      try {
+        const released = await releaseAnalyticsIntegrationScratch({
+          executionId: input.executionId,
+          workerId: WORKER_HOST_ID,
+          hostId: WORKER_HOST_ID,
+          relativePath: scratch.relativeDirectory,
+        });
+        if (!released) {
+          releaseError = new Error("Doris Parquet scratch release was fenced");
+        }
+      } catch (error) {
+        releaseError = error;
+      }
+      if (writeError) throw writeError;
+      if (cleanupError) throw cleanupError;
+      if (releaseError) throw releaseError;
+    } else {
+      const formatter =
+        streamTransformations[
+          input.integration.fileType as BatchExportFileFormat
+        ]();
+      let stream: Readable = Readable.from(rows).pipe(formatter);
+      if (compressed) {
+        stream = stream.pipe(
+          new TimedGzip(input.gzipLevel, {
+            level: input.gzipLevel ?? ZLIB_DEFAULT_LEVEL,
+            activeMs: 0,
+            backpressureMs: 0,
+          }),
+        );
+      }
+      const counter = new HashingByteCounter();
+      stream = stream.pipe(counter);
+      await input.storageService.uploadFileBuffered({
+        fileName: key,
+        fileType: properties.contentType,
+        data: stream,
+        partSizeBytes: input.partSizeBytes,
+        maxConcurrentParts: input.maxConcurrentParts,
+        maxPartAttempts: input.maxPartAttempts,
+      });
+      sizeBytes = counter.bytes;
+      checksum = counter.digest();
+    }
+    files.push({
+      key,
+      table,
+      fileType: input.integration.fileType,
+      format:
+        input.integration.fileType === BlobStorageIntegrationFileType.PARQUET
+          ? BlobExportFormat.PARQUET
+          : resolveBlobExportFormat(input.integration.fileType, compressed),
+      compressed,
+      contentType: properties.contentType,
+      sizeBytes,
+      rowCount: rows.length,
+      checksum,
+    });
+    recordExportVolume({
+      integration: "blob_storage",
+      bytes: sizeBytes,
+      projectId: input.integration.projectId,
+      destinationType: input.integration.type,
+      source: files[files.length - 1]!.format,
+      table,
+      path: key,
+    });
+  }
+
+  const manifestKey =
+    `${input.integration.prefix ?? ""}${input.integration.projectId}/` +
+    `manifests/${input.executionId}.json`;
+  await input.storageService.uploadFile({
+    fileName: manifestKey,
+    fileType: "application/json; charset=utf-8",
+    data:
+      JSON.stringify(
+        {
+          version: 1,
+          executionId: input.executionId,
+          projectId: input.integration.projectId,
+          exportSource: input.integration.exportSource,
+          createdAt: new Date().toISOString(),
+          files,
+        },
+        null,
+        2,
+      ) + "\n",
+  });
+}
+
+async function handleDorisBlobStorageIntegrationProjectJob(input: {
+  readonly job: Job<
+    TQueueJobTypes[QueueName.BlobStorageIntegrationProcessingQueue]
+  >;
+  readonly integration: BlobStorageIntegration;
+}): Promise<void> {
+  const { integration, job } = input;
+  if (!isManagedAnalyticsIntegrationPayload(job.data.payload)) {
+    throw new Error("Doris blob integration requires a managed execution");
+  }
+  if (integration.endpoint) {
+    await validateBlobStorageEndpoint(integration.endpoint);
+  }
+  const { resolved: exportTuning } = resolveBlobExportTuning(
+    integration.exportTuning,
+    { partSizeBytes: DEFAULT_BLOB_EXPORT_PART_SIZE_BYTES },
+  );
+  const storageService = createBlobStorageService({
+    bucketName: integration.bucketName,
+    endpoint: integration.endpoint,
+    region: integration.region || "auto",
+    accessKeyId: integration.accessKeyId || undefined,
+    secretAccessKey: integration.secretAccessKey
+      ? decrypt(integration.secretAccessKey)
+      : undefined,
+    forcePathStyle: integration.forcePathStyle || undefined,
+    type: integration.type,
+  });
+  await prisma.blobStorageIntegration.update({
+    where: { projectId: integration.projectId },
+    data: { runStartedAt: new Date() },
+  });
+  try {
+    const result = await processDorisBlobIntegrationExecution({
+      payload: job.data.payload,
+      observationTable:
+        integration.exportSource === "EVENTS"
+          ? "observations_v2"
+          : "observations",
+      observationFieldGroups:
+        integration.exportFieldGroups as ObservationFieldGroupFull[],
+      upload: (read, executionId) =>
+        uploadDorisBlobExecution({
+          read,
+          executionId,
+          integration,
+          storageService,
+          partSizeBytes: exportTuning.partSizeBytes,
+          maxConcurrentParts: exportTuning.maxConcurrentParts,
+          maxPartAttempts: exportTuning.maxPartAttempts,
+          gzipLevel: exportTuning.gzipLevel,
+        }),
+    });
+    if (result) {
+      const interval = getFrequencyIntervalMs(integration.exportFrequency);
+      await prisma.blobStorageIntegration.update({
+        where: { projectId: integration.projectId },
+        data: {
+          runStartedAt: null,
+          nextSyncAt: new Date(Date.now() + interval),
+          lastError: null,
+          lastErrorAt: null,
+        },
+      });
+    }
+  } catch (error) {
+    await prisma.blobStorageIntegration.updateMany({
+      where: { projectId: integration.projectId },
+      data: {
+        runStartedAt: null,
+        lastError: extractStorageErrorMessage(error),
+        lastErrorAt: new Date(),
+      },
+    });
+    throw error;
+  }
+}
+
 export const handleBlobStorageIntegrationProjectJob = async (
   job: Job<TQueueJobTypes[QueueName.BlobStorageIntegrationProcessingQueue]>,
 ) => {
@@ -1200,6 +1536,14 @@ export const handleBlobStorageIntegrationProjectJob = async (
     await prisma.blobStorageIntegration.update({
       where: { projectId },
       data: { runStartedAt: null },
+    });
+    return;
+  }
+
+  if (isManagedAnalyticsIntegrationPayload(job.data.payload)) {
+    await handleDorisBlobStorageIntegrationProjectJob({
+      job,
+      integration: blobStorageIntegration,
     });
     return;
   }
