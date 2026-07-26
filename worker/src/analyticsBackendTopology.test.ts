@@ -4,16 +4,25 @@ import { resolveAnalyticsWorkerTopology } from "./analyticsBackendTopology";
 
 describe("resolveAnalyticsWorkerTopology", () => {
   it.each([
-    [undefined, "clickhouse", true, false],
-    ["clickhouse", "clickhouse", true, false],
-    ["doris", "doris", false, true],
+    [undefined, "clickhouse", true, false, true, true],
+    ["clickhouse", "clickhouse", true, false, true, true],
+    ["doris", "doris", false, true, true, false],
   ] as const)(
     "resolves %s to one exclusive worker topology",
-    (configured, backend, clickhouseEnabled, dorisEnabled) => {
+    (
+      configured,
+      backend,
+      clickhouseEnabled,
+      dorisEnabled,
+      coreBatchExportsEnabled,
+      legacyTraceDeletionCleanerEnabled,
+    ) => {
       expect(resolveAnalyticsWorkerTopology(configured)).toEqual({
         backend,
         clickhouseAnalyticsEnabled: clickhouseEnabled,
         dorisAnalyticsEnabled: dorisEnabled,
+        coreBatchExportsEnabled,
+        legacyTraceDeletionCleanerEnabled,
       });
     },
   );

@@ -34,6 +34,13 @@ export interface CanonicalFileReferenceSourceTime {
   readonly partitionDate: string;
 }
 
+export interface CanonicalDatasetRunItemSourceTime {
+  readonly sourceContract: "dataset-run-item";
+  readonly sourceVersion: bigint;
+  readonly createdAt: bigint;
+  readonly partitionDate: string;
+}
+
 function validationError(): AnalyticsPersistenceError {
   return new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
 }
@@ -136,6 +143,23 @@ export function deriveScoreSourceTime(input: {
     sourceVersion,
     timestamp,
     partitionDate: partitionDateFromVersionToken(timestamp),
+  };
+}
+
+export function deriveDatasetRunItemSourceTime(input: {
+  readonly eventTimestamp: VersionTokenInput;
+  readonly createdAt?: VersionTokenInput | null;
+}): CanonicalDatasetRunItemSourceTime {
+  const sourceVersion = normalizeRequired(input.eventTimestamp);
+  const createdAt =
+    input.createdAt == null
+      ? sourceVersion
+      : normalizeRequired(input.createdAt);
+  return {
+    sourceContract: "dataset-run-item",
+    sourceVersion,
+    createdAt,
+    partitionDate: partitionDateFromVersionToken(createdAt),
   };
 }
 

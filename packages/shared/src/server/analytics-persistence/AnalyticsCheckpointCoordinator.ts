@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 
 import type { AnalyticsCheckpointGeneration, Prisma } from "@prisma/client";
 
+import {
+  analyticsDurableProvenanceFromRecord,
+  analyticsDurableProvenanceMatches,
+  deserializeAnalyticsDurableProvenance,
+  serializeAnalyticsDurableProvenance,
+} from "./analyticsDurableProvenance";
+
 type DrainState = {
   readonly nonterminalOperations: number;
   readonly nonterminalLoads: number;
@@ -71,6 +78,11 @@ export type AnalyticsCheckpointCoordinatorDependencies = {
   readonly leaseMs: number;
   readonly timeoutMs: number;
   readonly pollIntervalMs: number;
+  readonly runFencedIo: <T>(input: {
+    readonly checkpoint: AnalyticsCheckpointGeneration;
+    readonly operation: AnalyticsCheckpointIoOperation;
+    readonly execute: () => Promise<T>;
+  }) => Promise<T>;
   readonly repository: CheckpointRepository;
   readonly postgres: {
     capture(): Promise<{
@@ -109,6 +121,11 @@ export type AnalyticsCheckpointCoordinatorDependencies = {
   readonly now?: () => Date;
   readonly wait?: (milliseconds: number) => Promise<void>;
 };
+
+export type AnalyticsCheckpointIoOperation =
+  | "artifact-captures"
+  | "anchor-publish"
+  | "anchor-read";
 
 export type AnalyticsCheckpointResult = {
   readonly generation: bigint;
@@ -182,6 +199,28 @@ export async function verifyAnalyticsCheckpointForRestore(input: {
   ) {
     throw new Error("Checkpoint artifact digests are invalid");
   }
+  const recordProvenance = analyticsDurableProvenanceFromRecord(checkpoint);
+  const manifestProvenance = (checkpoint.manifest as Record<string, unknown>)
+    .analyticsProvenance;
+  if (recordProvenance) {
+    let decodedManifestProvenance;
+    try {
+      decodedManifestProvenance =
+        deserializeAnalyticsDurableProvenance(manifestProvenance);
+    } catch {
+      throw new Error("Checkpoint manifest provenance is invalid");
+    }
+    if (
+      !analyticsDurableProvenanceMatches(
+        recordProvenance,
+        decodedManifestProvenance,
+      )
+    ) {
+      throw new Error("Checkpoint manifest provenance is invalid");
+    }
+  } else if (manifestProvenance !== undefined && manifestProvenance !== null) {
+    throw new Error("Legacy checkpoint manifest provenance is invalid");
+  }
   if (
     !(await input.verifySignature({
       keyId: checkpoint.keyId,
@@ -204,6 +243,8 @@ function defaultWait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+const CHECKPOINT_IO_LEASE_MARGIN_MS = 10_000;
+
 export class AnalyticsCheckpointCoordinator {
   private readonly now: () => Date;
   private readonly wait: (milliseconds: number) => Promise<void>;
@@ -215,9 +256,18 @@ export class AnalyticsCheckpointCoordinator {
       !dependencies.leaseOwner ||
       dependencies.leaseMs < 10_000 ||
       dependencies.timeoutMs < dependencies.pollIntervalMs ||
-      dependencies.pollIntervalMs < 50
+      dependencies.pollIntervalMs < 50 ||
+      dependencies.pollIntervalMs >= dependencies.leaseMs
     ) {
       throw new TypeError("Invalid analytics checkpoint coordinator settings");
+    }
+    if (
+      dependencies.leaseMs <=
+      dependencies.timeoutMs + CHECKPOINT_IO_LEASE_MARGIN_MS
+    ) {
+      throw new TypeError(
+        "Analytics checkpoint lease must outlive the external IO timeout",
+      );
     }
     this.now = dependencies.now ?? (() => new Date());
     this.wait = dependencies.wait ?? defaultWait;
@@ -236,11 +286,17 @@ export class AnalyticsCheckpointCoordinator {
     let artifactsRecorded = false;
     try {
       await this.drain(checkpoint, startedAt);
-      const [postgres, doris, lifecycle] = await Promise.all([
-        this.dependencies.postgres.capture(),
-        this.dependencies.doris.capture(),
-        this.dependencies.lifecycle.capture(),
-      ]);
+      await this.renewLease(checkpoint);
+      const [postgres, doris, lifecycle] = await this.runFencedIo(
+        checkpoint,
+        "artifact-captures",
+        () =>
+          Promise.all([
+            this.dependencies.postgres.capture(),
+            this.dependencies.doris.capture(),
+            this.dependencies.lifecycle.capture(),
+          ]),
+      );
       assertDigest(postgres.digest, "Postgres");
       assertDigest(doris.digest, "Doris");
       assertDigest(
@@ -264,6 +320,7 @@ export class AnalyticsCheckpointCoordinator {
         generation: checkpoint.generation.toString(),
         createdAt: checkpoint.createdAt.toISOString(),
         predecessorHash: checkpoint.predecessorHash,
+        analyticsProvenance: checkpointProvenanceForManifest(checkpoint),
         highWatermarks: {
           operationAcceptedAt:
             checkpoint.operationHighWatermarkAcceptedAt.toISOString(),
@@ -362,13 +419,7 @@ export class AnalyticsCheckpointCoordinator {
       if (this.now().getTime() >= deadline) {
         throw new Error("Analytics checkpoint drain timed out");
       }
-      const renewed = await this.dependencies.repository.renew({
-        generation: checkpoint.generation,
-        leaseOwner: this.dependencies.leaseOwner,
-        leaseMs: this.dependencies.leaseMs,
-        now: this.now(),
-      });
-      if (!renewed) throw new Error("Analytics checkpoint lost its lease");
+      await this.renewLease(checkpoint);
       await this.wait(this.dependencies.pollIntervalMs);
     }
   }
@@ -377,16 +428,27 @@ export class AnalyticsCheckpointCoordinator {
     readonly checkpoint: AnalyticsCheckpointGeneration;
     readonly manifestHash: string;
   }): Promise<string> {
+    await this.renewLease(input.checkpoint);
     try {
-      const published = await this.dependencies.anchor.publishLatest({
-        generation: input.checkpoint.generation,
-        manifestHash: input.manifestHash,
-        predecessorHash: input.checkpoint.predecessorHash,
-        idempotencyKey: `analytics-checkpoint-${input.checkpoint.generation}`,
-      });
+      const published = await this.runFencedIo(
+        input.checkpoint,
+        "anchor-publish",
+        () =>
+          this.dependencies.anchor.publishLatest({
+            generation: input.checkpoint.generation,
+            manifestHash: input.manifestHash,
+            predecessorHash: input.checkpoint.predecessorHash,
+            idempotencyKey: `analytics-checkpoint-${input.checkpoint.generation}`,
+          }),
+      );
       return published.reference;
     } catch (error) {
-      const latest = await this.dependencies.anchor.readLatest();
+      await this.renewLease(input.checkpoint);
+      const latest = await this.runFencedIo(
+        input.checkpoint,
+        "anchor-read",
+        () => this.dependencies.anchor.readLatest(),
+      );
       if (
         latest?.generation === input.checkpoint.generation &&
         latest.manifestHash === input.manifestHash
@@ -418,7 +480,10 @@ export class AnalyticsCheckpointCoordinator {
     if (!claimed) {
       throw new Error("Analytics checkpoint anchor reconciliation is leased");
     }
-    const latest = await this.dependencies.anchor.readLatest();
+    await this.renewLease(claimed);
+    const latest = await this.runFencedIo(claimed, "anchor-read", () =>
+      this.dependencies.anchor.readLatest(),
+    );
     if (
       latest?.generation === claimed.generation &&
       latest.manifestHash === claimed.manifestHash
@@ -451,4 +516,35 @@ export class AnalyticsCheckpointCoordinator {
       "External checkpoint anchor conflicts with the pending manifest",
     );
   }
+
+  private runFencedIo<T>(
+    checkpoint: AnalyticsCheckpointGeneration,
+    operation: AnalyticsCheckpointIoOperation,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    return this.dependencies.runFencedIo({
+      checkpoint,
+      operation,
+      execute,
+    });
+  }
+
+  private async renewLease(
+    checkpoint: AnalyticsCheckpointGeneration,
+  ): Promise<void> {
+    const renewed = await this.dependencies.repository.renew({
+      generation: checkpoint.generation,
+      leaseOwner: this.dependencies.leaseOwner,
+      leaseMs: this.dependencies.leaseMs,
+      now: this.now(),
+    });
+    if (!renewed) throw new Error("Analytics checkpoint lost its lease");
+  }
+}
+
+function checkpointProvenanceForManifest(
+  checkpoint: AnalyticsCheckpointGeneration,
+) {
+  const provenance = analyticsDurableProvenanceFromRecord(checkpoint);
+  return provenance ? serializeAnalyticsDurableProvenance(provenance) : null;
 }

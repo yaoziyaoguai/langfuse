@@ -123,73 +123,74 @@ model Organization {
 }
 
 model Project {
-  id                        String                      @id @default(cuid())
-  orgId                     String                      @map("org_id")
-  createdAt                 DateTime                    @default(now()) @map("created_at")
-  updatedAt                 DateTime                    @default(now()) @updatedAt @map("updated_at")
-  deletedAt                 DateTime?                   @map("deleted_at")
-  name                      String
-  retentionDays             Int?                        @map("retention_days")
-  hasTraces                 Boolean                     @default(false) @map("has_traces")
-  metadata                  Json?
+  id                            String                          @id @default(cuid())
+  orgId                         String                          @map("org_id")
+  createdAt                     DateTime                        @default(now()) @map("created_at")
+  updatedAt                     DateTime                        @default(now()) @updatedAt @map("updated_at")
+  deletedAt                     DateTime?                       @map("deleted_at")
+  name                          String
+  retentionDays                 Int?                            @map("retention_days")
+  hasTraces                     Boolean                         @default(false) @map("has_traces")
+  metadata                      Json?
   // Which dashboard renders on the project home page; null = the
   // Langfuse-curated default (LANGFUSE_HOME_DASHBOARD_ID).
-  homeDashboardId           String?                     @map("home_dashboard_id")
-  homeDashboard             Dashboard?                  @relation("ProjectHomeDashboard", fields: [homeDashboardId], references: [id], onDelete: SetNull)
-  projectMembers            ProjectMembership[]
-  organization              Organization                @relation(fields: [orgId], references: [id], onUpdate: Cascade, onDelete: Cascade)
-  apiKeys                   ApiKey[]
-  dataset                   Dataset[]
-  invitations               MembershipInvitation[]
-  sessions                  TraceSession[]
-  Prompt                    Prompt[]
-  Model                     Model[]
-  EvalTemplate              EvalTemplate[]
-  JobConfiguration          JobConfiguration[]
-  JobExecution              JobExecution[]
-  LlmApiKeys                LlmApiKeys[]
-  PosthogIntegration        PosthogIntegration[]
-  MixpanelIntegration       MixpanelIntegration[]
-  BlobStorageIntegration    BlobStorageIntegration[]
-  webCalloutEndpoints       WebCalloutEndpoint[]
-  scoreConfig               ScoreConfig[]
-  BatchExport               BatchExport[]
-  BatchAction               BatchAction[]
-  comment                   Comment[]
-  commentReactions          CommentReaction[]
-  annotationQueue           AnnotationQueue[]
-  annotationQueueItem       AnnotationQueueItem[]
-  Media                     Media[]
-  LegacyTrace               LegacyPrismaTrace[]
-  LegacyObservation         LegacyPrismaObservation[]
-  LegacyScore               LegacyPrismaScore[]
-  PromptDependency          PromptDependency[]
-  LlmSchema                 LlmSchema[]
-  LlmTool                   LlmTool[]
-  PromptProtectedLabels     PromptProtectedLabels[]
-  Dashboard                 Dashboard[]
-  DashboardWidget           DashboardWidget[]
-  TableViewPreset           TableViewPreset[]
-  actions                   Action[]
-  triggers                  Trigger[]
-  automationExecutions      AutomationExecution[]
-  Automation                Automation[]
-  monitors                  Monitor[]
-  DefaultLlmModel           DefaultLlmModel[]
-  Price                     Price[]
-  SlackIntegration          SlackIntegration?
-  PendingDeletion           PendingDeletion[]
-  AnnotationQueueAssignment AnnotationQueueAssignment[]
-  NotificationPreference    NotificationPreference[]
-  DefaultView               DefaultView[]
-  InAppAgentConversation    InAppAgentConversation[]
-  InAppAgentEvent           InAppAgentEvent[]
-  InAppAgentRun             InAppAgentRun[]
+  homeDashboardId               String?                         @map("home_dashboard_id")
+  homeDashboard                 Dashboard?                      @relation("ProjectHomeDashboard", fields: [homeDashboardId], references: [id], onDelete: SetNull)
+  projectMembers                ProjectMembership[]
+  organization                  Organization                    @relation(fields: [orgId], references: [id], onUpdate: Cascade, onDelete: Cascade)
+  apiKeys                       ApiKey[]
+  dataset                       Dataset[]
+  invitations                   MembershipInvitation[]
+  sessions                      TraceSession[]
+  Prompt                        Prompt[]
+  Model                         Model[]
+  EvalTemplate                  EvalTemplate[]
+  JobConfiguration              JobConfiguration[]
+  JobExecution                  JobExecution[]
+  LlmApiKeys                    LlmApiKeys[]
+  PosthogIntegration            PosthogIntegration[]
+  MixpanelIntegration           MixpanelIntegration[]
+  BlobStorageIntegration        BlobStorageIntegration[]
+  webCalloutEndpoints           WebCalloutEndpoint[]
+  scoreConfig                   ScoreConfig[]
+  BatchExport                   BatchExport[]
+  BatchAction                   BatchAction[]
+  comment                       Comment[]
+  commentReactions              CommentReaction[]
+  annotationQueue               AnnotationQueue[]
+  annotationQueueItem           AnnotationQueueItem[]
+  Media                         Media[]
+  LegacyTrace                   LegacyPrismaTrace[]
+  LegacyObservation             LegacyPrismaObservation[]
+  LegacyScore                   LegacyPrismaScore[]
+  PromptDependency              PromptDependency[]
+  LlmSchema                     LlmSchema[]
+  LlmTool                       LlmTool[]
+  PromptProtectedLabels         PromptProtectedLabels[]
+  Dashboard                     Dashboard[]
+  DashboardWidget               DashboardWidget[]
+  TableViewPreset               TableViewPreset[]
+  actions                       Action[]
+  triggers                      Trigger[]
+  automationExecutions          AutomationExecution[]
+  Automation                    Automation[]
+  monitors                      Monitor[]
+  DefaultLlmModel               DefaultLlmModel[]
+  Price                         Price[]
+  SlackIntegration              SlackIntegration?
+  PendingDeletion               PendingDeletion[]
+  AnnotationQueueAssignment     AnnotationQueueAssignment[]
+  NotificationPreference        NotificationPreference[]
+  DefaultView                   DefaultView[]
+  InAppAgentConversation        InAppAgentConversation[]
+  InAppAgentEvent               InAppAgentEvent[]
+  InAppAgentRun                 InAppAgentRun[]
   InAppAgentPendingToolApproval InAppAgentPendingToolApproval[]
-  analyticsIngestionOperations AnalyticsIngestionOperation[]
-  analyticsEntityHeads         AnalyticsEntityHead[]
-  analyticsDeletionTombstones  AnalyticsDeletionTombstone[]
-  traceControlStates           TraceControlState[]
+  analyticsIngestionOperations  AnalyticsIngestionOperation[]
+  analyticsEntityHeads          AnalyticsEntityHead[]
+  analyticsDeletionTombstones   AnalyticsDeletionTombstone[]
+  analyticsIntegrationStates    AnalyticsIntegrationState[]
+  traceControlStates            TraceControlState[]
 
   @@index([orgId])
   @@map("projects")
@@ -250,8 +251,8 @@ model InAppAgentConversation {
   createdAt         DateTime                              @default(now()) @map("created_at")
   updatedAt         DateTime                              @default(now()) @updatedAt @map("updated_at")
 
-  events InAppAgentEvent[]
-  runs   InAppAgentRun[]
+  events               InAppAgentEvent[]
+  runs                 InAppAgentRun[]
   pendingToolApprovals InAppAgentPendingToolApproval[]
 
   @@id([id, projectId])
@@ -751,23 +752,76 @@ enum DatasetStatus {
 }
 
 model DatasetRuns {
-  id              String            @default(cuid())
-  projectId       String            @map("project_id")
-  name            String
-  description     String?
-  metadata        Json?
-  datasetId       String            @map("dataset_id")
-  dataset         Dataset           @relation(fields: [datasetId, projectId], references: [id, projectId], onDelete: Cascade)
-  createdAt       DateTime          @default(now()) @map("created_at")
-  updatedAt       DateTime          @default(now()) @updatedAt @map("updated_at")
-  datasetRunItems DatasetRunItems[]
+  id                                      String                             @default(cuid())
+  projectId                               String                             @map("project_id")
+  name                                    String
+  description                             String?
+  metadata                                Json?
+  datasetId                               String                             @map("dataset_id")
+  dataset                                 Dataset                            @relation(fields: [datasetId, projectId], references: [id, projectId], onDelete: Cascade)
+  createdAt                               DateTime                           @default(now()) @map("created_at")
+  updatedAt                               DateTime                           @default(now()) @updatedAt @map("updated_at")
+  datasetRunItems                         DatasetRunItems[]
+  analyticsBackend                        AnalyticsBackendType?              @map("analytics_backend")
+  deploymentGeneration                    BigInt?                            @map("deployment_generation")
+  workloadEpochFingerprint                String?                            @map("workload_epoch_fingerprint")
+  runtimeContractVersion                  Int?                               @map("runtime_contract_version")
+  producerRuntimeLeaseId                  String?                            @map("producer_runtime_lease_id")
+  producerRuntimeLease                    AnalyticsRuntimeLease?             @relation("ExperimentProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  capabilityActivationGeneration          BigInt?                            @map("capability_activation_generation")
+  capabilityContractVersion               Int?                               @map("capability_contract_version")
+  datasetRunIngestionActivationGeneration BigInt?                            @map("dataset_run_ingestion_activation_generation")
+  datasetRunIngestionContractVersion      Int?                               @map("dataset_run_ingestion_contract_version")
+  experimentExecutionState                ExperimentExecutionState?          @map("experiment_execution_state")
+  experimentExecutionGeneration           BigInt                             @default(0) @map("experiment_execution_generation")
+  experimentExecutionClaimId              String?                            @map("experiment_execution_claim_id")
+  experimentExecutionLeaseOwner           String?                            @map("experiment_execution_lease_owner")
+  experimentExecutionLeaseExpiresAt       DateTime?                          @map("experiment_execution_lease_expires_at")
+  experimentFailureCode                   String?                            @map("experiment_failure_code")
+  experimentCompletedAt                   DateTime?                          @map("experiment_completed_at")
+  experimentDispatchOutbox                ExperimentExecutionDispatchOutbox?
 
   @@id([id, projectId])
   @@unique([datasetId, projectId, name])
   @@index([datasetId], type: Hash)
   @@index([createdAt])
   @@index([updatedAt])
+  @@index([analyticsBackend, deploymentGeneration, experimentExecutionState], map: "dataset_runs_experiment_backend_state_idx")
+  @@index([experimentExecutionState, experimentExecutionLeaseExpiresAt], map: "dataset_runs_experiment_execution_lease_idx")
   @@map("dataset_runs")
+}
+
+enum ExperimentExecutionState {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  QUARANTINED
+}
+
+enum ExperimentExecutionDispatchStatus {
+  PENDING
+  PUBLISHED
+  CANCELLED
+}
+
+model ExperimentExecutionDispatchOutbox {
+  id            String                            @id @default(cuid())
+  datasetRunId  String                            @map("dataset_run_id")
+  projectId     String                            @map("project_id")
+  datasetRun    DatasetRuns                       @relation(fields: [datasetRunId, projectId], references: [id, projectId], onDelete: Cascade)
+  status        ExperimentExecutionDispatchStatus @default(PENDING)
+  generation    Int                               @default(1)
+  attempts      Int                               @default(0)
+  nextAttemptAt DateTime                          @default(now()) @map("next_attempt_at")
+  publishedAt   DateTime?                         @map("published_at")
+  createdAt     DateTime                          @default(now()) @map("created_at")
+  updatedAt     DateTime                          @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([datasetRunId, projectId])
+  @@index([status, nextAttemptAt, createdAt], map: "experiment_execution_dispatch_pending_idx")
+  @@map("experiment_execution_dispatch_outbox")
 }
 
 model DatasetRunItems {
@@ -1132,7 +1186,7 @@ model JobExecution {
   jobConfigurationId String           @map("job_configuration_id")
   jobConfiguration   JobConfiguration @relation(fields: [jobConfigurationId], references: [id], onDelete: Cascade)
 
-  jobTemplateId String?       @map("job_template_id")
+  jobTemplateId String? @map("job_template_id")
 
   status    JobExecutionStatus
   startTime DateTime?          @map("start_time")
@@ -1153,9 +1207,13 @@ model JobExecution {
 
   executionTraceId String? @map("execution_trace_id")
 
+  analyticsEvaluationDispatchId String?                      @map("analytics_evaluation_dispatch_id")
+  analyticsEvaluationDispatch   AnalyticsEvaluationDispatch? @relation(fields: [analyticsEvaluationDispatchId], references: [id], onDelete: SetNull)
+
   @@index([projectId, jobConfigurationId, jobInputTraceId])
   @@index([projectId, jobOutputScoreId])
   @@index([jobConfigurationId])
+  @@index([analyticsEvaluationDispatchId], map: "job_executions_analytics_evaluation_dispatch_id_idx")
   @@map("job_executions")
 }
 
@@ -1361,9 +1419,61 @@ model BatchExport {
   url    String?
   log    String?
 
+  analyticsBackend                     AnalyticsBackendType?      @map("analytics_backend")
+  deploymentGeneration                 BigInt?                    @map("deployment_generation")
+  workloadEpochFingerprint             String?                    @map("workload_epoch_fingerprint")
+  runtimeContractVersion               Int?                       @map("runtime_contract_version")
+  producerRuntimeLeaseId               String?                    @map("producer_runtime_lease_id")
+  producerRuntimeLease                 AnalyticsRuntimeLease?     @relation("BatchExportProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  capabilityActivationGeneration       BigInt?                    @map("capability_activation_generation")
+  capabilityContractVersion            Int?                       @map("capability_contract_version")
+  datasetRunExportActivationGeneration BigInt?                    @map("dataset_run_export_activation_generation")
+  datasetRunExportContractVersion      Int?                       @map("dataset_run_export_contract_version")
+  manifestState                        BatchExportManifestState?  @map("manifest_state")
+  manifestGeneration                   BigInt                     @default(0) @map("manifest_generation")
+  manifestClaimId                      String?                    @map("manifest_claim_id")
+  manifestLeaseOwner                   String?                    @map("manifest_lease_owner")
+  manifestLeaseExpiresAt               DateTime?                  @map("manifest_lease_expires_at")
+  manifestObjectKey                    String?                    @unique @map("manifest_object_key")
+  manifestChecksum                     String?                    @map("manifest_checksum")
+  manifestRowCount                     Int?                       @map("manifest_row_count")
+  manifestByteCount                    BigInt?                    @map("manifest_byte_count")
+  manifestFilterHash                   String?                    @map("manifest_filter_hash")
+  manifestFormatVersion                Int?                       @map("manifest_format_version")
+  manifestSealedAt                     DateTime?                  @map("manifest_sealed_at")
+  executionState                       BatchExportExecutionState? @map("execution_state")
+  executionGeneration                  BigInt                     @default(0) @map("execution_generation")
+  executionClaimId                     String?                    @map("execution_claim_id")
+  executionLeaseOwner                  String?                    @map("execution_lease_owner")
+  executionLeaseExpiresAt              DateTime?                  @map("execution_lease_expires_at")
+  failureCode                          String?                    @map("failure_code")
+  dispatchOutbox                       BatchExportDispatchOutbox?
+
   @@index([projectId, userId])
   @@index([status])
+  @@index([analyticsBackend, deploymentGeneration, status], map: "batch_exports_backend_generation_status_idx")
+  @@index([manifestState, manifestLeaseExpiresAt], map: "batch_exports_manifest_state_lease_idx")
+  @@index([executionState, executionLeaseExpiresAt], map: "batch_exports_execution_state_lease_idx")
   @@map("batch_exports")
+}
+
+model BatchExportDispatchOutbox {
+  id            String                    @id @default(cuid())
+  batchExportId String                    @unique @map("batch_export_id")
+  batchExport   BatchExport               @relation(fields: [batchExportId], references: [id], onDelete: Cascade)
+  status        BatchExportDispatchStatus @default(PENDING)
+  generation    Int                       @default(1)
+  attempts      Int                       @default(0)
+  nextAttemptAt DateTime                  @default(now()) @map("next_attempt_at")
+  lockedBy      String?                   @map("locked_by")
+  lockedUntil   DateTime?                 @map("locked_until")
+  publishedAt   DateTime?                 @map("published_at")
+  createdAt     DateTime                  @default(now()) @map("created_at")
+  updatedAt     DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt, lockedUntil], map: "batch_export_dispatch_outbox_pending_idx")
+  @@index([status, updatedAt], map: "batch_export_dispatch_outbox_recovery_idx")
+  @@map("batch_export_dispatch_outbox")
 }
 
 model BatchAction {
@@ -1397,18 +1507,18 @@ model BatchAction {
 
 model Media {
   id               String
-  sha256Hash       String             @map("sha_256_hash") @db.Char(44)
-  projectId        String             @map("project_id")
-  project          Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  createdAt        DateTime           @default(now()) @map("created_at")
-  updatedAt        DateTime           @default(now()) @updatedAt @map("updated_at")
-  uploadedAt       DateTime?          @map("uploaded_at")
-  uploadHttpStatus Int?               @map("upload_http_status")
-  uploadHttpError  String?            @map("upload_http_error")
-  bucketPath       String             @map("bucket_path")
-  bucketName       String             @map("bucket_name")
-  contentType      String             @map("content_type")
-  contentLength    BigInt             @map("content_length")
+  sha256Hash       String    @map("sha_256_hash") @db.Char(44)
+  projectId        String    @map("project_id")
+  project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+  uploadedAt       DateTime? @map("uploaded_at")
+  uploadHttpStatus Int?      @map("upload_http_status")
+  uploadHttpError  String?   @map("upload_http_error")
+  bucketPath       String    @map("bucket_path")
+  bucketName       String    @map("bucket_name")
+  contentType      String    @map("content_type")
+  contentLength    BigInt    @map("content_length")
 
   @@unique([projectId, id])
   @@unique([projectId, sha256Hash])
@@ -1446,26 +1556,26 @@ model ObservationMedia {
 }
 
 model DatasetItemMedia {
-  id                   String   @id @default(cuid())
-  projectId            String   @map("project_id")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at")
-  mediaId              String   @map("media_id")
+  id                   String    @id @default(cuid())
+  projectId            String    @map("project_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at")
+  mediaId              String    @map("media_id")
   // dataset items cascade on dataset deletion, but these rows have no FK;
   // datasetId lets the dataset-delete worker clean them up directly
-  datasetId            String   @map("dataset_id")
-  datasetItemId        String   @map("dataset_item_id")
+  datasetId            String    @map("dataset_id")
+  datasetItemId        String    @map("dataset_item_id")
   // null while pending: the row is declared at media upload and stamped with
   // the item version's validFrom when the item is written.
   datasetItemValidFrom DateTime? @map("dataset_item_valid_from")
   // dataset item field containing the reference: input | expectedOutput | metadata
-  field                String   @map("field")
+  field                String    @map("field")
   // null while pending; the dataset service fills it from the item JSON on claim.
   // JSONPath of the string holding the media reference within the field, e.g. $['images'][0]
-  jsonPath             String?  @map("json_path")
+  jsonPath             String?   @map("json_path")
   // null while pending; the original @@@langfuseMedia:...@@@ string, filled on
   // claim so reads need no JSON parsing
-  referenceString      String?  @map("reference_string")
+  referenceString      String?   @map("reference_string")
 
   @@unique([projectId, datasetItemId, datasetItemValidFrom, field, jsonPath], map: "dataset_item_media_item_version_field_path_key")
   @@index([projectId, mediaId])
@@ -1828,10 +1938,10 @@ model Monitor {
   lastCompletedAt  DateTime?     @map("last_completed_at")
 
   // === Alerts ===
-  name      String
+  name       String
   tags       String[]  @default([])
   triggerIds String[]  @default([]) @map("trigger_ids")
-  alertedAt DateTime? @map("alerted_at")
+  alertedAt  DateTime? @map("alerted_at")
 
   @@index([projectId])
   @@index([schedulerBatchId])
@@ -1891,6 +2001,13 @@ enum AnalyticsOutboxStatus {
   PUBLISHED
 }
 
+enum BatchExportDispatchStatus {
+  PENDING
+  PUBLISHED
+  CANCELLED
+  FAILED
+}
+
 enum AnalyticsLoadBatchStatus {
   PENDING
   LOADING
@@ -1900,10 +2017,37 @@ enum AnalyticsLoadBatchStatus {
   CANCELLED_BY_DELETION
 }
 
+enum BatchExportManifestState {
+  PREPARING
+  SEALED
+}
+
+enum BatchExportExecutionState {
+  PENDING
+  EXPORTING
+  COMPLETED
+  FAILED
+  CANCELLED
+  QUARANTINED
+}
+
 enum AnalyticsEntityType {
   EVENT
   SCORE
   FILE_REFERENCE
+  DATASET_RUN_ITEM
+}
+
+enum AnalyticsDatasetDeletionScope {
+  DATASET
+  DATASET_RUNS
+}
+
+enum AnalyticsDatasetDeletionStatus {
+  SCHEDULED
+  RETRYING
+  NEEDS_ATTENTION
+  COMPLETED
 }
 
 enum AnalyticsDeletionScope {
@@ -1931,43 +2075,412 @@ enum AnalyticsBackgroundMigrationRetirementStatus {
   TERMINALIZED
 }
 
-model AnalyticsIngestionOperation {
-  id                         String                            @id @default(cuid())
-  projectId                  String                            @map("project_id")
-  project                    Project                           @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  sourceOperationId          String                            @map("source_operation_id")
-  sourceChecksum             String                            @map("source_checksum")
-  rawObjectKey               String                            @map("raw_object_key")
-  acceptedAt                 DateTime                          @default(now()) @map("accepted_at")
-  acceptedAtNanos            BigInt                            @map("accepted_at_nanos")
-  canonicalizerVersion       String                            @map("canonicalizer_version")
-  schemaVersion              Int                               @map("schema_version")
-  checkpointGeneration       BigInt                            @default(0) @map("checkpoint_generation")
-  canonicalizationFence      BigInt                            @default(0) @map("canonicalization_fence")
-  canonicalizationLeaseOwner String?                           @map("canonicalization_lease_owner")
-  canonicalizationLeaseUntil DateTime?                         @map("canonicalization_lease_until")
-  canonicalizationAttempts   Int                               @default(0) @map("canonicalization_attempts")
-  reservedCanonicalObjectKey String?                           @map("reserved_canonical_object_key")
-  canonicalObjectKey         String?                           @map("canonical_object_key")
-  canonicalArtifactChecksum  String?                           @map("canonical_artifact_checksum")
-  manifestState              AnalyticsManifestState            @default(PENDING) @map("manifest_state")
-  candidateManifest          Json?                             @map("candidate_manifest")
-  frozenManifest             Json?                             @map("frozen_manifest")
-  status                     AnalyticsIngestionOperationStatus @default(ACCEPTED)
-  cancellationReasonCode     String?                           @map("cancellation_reason_code")
-  lastErrorCode              String?                           @map("last_error_code")
-  recoverableUntil           DateTime                          @map("recoverable_until")
-  statusExpiresAt            DateTime                          @map("status_expires_at")
-  visibleAt                  DateTime?                         @map("visible_at")
-  terminalAt                 DateTime?                         @map("terminal_at")
-  createdAt                  DateTime                          @default(now()) @map("created_at")
-  updatedAt                  DateTime                          @default(now()) @updatedAt @map("updated_at")
+enum AnalyticsBackendType {
+  CLICKHOUSE
+  DORIS
+}
 
-  outbox      AnalyticsIngestionOutbox?
-  outboxV2    AnalyticsIngestionOutboxV2?
-  candidates  AnalyticsIngestionCandidate[]
-  loadBatches AnalyticsLoadBatch[]
-  entityHeads AnalyticsEntityHead[]
+enum AnalyticsRuntimeComponent {
+  WEB
+  WORKER
+  CHECKPOINT
+}
+
+enum AnalyticsRuntimeLeaseState {
+  STARTING
+  ACTIVE
+  QUIESCING
+  QUIESCED
+}
+
+enum AnalyticsCapability {
+  CORE_BATCH_EXPORTS     @map("coreBatchExports")
+  EVALUATIONS            @map("evaluations")
+  EXPERIMENTS            @map("experiments")
+  DATASET_RUN_EXPORTS    @map("datasetRunExports")
+  DATASET_RUN_INGESTION  @map("datasetRunIngestion")
+  ANALYTICS_INTEGRATIONS @map("analyticsIntegrations")
+}
+
+enum AnalyticsCapabilityActivationStatus {
+  DISABLED
+  DARK
+  ACTIVE
+  DRAINING
+}
+
+enum AnalyticsIntegrationType {
+  POSTHOG
+  MIXPANEL
+  BLOB_STORAGE
+}
+
+enum AnalyticsIntegrationLifecycleStatus {
+  BOOTSTRAPPING_DARK
+  BOOTSTRAPPING_ACTIVE
+  ACTIVE
+  PAUSED_BACKLOG
+  RESCANNING
+  DRAINING
+  DISABLED
+}
+
+enum AnalyticsIntegrationDeliveryKind {
+  TRACE
+  GENERATION
+  OBSERVATION
+  SCORE
+}
+
+enum AnalyticsIntegrationDeliveryStatus {
+  SUSPENDED
+  PENDING
+  CLAIMED
+  COMPLETED
+  SOURCE_DELETED
+  QUARANTINED
+}
+
+enum AnalyticsIntegrationExecutionKind {
+  BOOTSTRAP
+  INCREMENTAL
+  RESCAN
+}
+
+enum AnalyticsIntegrationExecutionStatus {
+  SEALED
+  PUBLISHED
+  RUNNING
+  RETRYING
+  COMPLETED
+  CANCELLED
+  QUARANTINED
+}
+
+enum AnalyticsRuntimeCapabilityRole {
+  CAPTURE
+  PRODUCER
+  CONSUMER
+  RECOVERY
+}
+
+enum AnalyticsDeploymentTransitionKind {
+  INITIALIZE
+  ADOPT_EXISTING
+  SWITCH
+}
+
+model AnalyticsBackendDeploymentState {
+  id                        String               @id @default("global")
+  backend                   AnalyticsBackendType
+  generation                BigInt
+  workloadEpochFingerprint  String               @map("workload_epoch_fingerprint")
+  queueNamespaceFingerprint String?              @map("queue_namespace_fingerprint")
+  foundationContractVersion Int                  @map("foundation_contract_version")
+  attestationDigest         String?              @map("attestation_digest")
+  createdAt                 DateTime             @default(now()) @map("created_at")
+  updatedAt                 DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  @@map("analytics_backend_deployment_state")
+}
+
+model AnalyticsRuntimeLease {
+  id                          String                     @id @default(cuid())
+  component                   AnalyticsRuntimeComponent
+  instanceId                  String                     @map("instance_id")
+  backend                     AnalyticsBackendType
+  deploymentGeneration        BigInt                     @map("deployment_generation")
+  workloadEpochFingerprint    String                     @map("workload_epoch_fingerprint")
+  queueNamespaceFingerprint   String?                    @map("queue_namespace_fingerprint")
+  buildId                     String                     @map("build_id")
+  foundationContractVersion   Int                        @map("foundation_contract_version")
+  acceptedSchemaVersionMin    Int                        @map("accepted_schema_version_min")
+  acceptedSchemaVersionMax    Int                        @map("accepted_schema_version_max")
+  acceptedCanonicalVersionMin Int                        @map("accepted_canonical_version_min")
+  acceptedCanonicalVersionMax Int                        @map("accepted_canonical_version_max")
+  state                       AnalyticsRuntimeLeaseState @default(STARTING)
+  heartbeatAt                 DateTime                   @map("heartbeat_at")
+  leaseExpiresAt              DateTime                   @map("lease_expires_at")
+  quiescedAt                  DateTime?                  @map("quiesced_at")
+  supersededAt                DateTime?                  @map("superseded_at")
+  createdAt                   DateTime                   @default(now()) @map("created_at")
+  updatedAt                   DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  capabilityContracts           AnalyticsRuntimeCapabilityContract[]
+  claimLeases                   AnalyticsBackendClaimLease[]
+  producedIngestionOperations   AnalyticsIngestionOperation[]         @relation("AnalyticsIngestionProducerRuntimeLease")
+  producedDeletionOperations    AnalyticsDeletionOperation[]          @relation("AnalyticsDeletionProducerRuntimeLease")
+  producedCheckpoints           AnalyticsCheckpointGeneration[]       @relation("AnalyticsCheckpointProducerRuntimeLease")
+  producedRetentionRuns         AnalyticsRetentionRun[]               @relation("AnalyticsRetentionProducerRuntimeLease")
+  producedBatchExports          BatchExport[]                         @relation("BatchExportProducerRuntimeLease")
+  capturedEvaluationDispatches  AnalyticsEvaluationDispatch[]         @relation("AnalyticsEvaluationCaptureRuntimeLease")
+  capturedIntegrationDeliveries AnalyticsIntegrationPendingDelivery[] @relation("AnalyticsIntegrationCaptureRuntimeLease")
+  sealedIntegrationExecutions   AnalyticsIntegrationExecution[]       @relation("AnalyticsIntegrationSealRuntimeLease")
+  producedExperiments           DatasetRuns[]                         @relation("ExperimentProducerRuntimeLease")
+
+  @@index([instanceId], map: "analytics_runtime_leases_instance_id_idx")
+  @@index([backend, deploymentGeneration, state, leaseExpiresAt], map: "analytics_runtime_leases_backend_generation_state_expiry_idx")
+  @@index([workloadEpochFingerprint, leaseExpiresAt], map: "analytics_runtime_leases_epoch_expiry_idx")
+  @@map("analytics_runtime_leases")
+}
+
+model AnalyticsRuntimeCapabilityContract {
+  runtimeLeaseId           String                           @map("runtime_lease_id")
+  runtimeLease             AnalyticsRuntimeLease            @relation(fields: [runtimeLeaseId], references: [id], onDelete: Cascade)
+  capability               AnalyticsCapability
+  supportedContractVersion Int                              @map("supported_contract_version")
+  installedRoles           AnalyticsRuntimeCapabilityRole[] @map("installed_roles")
+  createdAt                DateTime                         @default(now()) @map("created_at")
+  updatedAt                DateTime                         @default(now()) @updatedAt @map("updated_at")
+
+  @@id([runtimeLeaseId, capability])
+  @@index([capability, supportedContractVersion], map: "analytics_runtime_capability_contracts_capability_version_idx")
+  @@map("analytics_runtime_capability_contracts")
+}
+
+model AnalyticsCapabilityActivation {
+  capability                   AnalyticsCapability                 @id
+  backend                      AnalyticsBackendType
+  deploymentGeneration         BigInt                              @map("deployment_generation")
+  generation                   BigInt
+  contractVersion              Int                                 @map("contract_version")
+  minimumRuntimeContract       Int                                 @map("minimum_runtime_contract")
+  status                       AnalyticsCapabilityActivationStatus @default(DISABLED)
+  captureEnabled               Boolean                             @default(false) @map("capture_enabled")
+  captureStartedAt             DateTime?                           @map("capture_started_at")
+  captureExpiresAt             DateTime?                           @map("capture_expires_at")
+  captureRowBudget             Int?                                @map("capture_row_budget")
+  captureRows                  BigInt                              @default(0) @map("capture_rows")
+  captureRequired              Boolean                             @default(false) @map("capture_required")
+  rescanRequired               Boolean                             @default(false) @map("rescan_required")
+  cutoffState                  Json?                               @map("cutoff_state")
+  cutoffActivationGeneration   BigInt?                             @map("cutoff_activation_generation")
+  cutoffDigest                 String?                             @map("cutoff_digest")
+  bootstrapEvidenceDigest      String?                             @map("bootstrap_evidence_digest")
+  bootstrapCompletedGeneration BigInt?                             @map("bootstrap_completed_generation")
+  bootstrapCompletedAt         DateTime?                           @map("bootstrap_completed_at")
+  activatedAt                  DateTime?                           @map("activated_at")
+  drainingAt                   DateTime?                           @map("draining_at")
+  disabledAt                   DateTime?                           @map("disabled_at")
+  createdAt                    DateTime                            @default(now()) @map("created_at")
+  updatedAt                    DateTime                            @default(now()) @updatedAt @map("updated_at")
+
+  @@index([backend, deploymentGeneration, status], map: "analytics_capability_activations_backend_generation_status_idx")
+  @@map("analytics_capability_activations")
+}
+
+model AnalyticsIntegrationState {
+  id                        String                              @id @default(cuid())
+  projectId                 String                              @map("project_id")
+  project                   Project                             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  integrationType           AnalyticsIntegrationType            @map("integration_type")
+  generation                BigInt                              @default(1)
+  status                    AnalyticsIntegrationLifecycleStatus @default(DISABLED)
+  pendingRows               BigInt                              @default(0) @map("pending_rows")
+  pendingEstimatedBytes     BigInt                              @default(0) @map("pending_estimated_bytes")
+  rescanRequired            Boolean                             @default(false) @map("rescan_required")
+  cutoffAcceptanceSequence  BigInt?                             @map("cutoff_acceptance_sequence")
+  bootstrapManifest         Json?                               @map("bootstrap_manifest")
+  bootstrapManifestKey      String?                             @map("bootstrap_manifest_key")
+  bootstrapManifestChecksum String?                             @map("bootstrap_manifest_checksum")
+  bootstrapManifestRows     BigInt?                             @map("bootstrap_manifest_rows")
+  bootstrapSealedAt         DateTime?                           @map("bootstrap_sealed_at")
+  lastErrorCode             String?                             @map("last_error_code")
+  createdAt                 DateTime                            @default(now()) @map("created_at")
+  updatedAt                 DateTime                            @default(now()) @updatedAt @map("updated_at")
+
+  pendingDeliveries AnalyticsIntegrationPendingDelivery[]
+  executions        AnalyticsIntegrationExecution[]
+
+  @@unique([projectId, integrationType], map: "analytics_integration_states_project_type_key")
+  @@unique([id, integrationType, generation], map: "analytics_integration_states_identity_generation_key")
+  @@index([status, rescanRequired, updatedAt], map: "analytics_integration_states_status_rescan_idx")
+  @@map("analytics_integration_states")
+}
+
+model AnalyticsIntegrationPendingDelivery {
+  id                             String                             @id
+  integrationStateId             String                             @map("integration_state_id")
+  integrationType                AnalyticsIntegrationType           @map("integration_type")
+  integrationGeneration          BigInt                             @map("integration_generation")
+  integrationState               AnalyticsIntegrationState          @relation(fields: [integrationStateId], references: [id], onDelete: Cascade)
+  operationId                    String                             @map("operation_id")
+  projectId                      String                             @map("project_id")
+  operation                      AnalyticsIngestionOperation        @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  sourceCandidateKey             String                             @map("source_candidate_key")
+  deliveryKind                   AnalyticsIntegrationDeliveryKind   @map("delivery_kind")
+  entityKey                      String                             @map("entity_key")
+  estimatedBytes                 Int                                @map("estimated_bytes")
+  analyticsBackend               AnalyticsBackendType               @map("analytics_backend")
+  deploymentGeneration           BigInt                             @map("deployment_generation")
+  workloadEpochFingerprint       String                             @map("workload_epoch_fingerprint")
+  runtimeContractVersion         Int                                @map("runtime_contract_version")
+  captureRuntimeLeaseId          String                             @map("capture_runtime_lease_id")
+  captureRuntimeLease            AnalyticsRuntimeLease              @relation("AnalyticsIntegrationCaptureRuntimeLease", fields: [captureRuntimeLeaseId], references: [id], onDelete: Restrict)
+  capabilityActivationGeneration BigInt                             @map("capability_activation_generation")
+  capabilityContractVersion      Int                                @map("capability_contract_version")
+  status                         AnalyticsIntegrationDeliveryStatus
+  attempts                       Int                                @default(0)
+  nextAttemptAt                  DateTime                           @default(now()) @map("next_attempt_at")
+  claimOwner                     String?                            @map("claim_owner")
+  claimExpiresAt                 DateTime?                          @map("claim_expires_at")
+  completedAt                    DateTime?                          @map("completed_at")
+  failureCode                    String?                            @map("failure_code")
+  executionId                    String?                            @map("execution_id")
+  execution                      AnalyticsIntegrationExecution?     @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  createdAt                      DateTime                           @default(now()) @map("created_at")
+  updatedAt                      DateTime                           @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([integrationStateId, integrationGeneration, operationId, deliveryKind, entityKey], map: "analytics_integration_deliveries_stable_key")
+  @@index([integrationStateId, integrationGeneration, status, nextAttemptAt, id], map: "analytics_integration_deliveries_claim_idx")
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_integration_deliveries_backend_generation_idx")
+  @@index([operationId, projectId], map: "analytics_integration_deliveries_operation_idx")
+  @@index([status, claimExpiresAt], map: "analytics_integration_deliveries_claim_expiry_idx")
+  @@index([executionId, status], map: "analytics_integration_deliveries_execution_idx")
+  @@map("analytics_integration_pending_deliveries")
+}
+
+model AnalyticsIntegrationExecution {
+  id                             String                              @id
+  integrationStateId             String                              @map("integration_state_id")
+  integrationType                AnalyticsIntegrationType            @map("integration_type")
+  integrationGeneration          BigInt                              @map("integration_generation")
+  integrationState               AnalyticsIntegrationState           @relation(fields: [integrationStateId], references: [id], onDelete: Cascade)
+  projectId                      String                              @map("project_id")
+  kind                           AnalyticsIntegrationExecutionKind
+  analyticsBackend               AnalyticsBackendType                @map("analytics_backend")
+  deploymentGeneration           BigInt                              @map("deployment_generation")
+  workloadEpochFingerprint       String                              @map("workload_epoch_fingerprint")
+  runtimeContractVersion         Int                                 @map("runtime_contract_version")
+  capabilityActivationGeneration BigInt                              @map("capability_activation_generation")
+  capabilityContractVersion      Int                                 @map("capability_contract_version")
+  sealedRuntimeLeaseId           String                              @map("sealed_runtime_lease_id")
+  sealedRuntimeLease             AnalyticsRuntimeLease               @relation("AnalyticsIntegrationSealRuntimeLease", fields: [sealedRuntimeLeaseId], references: [id], onDelete: Restrict)
+  manifest                       Json
+  manifestChecksum               String                              @map("manifest_checksum")
+  deliveryCount                  Int                                 @map("delivery_count")
+  status                         AnalyticsIntegrationExecutionStatus @default(SEALED)
+  attempts                       Int                                 @default(0)
+  nextAttemptAt                  DateTime                            @default(now()) @map("next_attempt_at")
+  queueJobId                     String?                             @map("queue_job_id")
+  publishedAt                    DateTime?                           @map("published_at")
+  claimOwner                     String?                             @map("claim_owner")
+  claimExpiresAt                 DateTime?                           @map("claim_expires_at")
+  scratchHostId                  String?                             @map("scratch_host_id")
+  scratchRelativePath            String?                             @map("scratch_relative_path")
+  scratchReservedBytes           BigInt?                             @map("scratch_reserved_bytes")
+  scratchLeaseExpiresAt          DateTime?                           @map("scratch_lease_expires_at")
+  lastErrorCode                  String?                             @map("last_error_code")
+  completedAt                    DateTime?                           @map("completed_at")
+  createdAt                      DateTime                            @default(now()) @map("created_at")
+  updatedAt                      DateTime                            @default(now()) @updatedAt @map("updated_at")
+
+  deliveries AnalyticsIntegrationPendingDelivery[]
+
+  @@unique([integrationStateId, integrationGeneration, manifestChecksum], map: "analytics_integration_executions_manifest_key")
+  @@index([status, nextAttemptAt, createdAt], map: "analytics_integration_executions_publish_idx")
+  @@index([integrationStateId, integrationGeneration, status], map: "analytics_integration_executions_state_idx")
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_integration_executions_backend_idx")
+  @@index([status, claimExpiresAt], map: "analytics_integration_executions_claim_idx")
+  @@index([scratchHostId, scratchLeaseExpiresAt], map: "analytics_integration_executions_scratch_lease_idx")
+  @@map("analytics_integration_executions")
+}
+
+model AnalyticsBackendClaimLease {
+  id                             String                @id @default(cuid())
+  runtimeLeaseId                 String                @map("runtime_lease_id")
+  runtimeLease                   AnalyticsRuntimeLease @relation(fields: [runtimeLeaseId], references: [id], onDelete: Restrict)
+  backend                        AnalyticsBackendType
+  deploymentGeneration           BigInt                @map("deployment_generation")
+  workloadEpochFingerprint       String                @map("workload_epoch_fingerprint")
+  runtimeContractVersion         Int                   @map("runtime_contract_version")
+  capability                     AnalyticsCapability?
+  capabilityActivationGeneration BigInt?               @map("capability_activation_generation")
+  capabilityContractVersion      Int?                  @map("capability_contract_version")
+  claimKind                      String                @map("claim_kind")
+  resourceIdentity               String                @map("resource_identity")
+  leaseExpiresAt                 DateTime              @map("lease_expires_at")
+  releasedAt                     DateTime?             @map("released_at")
+  createdAt                      DateTime              @default(now()) @map("created_at")
+  updatedAt                      DateTime              @default(now()) @updatedAt @map("updated_at")
+
+  @@index([backend, deploymentGeneration, releasedAt, leaseExpiresAt], map: "analytics_backend_claim_leases_backend_gen_release_expiry_idx")
+  @@index([capability, capabilityActivationGeneration, releasedAt], map: "analytics_backend_claim_leases_capability_gen_release_idx")
+  @@index([runtimeLeaseId, releasedAt], map: "analytics_backend_claim_leases_runtime_release_idx")
+  @@map("analytics_backend_claim_leases")
+}
+
+model AnalyticsBackendDeploymentTransition {
+  id                             String                            @id @default(cuid())
+  kind                           AnalyticsDeploymentTransitionKind
+  fromBackend                    AnalyticsBackendType?             @map("from_backend")
+  toBackend                      AnalyticsBackendType              @map("to_backend")
+  fromGeneration                 BigInt?                           @map("from_generation")
+  toGeneration                   BigInt                            @map("to_generation")
+  targetWorkloadEpochFingerprint String                            @map("target_workload_epoch_fingerprint")
+  expectedInventoryDigest        String                            @map("expected_inventory_digest")
+  observedInventoryDigest        String                            @map("observed_inventory_digest")
+  drainEvidenceDigest            String                            @map("drain_evidence_digest")
+  denyProbeAttestationDigest     String                            @map("deny_probe_attestation_digest")
+  sourceEmptyEvidenceDigest      String?                           @map("source_empty_evidence_digest")
+  targetEmptyEvidenceDigest      String?                           @map("target_empty_evidence_digest")
+  completedAt                    DateTime                          @default(now()) @map("completed_at")
+  createdAt                      DateTime                          @default(now()) @map("created_at")
+
+  @@unique([toBackend, toGeneration], map: "analytics_backend_deployment_transitions_backend_generation_key")
+  @@index([kind, completedAt], map: "analytics_backend_deployment_transitions_kind_completed_idx")
+  @@map("analytics_backend_deployment_transitions")
+}
+
+model AnalyticsIngestionOperation {
+  id                             String                            @id @default(cuid())
+  acceptanceSequence             BigInt?                           @unique @default(autoincrement()) @map("acceptance_sequence")
+  projectId                      String                            @map("project_id")
+  project                        Project                           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceOperationId              String                            @map("source_operation_id")
+  sourceChecksum                 String                            @map("source_checksum")
+  rawObjectKey                   String                            @map("raw_object_key")
+  acceptedAt                     DateTime                          @default(now()) @map("accepted_at")
+  acceptedAtNanos                BigInt                            @map("accepted_at_nanos")
+  canonicalizerVersion           String                            @map("canonicalizer_version")
+  schemaVersion                  Int                               @map("schema_version")
+  analyticsBackend               AnalyticsBackendType?             @map("analytics_backend")
+  deploymentGeneration           BigInt?                           @map("deployment_generation")
+  workloadEpochFingerprint       String?                           @map("workload_epoch_fingerprint")
+  runtimeContractVersion         Int?                              @map("runtime_contract_version")
+  producerRuntimeLeaseId         String?                           @map("producer_runtime_lease_id")
+  producerRuntimeLease           AnalyticsRuntimeLease?            @relation("AnalyticsIngestionProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  capability                     AnalyticsCapability?
+  capabilityActivationGeneration BigInt?                           @map("capability_activation_generation")
+  capabilityContractVersion      Int?                              @map("capability_contract_version")
+  checkpointGeneration           BigInt                            @default(0) @map("checkpoint_generation")
+  canonicalizationFence          BigInt                            @default(0) @map("canonicalization_fence")
+  canonicalizationLeaseOwner     String?                           @map("canonicalization_lease_owner")
+  canonicalizationLeaseUntil     DateTime?                         @map("canonicalization_lease_until")
+  canonicalizationAttempts       Int                               @default(0) @map("canonicalization_attempts")
+  reservedCanonicalObjectKey     String?                           @map("reserved_canonical_object_key")
+  canonicalObjectKey             String?                           @map("canonical_object_key")
+  canonicalArtifactChecksum      String?                           @map("canonical_artifact_checksum")
+  manifestState                  AnalyticsManifestState            @default(PENDING) @map("manifest_state")
+  candidateManifest              Json?                             @map("candidate_manifest")
+  frozenManifest                 Json?                             @map("frozen_manifest")
+  status                         AnalyticsIngestionOperationStatus @default(ACCEPTED)
+  cancellationReasonCode         String?                           @map("cancellation_reason_code")
+  lastErrorCode                  String?                           @map("last_error_code")
+  recoverableUntil               DateTime                          @map("recoverable_until")
+  statusExpiresAt                DateTime                          @map("status_expires_at")
+  visibleAt                      DateTime?                         @map("visible_at")
+  terminalAt                     DateTime?                         @map("terminal_at")
+  createdAt                      DateTime                          @default(now()) @map("created_at")
+  updatedAt                      DateTime                          @default(now()) @updatedAt @map("updated_at")
+
+  outbox                AnalyticsIngestionOutbox?
+  outboxV2              AnalyticsIngestionOutboxV2?
+  candidates            AnalyticsIngestionCandidate[]
+  loadBatches           AnalyticsLoadBatch[]
+  entityHeads           AnalyticsEntityHead[]
+  evaluationDispatches  AnalyticsEvaluationDispatch[]
+  integrationDeliveries AnalyticsIntegrationPendingDelivery[]
 
   @@unique([id, projectId])
   @@unique([projectId, sourceOperationId])
@@ -1975,35 +2488,107 @@ model AnalyticsIngestionOperation {
   @@index([manifestState, status, updatedAt])
   @@index([manifestState, canonicalizationLeaseUntil])
   @@index([projectId, status, acceptedAt])
+  @@index([projectId, status, acceptanceSequence], map: "analytics_ingestion_operations_project_status_acceptance_idx")
   @@index([canonicalizerVersion, schemaVersion, recoverableUntil])
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_ingestion_operations_backend_generation_status_idx")
+  @@index([capability, capabilityActivationGeneration, status], map: "analytics_ingestion_operations_capability_gen_status_idx")
   @@index([terminalAt, id])
   @@map("analytics_ingestion_operations")
 }
 
+enum AnalyticsEvaluationDispatchTargetType {
+  TRACE_UPSERT
+  OBSERVATION_UPSERT
+  DATASET_RUN_ITEM_UPSERT
+  HISTORICAL
+}
+
+enum AnalyticsEvaluationDispatchStatus {
+  SUSPENDED
+  PENDING
+  PUBLISHED
+  PROCESSING
+  COMPLETED
+  NOT_ACTIVATED
+  QUARANTINED
+  CANCELLED
+}
+
+model AnalyticsEvaluationDispatch {
+  id                             String                                @id
+  operationId                    String                                @map("operation_id")
+  projectId                      String                                @map("project_id")
+  operation                      AnalyticsIngestionOperation           @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  sourceCandidateKey             String                                @map("source_candidate_key")
+  requestId                      String                                @map("request_id")
+  jobConfigurationId             String?                               @map("job_configuration_id")
+  targetType                     AnalyticsEvaluationDispatchTargetType @map("target_type")
+  targetId                       String                                @map("target_id")
+  traceId                        String                                @map("trace_id")
+  observationId                  String?                               @map("observation_id")
+  datasetItemId                  String?                               @map("dataset_item_id")
+  datasetItemValidFrom           DateTime?                             @map("dataset_item_valid_from")
+  targetTimestamp                DateTime                              @map("target_timestamp")
+  traceEnvironment               String?                               @map("trace_environment")
+  analyticsBackend               AnalyticsBackendType                  @map("analytics_backend")
+  deploymentGeneration           BigInt                                @map("deployment_generation")
+  workloadEpochFingerprint       String                                @map("workload_epoch_fingerprint")
+  runtimeContractVersion         Int                                   @map("runtime_contract_version")
+  captureRuntimeLeaseId          String                                @map("capture_runtime_lease_id")
+  captureRuntimeLease            AnalyticsRuntimeLease                 @relation("AnalyticsEvaluationCaptureRuntimeLease", fields: [captureRuntimeLeaseId], references: [id], onDelete: Restrict)
+  capabilityActivationGeneration BigInt                                @map("capability_activation_generation")
+  capabilityContractVersion      Int                                   @map("capability_contract_version")
+  status                         AnalyticsEvaluationDispatchStatus
+  dispatchGeneration             Int                                   @default(1) @map("dispatch_generation")
+  attempts                       Int                                   @default(0)
+  nextAttemptAt                  DateTime                              @default(now()) @map("next_attempt_at")
+  publishedAt                    DateTime?                             @map("published_at")
+  processingLeaseOwner           String?                               @map("processing_lease_owner")
+  processingLeaseExpiresAt       DateTime?                             @map("processing_lease_expires_at")
+  completedAt                    DateTime?                             @map("completed_at")
+  failureCode                    String?                               @map("failure_code")
+  createdAt                      DateTime                              @default(now()) @map("created_at")
+  updatedAt                      DateTime                              @default(now()) @updatedAt @map("updated_at")
+  jobExecutions                  JobExecution[]
+
+  @@unique([requestId, targetType, targetId], map: "analytics_evaluation_dispatches_request_target_key")
+  @@index([status, nextAttemptAt, createdAt], map: "analytics_evaluation_dispatches_pending_idx")
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_evaluation_dispatches_backend_generation_status_idx")
+  @@index([capabilityActivationGeneration, status], map: "analytics_eval_dispatch_activation_status_idx")
+  @@index([projectId, traceId, status], map: "analytics_evaluation_dispatches_project_trace_status_idx")
+  @@index([status, processingLeaseExpiresAt], map: "analytics_eval_dispatch_processing_lease_idx")
+  @@map("analytics_evaluation_dispatches")
+}
+
 model AnalyticsIngestionCandidate {
-  id                       String                        @id @default(cuid())
-  operationId              String                        @map("operation_id")
-  operation                AnalyticsIngestionOperation   @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
-  projectId                String                        @map("project_id")
-  candidateKey             String                        @map("candidate_key")
-  entityType               AnalyticsEntityType           @map("entity_type")
-  entityKey                String                        @map("entity_key")
-  owningTraceId            String?                       @map("owning_trace_id")
-  partitionDate            DateTime?                     @map("partition_date") @db.Date
-  sourceVersion            BigInt                        @map("source_version")
-  canonicalPayloadHash     String                        @map("canonical_payload_hash")
-  disposition             AnalyticsCandidateDisposition @default(PENDING)
-  loadBatchId              String?                       @map("load_batch_id")
-  reasonCode               String?                       @map("reason_code")
-  quarantineExpiresAt      DateTime?                     @map("quarantine_expires_at")
-  traceDeletionGeneration  BigInt                        @default(0) @map("trace_deletion_generation")
-  projectDeletionGeneration BigInt                       @default(0) @map("project_deletion_generation")
-  createdAt                DateTime                      @default(now()) @map("created_at")
-  updatedAt                DateTime                      @default(now()) @updatedAt @map("updated_at")
+  id                        String                        @id @default(cuid())
+  operationId               String                        @map("operation_id")
+  operation                 AnalyticsIngestionOperation   @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
+  projectId                 String                        @map("project_id")
+  candidateKey              String                        @map("candidate_key")
+  entityType                AnalyticsEntityType           @map("entity_type")
+  entityKey                 String                        @map("entity_key")
+  owningTraceId             String?                       @map("owning_trace_id")
+  owningDatasetId           String?                       @map("owning_dataset_id")
+  owningDatasetRunId        String?                       @map("owning_dataset_run_id")
+  partitionDate             DateTime?                     @map("partition_date") @db.Date
+  sourceVersion             BigInt                        @map("source_version")
+  canonicalPayloadHash      String                        @map("canonical_payload_hash")
+  disposition               AnalyticsCandidateDisposition @default(PENDING)
+  loadBatchId               String?                       @map("load_batch_id")
+  reasonCode                String?                       @map("reason_code")
+  quarantineExpiresAt       DateTime?                     @map("quarantine_expires_at")
+  traceDeletionGeneration   BigInt                        @default(0) @map("trace_deletion_generation")
+  projectDeletionGeneration BigInt                        @default(0) @map("project_deletion_generation")
+  datasetDeletionGeneration BigInt                        @default(0) @map("dataset_deletion_generation")
+  runDeletionGeneration     BigInt                        @default(0) @map("run_deletion_generation")
+  createdAt                 DateTime                      @default(now()) @map("created_at")
+  updatedAt                 DateTime                      @default(now()) @updatedAt @map("updated_at")
 
   @@unique([operationId, candidateKey])
   @@index([operationId, disposition])
   @@index([projectId, owningTraceId, disposition])
+  @@index([projectId, owningDatasetId, owningDatasetRunId, disposition], map: "analytics_ingestion_candidates_dataset_run_disposition_idx")
   @@index([loadBatchId])
   @@index([disposition, quarantineExpiresAt])
   @@map("analytics_ingestion_candidates")
@@ -2086,6 +2671,8 @@ model AnalyticsEntityHead {
   entityKey                 String                      @map("entity_key")
   lookupId                  String?                     @map("lookup_id")
   owningTraceId             String?                     @map("owning_trace_id")
+  owningDatasetId           String?                     @map("owning_dataset_id")
+  owningDatasetRunId        String?                     @map("owning_dataset_run_id")
   sourceVersion             BigInt                      @map("source_version")
   canonicalPayloadHash      String                      @map("canonical_payload_hash")
   partitionDate             DateTime                    @map("partition_date") @db.Date
@@ -2093,6 +2680,8 @@ model AnalyticsEntityHead {
   fenceGeneration           BigInt                      @map("fence_generation")
   traceDeletionGeneration   BigInt                      @default(0) @map("trace_deletion_generation")
   projectDeletionGeneration BigInt                      @default(0) @map("project_deletion_generation")
+  datasetDeletionGeneration BigInt                      @default(0) @map("dataset_deletion_generation")
+  runDeletionGeneration     BigInt                      @default(0) @map("run_deletion_generation")
   operationId               String                      @map("operation_id")
   operation                 AnalyticsIngestionOperation @relation(fields: [operationId, projectId], references: [id, projectId], onDelete: Cascade)
   project                   Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -2102,10 +2691,80 @@ model AnalyticsEntityHead {
   @@unique([projectId, entityType, entityKey])
   @@index([projectId, entityType, lookupId])
   @@index([projectId, owningTraceId, entityType])
+  @@index([projectId, owningDatasetId, owningDatasetRunId, entityType], map: "analytics_entity_heads_dataset_run_type_idx")
   @@index([projectId, entityType, partitionDate])
   @@index([entityType, partitionDate, id])
   @@index([operationId])
   @@map("analytics_entity_heads")
+}
+
+// These fences deliberately have no Dataset/DatasetRuns relation: they must
+// survive the control-row deletion and reject delayed analytics replay.
+model AnalyticsDatasetDeletionGeneration {
+  projectId  String   @map("project_id")
+  datasetId  String   @map("dataset_id")
+  generation BigInt
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([projectId, datasetId])
+  @@map("analytics_dataset_deletion_generations")
+}
+
+model AnalyticsDatasetRunDeletionGeneration {
+  projectId    String   @map("project_id")
+  datasetRunId String   @map("dataset_run_id")
+  datasetId    String   @map("dataset_id")
+  generation   BigInt
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([projectId, datasetRunId])
+  @@index([projectId, datasetId])
+  @@map("analytics_dataset_run_deletion_generations")
+}
+
+model AnalyticsDatasetDeletionOperation {
+  id                 String                          @id @default(cuid())
+  scope              AnalyticsDatasetDeletionScope
+  projectId          String                          @map("project_id")
+  datasetId          String                          @map("dataset_id")
+  datasetRunIds      String[]                        @default([]) @map("dataset_run_ids")
+  datasetGeneration  BigInt?                         @map("dataset_generation")
+  runGenerations     Json                            @default("{}") @map("run_generations")
+  status             AnalyticsDatasetDeletionStatus  @default(SCHEDULED)
+  phase              String                          @default("visibility_barrier")
+  workerFence        BigInt                          @default(0) @map("worker_fence")
+  leaseOwner         String?                         @map("lease_owner")
+  leaseExpiresAt     DateTime?                       @map("lease_expires_at")
+  attempts           Int                             @default(0)
+  lastErrorCode      String?                         @map("last_error_code")
+  logicallyInvisible Boolean                         @default(false) @map("logically_invisible")
+  completedAt        DateTime?                       @map("completed_at")
+  createdAt          DateTime                        @default(now()) @map("created_at")
+  updatedAt          DateTime                        @default(now()) @updatedAt @map("updated_at")
+  outbox             AnalyticsDatasetDeletionOutbox?
+
+  @@index([status, leaseExpiresAt, updatedAt], map: "analytics_dataset_deletion_operations_claim_idx")
+  @@index([projectId, datasetId, status])
+  @@map("analytics_dataset_deletion_operations")
+}
+
+model AnalyticsDatasetDeletionOutbox {
+  id            String                            @id @default(cuid())
+  operationId   String                            @unique @map("operation_id")
+  operation     AnalyticsDatasetDeletionOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  status        AnalyticsOutboxStatus             @default(PENDING)
+  attempts      Int                               @default(0)
+  nextAttemptAt DateTime                          @default(now()) @map("next_attempt_at")
+  lockedBy      String?                           @map("locked_by")
+  lockedUntil   DateTime?                         @map("locked_until")
+  publishedAt   DateTime?                         @map("published_at")
+  createdAt     DateTime                          @default(now()) @map("created_at")
+  updatedAt     DateTime                          @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt, lockedUntil], map: "analytics_dataset_deletion_outbox_dispatch_idx")
+  @@map("analytics_dataset_deletion_outbox")
 }
 
 model AnalyticsDeletionTombstone {
@@ -2138,31 +2797,39 @@ model AnalyticsProjectDeletionGeneration {
 
 // Deliberately no Project relation: organization-authorized status survives Project deletion.
 model AnalyticsDeletionOperation {
-  id                     String                  @id @default(cuid())
-  scope                  AnalyticsDeletionScope
-  organizationId         String                  @map("organization_id")
-  projectId              String                  @map("project_id")
-  traceId                String?                 @map("trace_id")
-  generation             BigInt
-  checkpointGeneration   BigInt                  @default(0) @map("checkpoint_generation")
-  workerFence            BigInt                  @default(0) @map("worker_fence")
-  leaseOwner             String?                 @map("lease_owner")
-  leaseExpiresAt         DateTime?               @map("lease_expires_at")
-  requesterPrincipalType String                  @map("requester_principal_type")
-  requesterPrincipalId   String                  @map("requester_principal_id")
-  status                 AnalyticsDeletionStatus @default(RETRYING)
-  phase                  String                  @default("visibility_barrier")
-  logicallyInvisible     Boolean                 @default(false) @map("logically_invisible")
-  cancellationReasonCode String?                 @map("cancellation_reason_code")
-  statusExpiresAt        DateTime                @map("status_expires_at")
-  completedAt            DateTime?               @map("completed_at")
-  createdAt              DateTime                @default(now()) @map("created_at")
-  updatedAt              DateTime                @default(now()) @updatedAt @map("updated_at")
+  id                       String                  @id @default(cuid())
+  scope                    AnalyticsDeletionScope
+  organizationId           String                  @map("organization_id")
+  projectId                String                  @map("project_id")
+  traceId                  String?                 @map("trace_id")
+  generation               BigInt
+  checkpointGeneration     BigInt                  @default(0) @map("checkpoint_generation")
+  analyticsBackend         AnalyticsBackendType?   @map("analytics_backend")
+  deploymentGeneration     BigInt?                 @map("deployment_generation")
+  workloadEpochFingerprint String?                 @map("workload_epoch_fingerprint")
+  runtimeContractVersion   Int?                    @map("runtime_contract_version")
+  producerRuntimeLeaseId   String?                 @map("producer_runtime_lease_id")
+  producerRuntimeLease     AnalyticsRuntimeLease?  @relation("AnalyticsDeletionProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  workerFence              BigInt                  @default(0) @map("worker_fence")
+  leaseOwner               String?                 @map("lease_owner")
+  leaseExpiresAt           DateTime?               @map("lease_expires_at")
+  requesterPrincipalType   String                  @map("requester_principal_type")
+  requesterPrincipalId     String                  @map("requester_principal_id")
+  ingestionBarrierSequence BigInt?                 @map("ingestion_barrier_sequence")
+  status                   AnalyticsDeletionStatus @default(RETRYING)
+  phase                    String                  @default("visibility_barrier")
+  logicallyInvisible       Boolean                 @default(false) @map("logically_invisible")
+  cancellationReasonCode   String?                 @map("cancellation_reason_code")
+  statusExpiresAt          DateTime                @map("status_expires_at")
+  completedAt              DateTime?               @map("completed_at")
+  createdAt                DateTime                @default(now()) @map("created_at")
+  updatedAt                DateTime                @default(now()) @updatedAt @map("updated_at")
 
   @@index([projectId, scope, generation])
   @@index([organizationId, id])
   @@index([organizationId, projectId, status])
   @@index([status, updatedAt])
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_deletion_operations_backend_generation_status_idx")
   @@map("analytics_deletion_operations")
 }
 
@@ -2186,31 +2853,38 @@ model TraceControlState {
 }
 
 model AnalyticsCheckpointGeneration {
-  generation                       BigInt                    @id
-  status                           AnalyticsCheckpointStatus @default(PREPARING)
-  leaseOwner                       String                    @map("lease_owner")
-  leaseExpiresAt                   DateTime                  @map("lease_expires_at")
-  operationHighWatermarkAcceptedAt DateTime                  @map("operation_high_watermark_accepted_at")
-  operationHighWatermarkAcceptedAtNanos BigInt               @map("operation_high_watermark_accepted_at_nanos")
-  loadHighWatermarkCreatedAt       DateTime                  @map("load_high_watermark_created_at")
-  deletionHighWatermarkCreatedAt   DateTime                  @map("deletion_high_watermark_created_at")
-  postgresSnapshotId               String?                   @map("postgres_snapshot_id")
-  postgresWalLsn                   String?                   @map("postgres_wal_lsn")
-  dorisSnapshotId                  String?                   @map("doris_snapshot_id")
-  artifactDigests                  Json?                     @map("artifact_digests")
-  manifest                         Json?
-  keyId                            String?                   @map("key_id")
-  predecessorHash                  String?                   @map("predecessor_hash")
-  manifestHash                     String?                   @map("manifest_hash")
-  signature                        String?
-  externalAnchorRef                String?                   @map("external_anchor_ref")
-  sealedAt                         DateTime?                 @map("sealed_at")
-  abortedAt                        DateTime?                 @map("aborted_at")
-  abortReasonCode                  String?                   @map("abort_reason_code")
-  createdAt                        DateTime                  @default(now()) @map("created_at")
-  updatedAt                        DateTime                  @default(now()) @updatedAt @map("updated_at")
+  generation                            BigInt                    @id
+  status                                AnalyticsCheckpointStatus @default(PREPARING)
+  leaseOwner                            String                    @map("lease_owner")
+  leaseExpiresAt                        DateTime                  @map("lease_expires_at")
+  operationHighWatermarkAcceptedAt      DateTime                  @map("operation_high_watermark_accepted_at")
+  operationHighWatermarkAcceptedAtNanos BigInt                    @map("operation_high_watermark_accepted_at_nanos")
+  loadHighWatermarkCreatedAt            DateTime                  @map("load_high_watermark_created_at")
+  deletionHighWatermarkCreatedAt        DateTime                  @map("deletion_high_watermark_created_at")
+  analyticsBackend                      AnalyticsBackendType?     @map("analytics_backend")
+  deploymentGeneration                  BigInt?                   @map("deployment_generation")
+  workloadEpochFingerprint              String?                   @map("workload_epoch_fingerprint")
+  runtimeContractVersion                Int?                      @map("runtime_contract_version")
+  producerRuntimeLeaseId                String?                   @map("producer_runtime_lease_id")
+  producerRuntimeLease                  AnalyticsRuntimeLease?    @relation("AnalyticsCheckpointProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  postgresSnapshotId                    String?                   @map("postgres_snapshot_id")
+  postgresWalLsn                        String?                   @map("postgres_wal_lsn")
+  dorisSnapshotId                       String?                   @map("doris_snapshot_id")
+  artifactDigests                       Json?                     @map("artifact_digests")
+  manifest                              Json?
+  keyId                                 String?                   @map("key_id")
+  predecessorHash                       String?                   @map("predecessor_hash")
+  manifestHash                          String?                   @map("manifest_hash")
+  signature                             String?
+  externalAnchorRef                     String?                   @map("external_anchor_ref")
+  sealedAt                              DateTime?                 @map("sealed_at")
+  abortedAt                             DateTime?                 @map("aborted_at")
+  abortReasonCode                       String?                   @map("abort_reason_code")
+  createdAt                             DateTime                  @default(now()) @map("created_at")
+  updatedAt                             DateTime                  @default(now()) @updatedAt @map("updated_at")
 
   @@index([status, leaseExpiresAt])
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_checkpoint_generations_backend_generation_status_idx")
   @@map("analytics_checkpoint_generations")
 }
 
@@ -2236,30 +2910,37 @@ model AnalyticsBackgroundMigrationRetirement {
 }
 
 model AnalyticsRetentionRun {
-  id            String   @id @default(cuid())
-  cutoffDate    DateTime @map("cutoff_date") @db.Date
-  phase         String   @default("DRAIN")
-  status        String   @default("RUNNING")
-  lastErrorCode String?  @map("last_error_code")
-  startedAt     DateTime @default(now()) @map("started_at")
-  completedAt   DateTime? @map("completed_at")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+  id                       String                 @id @default(cuid())
+  cutoffDate               DateTime               @map("cutoff_date") @db.Date
+  phase                    String                 @default("DRAIN")
+  status                   String                 @default("RUNNING")
+  lastErrorCode            String?                @map("last_error_code")
+  analyticsBackend         AnalyticsBackendType?  @map("analytics_backend")
+  deploymentGeneration     BigInt?                @map("deployment_generation")
+  workloadEpochFingerprint String?                @map("workload_epoch_fingerprint")
+  runtimeContractVersion   Int?                   @map("runtime_contract_version")
+  producerRuntimeLeaseId   String?                @map("producer_runtime_lease_id")
+  producerRuntimeLease     AnalyticsRuntimeLease? @relation("AnalyticsRetentionProducerRuntimeLease", fields: [producerRuntimeLeaseId], references: [id], onDelete: Restrict)
+  startedAt                DateTime               @default(now()) @map("started_at")
+  completedAt              DateTime?              @map("completed_at")
+  createdAt                DateTime               @default(now()) @map("created_at")
+  updatedAt                DateTime               @default(now()) @updatedAt @map("updated_at")
 
   activeState AnalyticsRetentionState? @relation("ActiveAnalyticsRetentionRun")
 
   @@index([status, updatedAt])
+  @@index([analyticsBackend, deploymentGeneration, status], map: "analytics_retention_runs_backend_generation_status_idx")
   @@map("analytics_retention_runs")
 }
 
 model AnalyticsRetentionState {
-  id             String   @id
-  purgedBefore   DateTime? @map("purged_before") @db.Date
-  activeCutoff   DateTime? @map("active_cutoff") @db.Date
-  activeRunId    String?  @unique @map("active_run_id")
-  activeRun      AnalyticsRetentionRun? @relation("ActiveAnalyticsRetentionRun", fields: [activeRunId], references: [id], onDelete: SetNull)
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  id           String                 @id
+  purgedBefore DateTime?              @map("purged_before") @db.Date
+  activeCutoff DateTime?              @map("active_cutoff") @db.Date
+  activeRunId  String?                @unique @map("active_run_id")
+  activeRun    AnalyticsRetentionRun? @relation("ActiveAnalyticsRetentionRun", fields: [activeRunId], references: [id], onDelete: SetNull)
+  createdAt    DateTime               @default(now()) @map("created_at")
+  updatedAt    DateTime               @default(now()) @updatedAt @map("updated_at")
 
   @@map("analytics_retention_state")
 }

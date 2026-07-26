@@ -60,7 +60,19 @@ export function assertAnalyticsBatchBoundary(
         child.entity.sourceContract !== "file-reference") ||
       child.fenceGeneration <= 0n ||
       child.traceDeletionGeneration < 0n ||
-      child.projectDeletionGeneration < 0n
+      child.projectDeletionGeneration < 0n ||
+      (child.datasetDeletionGeneration ?? 0n) < 0n ||
+      (child.runDeletionGeneration ?? 0n) < 0n ||
+      (child.owningDatasetRunId !== null &&
+        child.owningDatasetRunId !== undefined &&
+        !child.owningDatasetRunId) ||
+      (child.owningDatasetId !== null &&
+        child.owningDatasetId !== undefined &&
+        !child.owningDatasetId) ||
+      ((child.owningDatasetId ?? null) === null &&
+        (child.datasetDeletionGeneration ?? 0n) !== 0n) ||
+      ((child.owningDatasetRunId ?? null) === null &&
+        (child.runDeletionGeneration ?? 0n) !== 0n)
     ) {
       invalidBoundary();
     }
@@ -81,6 +93,17 @@ export function assertAnalyticsBatchBoundary(
         child.entity.kind === "score" &&
         partitionDateFromVersionToken(child.entity.timestamp) !==
           child.entity.partitionDate
+      ) {
+        invalidBoundary();
+      }
+      if (
+        child.entity.kind === "datasetRunItem" &&
+        (child.entity.sourceContract !== "dataset-run-item" ||
+          child.owningDatasetId !== child.entity.datasetId ||
+          child.owningDatasetRunId !== child.entity.datasetRunId ||
+          child.datasetDeletionGeneration !==
+            child.entity.datasetDeletionGeneration ||
+          child.runDeletionGeneration !== child.entity.runDeletionGeneration)
       ) {
         invalidBoundary();
       }

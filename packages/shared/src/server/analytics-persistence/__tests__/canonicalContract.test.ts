@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canonicalEntityPayloadHash,
   canonicalPayloadHash,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
@@ -146,5 +147,22 @@ describe("canonicalPayloadHash", () => {
         },
       }),
     ).not.toBe(canonicalPayloadHash(payload));
+  });
+
+  it("keeps entity identity stable across ingestion-local receipt fields", () => {
+    const first = {
+      ...payload,
+      rawObjectKey: "raw/project-1/operation-1",
+      systemTimestamp: 1_784_282_600_000_000_000n,
+    };
+    const replay = {
+      ...first,
+      rawObjectKey: "raw/project-1/operation-replay",
+      systemTimestamp: 1_784_282_700_000_000_000n,
+    };
+
+    expect(canonicalEntityPayloadHash(replay)).toBe(
+      canonicalEntityPayloadHash(first),
+    );
   });
 });

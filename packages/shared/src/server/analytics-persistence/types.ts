@@ -8,6 +8,7 @@ export type AnalyticsSourceContract =
   | "v4"
   | "otlp"
   | "score"
+  | "dataset-run-item"
   | "file-reference";
 
 interface CanonicalEntityBase {
@@ -68,6 +69,18 @@ export interface CanonicalAnalyticsEvent extends CanonicalEntityBase {
   readonly serviceName: string | null;
   readonly telemetrySdkLanguage: string | null;
   readonly eventBytes: number;
+  readonly experimentId?: string | null;
+  readonly experimentName?: string | null;
+  readonly experimentMetadata?: Readonly<Record<string, CanonicalJsonValue>>;
+  readonly experimentDescription?: string | null;
+  readonly experimentDatasetId?: string | null;
+  readonly experimentItemId?: string | null;
+  readonly experimentItemVersion?: bigint | null;
+  readonly experimentItemExpectedOutput?: string | null;
+  readonly experimentItemMetadata?: Readonly<
+    Record<string, CanonicalJsonValue>
+  >;
+  readonly experimentItemRootSpanId?: string | null;
 }
 
 export interface CanonicalAnalyticsScore extends CanonicalEntityBase {
@@ -95,6 +108,8 @@ export interface CanonicalAnalyticsScore extends CanonicalEntityBase {
   readonly queueId: string | null;
   readonly environment: string;
   readonly metadata: Readonly<Record<string, CanonicalJsonValue>>;
+  readonly datasetRunId?: string | null;
+  readonly executionTraceId?: string | null;
 }
 
 export interface CanonicalAnalyticsFileReference extends CanonicalEntityBase {
@@ -108,9 +123,33 @@ export interface CanonicalAnalyticsFileReference extends CanonicalEntityBase {
   readonly bucketPath: string | null;
 }
 
+export interface CanonicalAnalyticsDatasetRunItem extends CanonicalEntityBase {
+  readonly kind: "datasetRunItem";
+  readonly runItemId: string;
+  readonly datasetRunId: string;
+  readonly datasetItemId: string;
+  readonly datasetId: string;
+  readonly traceId: string;
+  readonly observationId: string | null;
+  readonly error: string | null;
+  readonly createdAt: bigint;
+  readonly updatedAt: bigint;
+  readonly datasetRunName: string;
+  readonly datasetRunDescription: string | null;
+  readonly datasetRunMetadata: Readonly<Record<string, CanonicalJsonValue>>;
+  readonly datasetRunCreatedAt: bigint;
+  readonly datasetItemVersion: bigint | null;
+  readonly datasetItemInput: CanonicalJsonValue;
+  readonly datasetItemExpectedOutput: CanonicalJsonValue;
+  readonly datasetItemMetadata: Readonly<Record<string, CanonicalJsonValue>>;
+  readonly datasetDeletionGeneration: bigint;
+  readonly runDeletionGeneration: bigint;
+}
+
 export type CanonicalAnalyticsEntity =
   | CanonicalAnalyticsEvent
   | CanonicalAnalyticsScore
+  | CanonicalAnalyticsDatasetRunItem
   | CanonicalAnalyticsFileReference;
 
 export interface CanonicalAnalyticsEntityClaim {
@@ -119,6 +158,10 @@ export interface CanonicalAnalyticsEntityClaim {
   readonly fenceGeneration: bigint;
   readonly traceDeletionGeneration: bigint;
   readonly projectDeletionGeneration: bigint;
+  readonly owningDatasetId?: string | null;
+  readonly owningDatasetRunId?: string | null;
+  readonly datasetDeletionGeneration?: bigint;
+  readonly runDeletionGeneration?: bigint;
 }
 
 export interface CanonicalAnalyticsBatch {
