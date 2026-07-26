@@ -22,7 +22,7 @@ import {
   isPresent,
   TracingSearchType,
   timeFilter,
-  isClickhouseFilterColumn,
+  isAnalyticsMetricFilterColumn,
   optionalPaginationZod,
   LangfuseConflictError,
   LangfuseNotFoundError,
@@ -46,17 +46,19 @@ import {
 import {
   logger,
   addToDeleteDatasetQueue,
-  getDatasetRunItemsByDatasetIdCh,
-  getDatasetRunItemsCountByDatasetIdCh,
-  getDatasetRunsTableMetricsCh,
+  analyticsDatasetDeletionQueueReference,
+  createAnalyticsDatasetDeletionIntent,
+  getDatasetRunItemsByDatasetId,
+  getDatasetRunItemsCountByDatasetId,
+  getDatasetRunsTableMetrics,
   getScoresForExperiments,
   getTraceScoresForDatasetRuns,
-  getDatasetRunItemsCountCh,
+  getDatasetRunItemsCount,
   getNumericScoresGroupedByName,
   getBooleanScoresGroupedByName,
   getCategoricalScoresGroupedByName,
-  getDatasetRunsTableRowsCh,
-  getDatasetRunsTableCountCh,
+  getDatasetRunsTableRows,
+  getDatasetRunsTableCount,
   validateWebhookURL,
   getDatasetRunItemsWithoutIOByItemIds,
   getDatasetItemsWithRunDataCount,
@@ -171,18 +173,18 @@ const buildPathPrefixFilter = (pathPrefix?: string): Prisma.Sql => {
 };
 
 /**
- * Determines whether the given filters require Dataset Run Items (DRI) metrics from ClickHouse.
+ * Determines whether filters require metrics from the selected analytics backend.
  *
  * @param filters - Array of filter conditions to evaluate
  * @returns true if any filter requires DRI metrics, false if using basic dataset run data is sufficient
  */
-export const requiresClickhouseLookups = (filters: FilterState): boolean => {
+export const requiresAnalyticsLookups = (filters: FilterState): boolean => {
   if (filters.length === 0) {
     return false;
   }
 
   return filters.some((filter) => {
-    return isClickhouseFilterColumn(filter.column);
+    return isAnalyticsMetricFilterColumn(filter.column);
   });
 };
 
@@ -524,7 +526,7 @@ export const datasetRouter = createTRPCRouter({
         scope: "datasets:read",
       });
 
-      const count = await getDatasetRunItemsCountCh({
+      const count = await getDatasetRunItemsCount({
         projectId: input.projectId,
         filter: input.filter ?? [],
       });
@@ -633,7 +635,7 @@ export const datasetRouter = createTRPCRouter({
       });
 
       // Use helper function to determine if we need DRI metrics
-      if (!requiresClickhouseLookups(input.filter ?? [])) {
+      if (!requiresAnalyticsLookups(input.filter ?? [])) {
         const [runs, totalRuns] = await Promise.all([
           await ctx.prisma.datasetRuns.findMany({
             where: {
@@ -664,7 +666,7 @@ export const datasetRouter = createTRPCRouter({
         };
       }
       const [runs, totalRuns] = await Promise.all([
-        getDatasetRunsTableRowsCh({
+        getDatasetRunsTableRows({
           projectId: input.projectId,
           datasetId: input.datasetId,
           filter: input.filter ?? [],
@@ -674,7 +676,7 @@ export const datasetRouter = createTRPCRouter({
               ? input.page * input.limit
               : undefined,
         }),
-        getDatasetRunsTableCountCh({
+        getDatasetRunsTableCount({
           projectId: input.projectId,
           datasetId: input.datasetId,
           filter: input.filter ?? [],
@@ -697,7 +699,7 @@ export const datasetRouter = createTRPCRouter({
       });
 
       // Get runs that have metrics (only runs with dataset_run_items_rmt)
-      const runsWithMetrics = await getDatasetRunsTableMetricsCh({
+      const runsWithMetrics = await getDatasetRunsTableMetrics({
         projectId: input.projectId,
         datasetId: input.datasetId,
         runIds: input.runIds ?? [],
@@ -1313,19 +1315,31 @@ export const datasetRouter = createTRPCRouter({
       });
 
       try {
-        const deletedDataset = await ctx.prisma.dataset.delete({
-          where: {
-            id_projectId: {
-              id: input.datasetId,
+        const { deletedDataset, deletionIntent } =
+          await ctx.prisma.$transaction(async (transaction) => {
+            const deletionIntent = await createAnalyticsDatasetDeletionIntent({
+              transaction,
+              scope: "DATASET",
               projectId: input.projectId,
-            },
-          },
-        });
+              datasetId: input.datasetId,
+            });
+            const deletedDataset = await transaction.dataset.delete({
+              where: {
+                id_projectId: {
+                  id: input.datasetId,
+                  projectId: input.projectId,
+                },
+              },
+            });
+            return { deletedDataset, deletionIntent };
+          });
 
         await addToDeleteDatasetQueue({
           deletionType: "dataset",
           projectId: input.projectId,
           datasetId: deletedDataset.id,
+          analyticsDeletion:
+            analyticsDatasetDeletionQueueReference(deletionIntent),
         });
 
         await auditLog({
@@ -1387,7 +1401,7 @@ export const datasetRouter = createTRPCRouter({
         });
       }
 
-      const deletedDatasets = await ctx.prisma.$transaction(async (tx) => {
+      const deletion = await ctx.prisma.$transaction(async (tx) => {
         const datasetsToDelete = await findDatasetsForDeletion({
           client: tx,
           projectId: input.projectId,
@@ -1395,7 +1409,20 @@ export const datasetRouter = createTRPCRouter({
           folderPaths: input.folderPaths,
         });
 
-        if (datasetsToDelete.length === 0) return [];
+        if (datasetsToDelete.length === 0) {
+          return { datasets: [], intents: [] };
+        }
+        const intents = [];
+        for (const dataset of datasetsToDelete) {
+          intents.push(
+            await createAnalyticsDatasetDeletionIntent({
+              transaction: tx,
+              scope: "DATASET",
+              projectId: input.projectId,
+              datasetId: dataset.id,
+            }),
+          );
+        }
 
         await deleteDatasetsByIds({
           client: tx,
@@ -1403,21 +1430,24 @@ export const datasetRouter = createTRPCRouter({
           datasetIds: datasetsToDelete.map((dataset) => dataset.id),
         });
 
-        return datasetsToDelete;
+        return { datasets: datasetsToDelete, intents };
       });
 
       await Promise.all(
-        deletedDatasets.map((dataset) =>
+        deletion.datasets.map((dataset, index) =>
           addToDeleteDatasetQueue({
             deletionType: "dataset",
             projectId: input.projectId,
             datasetId: dataset.id,
+            analyticsDeletion: analyticsDatasetDeletionQueueReference(
+              deletion.intents[index]!,
+            ),
           }),
         ),
       );
 
       await Promise.all(
-        deletedDatasets.map((dataset) =>
+        deletion.datasets.map((dataset) =>
           auditLog({
             session: ctx.session,
             resourceType: "dataset",
@@ -1428,9 +1458,7 @@ export const datasetRouter = createTRPCRouter({
         ),
       );
 
-      return {
-        deletedCount: deletedDatasets.length,
-      };
+      return { deletedCount: deletion.datasets.length };
     }),
 
   deleteDatasetItem: protectedProjectProcedure
@@ -1780,7 +1808,7 @@ export const datasetRouter = createTRPCRouter({
       }
 
       const [runItems, totalRunItems] = await Promise.all([
-        getDatasetRunItemsByDatasetIdCh({
+        getDatasetRunItemsByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter,
@@ -1797,7 +1825,7 @@ export const datasetRouter = createTRPCRouter({
               ? input.page * input.limit
               : undefined,
         }),
-        getDatasetRunItemsCountByDatasetIdCh({
+        getDatasetRunItemsCountByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter,
@@ -1876,7 +1904,7 @@ export const datasetRouter = createTRPCRouter({
       ] as FilterState;
 
       const [runItems, totalRunItems] = await Promise.all([
-        getDatasetRunItemsByDatasetIdCh({
+        getDatasetRunItemsByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter: combinedFilter,
@@ -1896,7 +1924,7 @@ export const datasetRouter = createTRPCRouter({
               ? input.page * input.limit
               : undefined,
         }),
-        getDatasetRunItemsCountByDatasetIdCh({
+        getDatasetRunItemsCountByDatasetId({
           projectId: input.projectId,
           datasetId: datasetId,
           filter: combinedFilter,
@@ -2013,7 +2041,7 @@ export const datasetRouter = createTRPCRouter({
 
       const { filterByRun, datasetId, projectId, runIds } = input;
 
-      // Rely on clickhouse to return only dataset item count that match the filters
+      // The selected analytics backend applies the run-item filters before counting.
       const datasetItemCount = await getDatasetItemsWithRunDataCount({
         projectId,
         datasetId,
@@ -2080,23 +2108,37 @@ export const datasetRouter = createTRPCRouter({
           projectId: input.projectId,
         },
       });
+      const datasetId = input.datasetId ?? datasetRuns[0]?.datasetId;
+      if (!datasetId || datasetRuns.length === 0) {
+        throw new LangfuseNotFoundError("No dataset runs found to delete");
+      }
 
-      // Delete all dataset runs
-      await ctx.prisma.datasetRuns.deleteMany({
-        where: {
-          id: { in: input.datasetRunIds },
-          projectId: input.projectId,
+      const deletionIntent = await ctx.prisma.$transaction(
+        async (transaction) => {
+          const intent = await createAnalyticsDatasetDeletionIntent({
+            transaction,
+            scope: "DATASET_RUNS",
+            projectId: input.projectId,
+            datasetId,
+            datasetRunIds: datasetRuns.map(({ id }) => id),
+          });
+          await transaction.datasetRuns.deleteMany({
+            where: {
+              id: { in: datasetRuns.map(({ id }) => id) },
+              projectId: input.projectId,
+            },
+          });
+          return intent;
         },
-      });
+      );
 
-      // Trigger async delete of dataset run items
       await addToDeleteDatasetQueue({
         deletionType: "dataset-runs",
         projectId: input.projectId,
-        // temporary: while dataset id is optional, we can pull it from the first run
-        // users can only use this on pages in UI that are pre-filtered by dataset id
-        datasetId: input.datasetId ?? datasetRuns[0].datasetId,
-        datasetRunIds: input.datasetRunIds,
+        datasetId,
+        datasetRunIds: datasetRuns.map(({ id }) => id),
+        analyticsDeletion:
+          analyticsDatasetDeletionQueueReference(deletionIntent),
       });
 
       // Log audit entries for each deleted run

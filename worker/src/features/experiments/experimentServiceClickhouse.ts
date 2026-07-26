@@ -13,21 +13,22 @@ import {
   createDatasetItemFilterState,
   DatasetRunItemUpsertQueue,
   eventTypes,
-  ExperimentCreateEventSchema,
   generateLLMText,
   getDatasetItems,
+  getExistingDatasetRunItemDatasetItemIds,
   IngestionEventType,
+  isManagedExperimentExecutionJob,
   LangfuseInternalTraceEnvironment,
   logger,
   mapLegacyLLMCompletionParams,
   processEventBatch,
-  queryClickhouse,
   QueueJobs,
   redis,
   TraceSinkParams,
+  type AnalyticsRuntimeAdmissionContext,
+  type ExperimentCreateEventType,
 } from "@langfuse/shared/src/server";
-import { v4 } from "uuid";
-import z from "zod";
+import { v4, v5 } from "uuid";
 import {
   parseDatasetItemInput,
   replaceVariablesInPrompt,
@@ -42,41 +43,19 @@ import { randomUUID } from "crypto";
 import { createW3CTraceId } from "../utils";
 import { scheduleExperimentObservationEvals } from "./scheduleExperimentEvals";
 import { createInternalEventsWriter } from "../internal-tracing/createInternalEventsWriter";
-
-async function getExistingRunItemDatasetItemIds(
-  projectId: string,
-  runId: string,
-  datasetId: string,
-): Promise<Set<string>> {
-  const query = `
-  SELECT dataset_item_id as id
-  FROM dataset_run_items_rmt
-  WHERE project_id = {projectId: String}
-  AND dataset_id = {datasetId: String}
-  AND dataset_run_id = {runId: String}
-`;
-
-  const rows = await queryClickhouse<{ id: string }>({
-    query,
-    params: {
-      projectId,
-      runId,
-      datasetId,
-    },
-    tags: { projectId },
-  });
-
-  return new Set(rows.map((row) => row.id));
-}
+import { getWorkerAnalyticsAdmissionContext } from "../../analyticsRuntime";
 
 async function processItem(
   projectId: string,
   datasetItem: DatasetItemDomain & { input: Prisma.JsonObject },
   config: PromptExperimentConfig,
+  execution: ExperimentExecutionOptions,
 ): Promise<{ success: boolean }> {
   // Use unified trace ID to avoid creating duplicate traces between PostgreSQL and ClickHouse
   const newTraceId = createW3CTraceId(`${config.runId}-${datasetItem.id}`);
-  const runItemId = v4();
+  const runItemId = execution.managedDoris
+    ? v5(`${config.runId}:${datasetItem.id}`, v5.URL)
+    : v4();
   const timestamp = new Date().toISOString();
 
   const event = {
@@ -106,6 +85,8 @@ async function processItem(
 
   const ingestionResult = await processEventBatch([event], auth, {
     isLangfuseInternal: true,
+    analyticsAdmissionContext: execution.analyticsAdmissionContext,
+    enableDorisDatasetRunIngestion: execution.managedDoris,
     attribution: createUnknownSdkIngestionAttribution({ authCheck: auth }),
   });
 
@@ -115,6 +96,11 @@ async function processItem(
       `Failed to create run item for dataset item ${datasetItem.id}`,
       error,
     );
+    if (execution.managedDoris) {
+      throw new Error(
+        `Doris dataset-run ingestion rejected item ${datasetItem.id}`,
+      );
+    }
   }
 
   /********************
@@ -126,6 +112,7 @@ async function processItem(
     newTraceId,
     datasetItem,
     config,
+    execution.analyticsAdmissionContext,
   );
 
   if (!llmResult.success) return { success: false };
@@ -134,7 +121,7 @@ async function processItem(
    * ASYNC RUN ITEM EVAL *
    ********************/
 
-  if (redis) {
+  if (!execution.managedDoris && redis) {
     const queue = DatasetRunItemUpsertQueue.getInstance();
     if (queue) {
       await queue.add(QueueJobs.DatasetRunItemUpsert, {
@@ -159,6 +146,7 @@ async function processLLMCall(
   traceId: string,
   datasetItem: DatasetItemDomain & { input: Prisma.JsonObject },
   config: PromptExperimentConfig,
+  analyticsAdmissionContext: AnalyticsRuntimeAdmissionContext | null,
 ): Promise<{ success: boolean }> {
   let messages: ChatMessage[] = [];
   // Extract and replace variables in prompt
@@ -190,6 +178,7 @@ async function processLLMCall(
     },
     prompt: config.prompt,
     eventsWriter: createInternalEventsWriter({
+      analyticsAdmissionContext,
       experimentContext: {
         id: config.runId,
         name: config.datasetRun.name,
@@ -277,11 +266,11 @@ async function getItemsToProcess(
   }
 
   // Batch deduplication - get existing run items' dataset item ids
-  const existingDatasetItemIds = await getExistingRunItemDatasetItemIds(
+  const existingDatasetItemIds = await getExistingDatasetRunItemDatasetItemIds({
     projectId,
-    runId,
+    datasetRunId: runId,
     datasetId,
-  );
+  });
 
   // Filter out existing items
   const itemsToProcess = validatedDatasetItems.filter(
@@ -295,16 +284,36 @@ async function getItemsToProcess(
   return itemsToProcess;
 }
 
-export const createExperimentJobClickhouse = async ({
+type ExperimentExecutionOptions = {
+  readonly managedDoris: boolean;
+  readonly analyticsAdmissionContext: AnalyticsRuntimeAdmissionContext | null;
+  readonly onItemProcessed?: () => Promise<void>;
+};
+
+export const createExperimentJob = async ({
   event,
+  onItemProcessed,
 }: {
-  event: z.infer<typeof ExperimentCreateEventSchema>;
+  event: ExperimentCreateEventType;
+  onItemProcessed?: () => Promise<void>;
 }) => {
+  const managedDoris = isManagedExperimentExecutionJob(event);
+  const analyticsAdmissionContext = managedDoris
+    ? getWorkerAnalyticsAdmissionContext()
+    : null;
+  if (managedDoris && !analyticsAdmissionContext) {
+    throw new Error("Doris experiment worker runtime is not admitted");
+  }
+  const execution: ExperimentExecutionOptions = {
+    managedDoris,
+    analyticsAdmissionContext,
+    onItemProcessed,
+  };
   const startTime = Date.now();
-  logger.info(
-    "Processing experiment create job with ClickHouse batching",
-    event,
-  );
+  logger.info("Processing experiment create job", {
+    ...event,
+    analyticsBackend: managedDoris ? "doris" : "clickhouse",
+  });
 
   const { datasetId, projectId, runId } = event;
 
@@ -325,6 +334,7 @@ export const createExperimentJobClickhouse = async ({
       datasetId,
       runId,
       errorMessage,
+      execution,
     );
     return { success: true };
   }
@@ -358,9 +368,12 @@ export const createExperimentJobClickhouse = async ({
     );
 
     try {
-      await processItem(projectId, item, experimentConfig);
+      await processItem(projectId, item, experimentConfig, execution);
     } catch (error) {
       logger.error(`Item ${i + 1} failed completely`, error);
+      if (managedDoris) throw error;
+    } finally {
+      await execution.onItemProcessed?.();
     }
   }
 
@@ -372,6 +385,8 @@ export const createExperimentJobClickhouse = async ({
   return { success: true };
 };
 
+export const createExperimentJobClickhouse = createExperimentJob;
+
 // In error cases (config errors), we always create traces in ClickHouse execution path since PostgreSQL execution
 // simply updates dataset run metadata and has never created error-level traces. This is new behavior we have introduced.
 // We accept this inconsistency in writes until the DRI migration had been completed.
@@ -380,6 +395,7 @@ async function createAllDatasetRunItemsWithConfigError(
   datasetId: string,
   runId: string,
   errorMessage: string,
+  execution: ExperimentExecutionOptions,
 ) {
   // Fetch all dataset items
   const datasetItems = await getDatasetItems({
@@ -392,11 +408,12 @@ async function createAllDatasetRunItemsWithConfigError(
   });
 
   // Check for existing run items' dataset item ids to avoid duplicates
-  const existingRunItemDatasetItemIds = await getExistingRunItemDatasetItemIds(
-    projectId,
-    runId,
-    datasetId,
-  );
+  const existingRunItemDatasetItemIds =
+    await getExistingDatasetRunItemDatasetItemIds({
+      projectId,
+      datasetRunId: runId,
+      datasetId,
+    });
 
   // Create run items with config error for all non-existing items
   const newItems = datasetItems.filter(
@@ -404,9 +421,15 @@ async function createAllDatasetRunItemsWithConfigError(
   );
 
   const events: IngestionEventType[] = newItems.flatMap((datasetItem) => {
-    const traceId = v4();
-    const runItemId = v4();
-    const generationId = v4();
+    const traceId = execution.managedDoris
+      ? createW3CTraceId(`${runId}-${datasetItem.id}`)
+      : v4();
+    const runItemId = execution.managedDoris
+      ? v5(`${runId}:${datasetItem.id}`, v5.URL)
+      : v4();
+    const generationId = execution.managedDoris
+      ? v5(`${runId}:${datasetItem.id}:config-error`, v5.URL)
+      : v4();
     const timestamp = new Date().toISOString();
 
     let stringInput = "";
@@ -478,9 +501,14 @@ async function createAllDatasetRunItemsWithConfigError(
       },
     };
 
-    await processEventBatch(events, auth, {
+    const result = await processEventBatch(events, auth, {
       isLangfuseInternal: true,
+      analyticsAdmissionContext: execution.analyticsAdmissionContext,
+      enableDorisDatasetRunIngestion: execution.managedDoris,
       attribution: createUnknownSdkIngestionAttribution({ authCheck: auth }),
     });
+    if (execution.managedDoris && result.errors.length > 0) {
+      throw new Error("Doris rejected experiment configuration error events");
+    }
   }
 }

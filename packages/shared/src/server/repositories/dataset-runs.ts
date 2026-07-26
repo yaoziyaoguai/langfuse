@@ -1,6 +1,7 @@
 import { type jsonSchema } from "../../utils/zod";
 import { prisma } from "../../db";
 import { v4 } from "uuid";
+import type { DatasetRuns } from "@prisma/client";
 import type z from "zod";
 
 type Json = z.infer<typeof jsonSchema>;
@@ -41,7 +42,7 @@ export const createOrFetchDatasetRun = async ({
   description?: string;
   metadata?: Json | null;
   createdAt?: Date;
-}) => {
+}): Promise<DatasetRuns> => {
   try {
     // Attempt to fetch existing run
     const existingRun = await prisma.datasetRuns.findUnique({

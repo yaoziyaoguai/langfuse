@@ -25,6 +25,10 @@ import Decimal from "decimal.js";
 import { ClickHouseClientConfigOptions } from "@clickhouse/client";
 import { convertDateToClickhouseDateTime } from "../clickhouse/client";
 import { ScoreAggregate } from "../../features/scores";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris";
 
 type DatasetItemIdsByTraceIdQuery = {
   projectId: string;
@@ -515,6 +519,18 @@ export const getDatasetRunsTableMetricsCh = async (
   return rows.map(convertDatasetRunsMetricsRecord);
 };
 
+export const getDatasetRunsTableMetrics = async (
+  opts: Omit<DatasetRunsMetricsTableQuery, "select">,
+): Promise<DatasetRunsMetrics[]> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetRunsTableMetricsCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.runMetrics({
+    projectId: opts.projectId,
+    datasetId: opts.datasetId,
+    runIds: opts.runIds,
+    filters: opts.filter,
+  });
+};
+
 export const getDatasetRunsTableRowsCh = async (
   opts: Omit<DatasetRunsMetricsTableQuery, "select">,
 ): Promise<DatasetRunsRows[]> => {
@@ -526,6 +542,19 @@ export const getDatasetRunsTableRowsCh = async (
   return rows.map(convertDatasetRunsRowsRecord);
 };
 
+export const getDatasetRunsTableRows = async (
+  opts: Omit<DatasetRunsMetricsTableQuery, "select">,
+): Promise<DatasetRunsRows[]> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetRunsTableRowsCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.runRows({
+    projectId: opts.projectId,
+    datasetId: opts.datasetId,
+    filters: opts.filter,
+    limit: opts.limit,
+    offset: opts.offset,
+  });
+};
+
 export const getDatasetRunsTableCountCh = async (
   opts: Omit<DatasetRunsMetricsTableQuery, "select">,
 ): Promise<number> => {
@@ -535,6 +564,17 @@ export const getDatasetRunsTableCountCh = async (
   });
 
   return Number(rows[0]?.count);
+};
+
+export const getDatasetRunsTableCount = async (
+  opts: Omit<DatasetRunsMetricsTableQuery, "select">,
+): Promise<number> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetRunsTableCountCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.runCount({
+    projectId: opts.projectId,
+    datasetId: opts.datasetId,
+    filters: opts.filter,
+  });
 };
 
 type GetDatasetRunItemsTableOpts<IncludeIO extends boolean> =
@@ -929,10 +969,39 @@ export const getDatasetRunItemsByDatasetIdCh = async (
   return rows.map((row) => convertDatasetRunItemClickhouseToDomain(row));
 };
 
+export const getDatasetRunItems = async (
+  opts: DatasetRunItemsTableQuery,
+): Promise<DatasetRunItemDomain[]> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetRunItemsCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.list({
+    projectId: opts.projectId,
+    datasetId: opts.datasetId,
+    filters: opts.filter,
+    orderBy: opts.orderBy,
+    limit: opts.limit,
+    offset: opts.offset,
+  });
+};
+
+export const getDatasetRunItemsByDatasetId = async (
+  opts: DatasetRunItemsByDatasetIdQuery,
+): Promise<DatasetRunItemDomain[]> => getDatasetRunItems(opts);
+
 export const getDatasetItemsWithRunDataCount = async (
   opts: DatasetItemsWithRunDataCountQuery,
 ): Promise<number> => {
   const { projectId, datasetId, runIds, filterByRun } = opts;
+
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().datasetRunItems.countQualifyingDatasetItemIds(
+      {
+        projectId,
+        datasetId,
+        runIds,
+        filtersByRun: filterByRun,
+      },
+    );
+  }
 
   const rows = await getQualifyingDatasetItems<{ count: string }>({
     select: "count",
@@ -948,6 +1017,19 @@ export const getDatasetItemsWithRunDataCount = async (
 export const getDatasetItemIdsWithRunData = async (
   opts: DatasetItemIdsWithRunDataQuery,
 ): Promise<string[]> => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().datasetRunItems.qualifyingDatasetItemIds(
+      {
+        projectId: opts.projectId,
+        datasetId: opts.datasetId,
+        runIds: opts.runIds,
+        filtersByRun: opts.filterByRun,
+        limit: opts.limit,
+        offset: opts.offset,
+      },
+    );
+  }
+
   const rows = await getQualifyingDatasetItems<{ dataset_item_id: string }>({
     select: "rows",
     runFilters: opts.filterByRun,
@@ -960,6 +1042,17 @@ export const getDatasetItemIdsWithRunData = async (
 export const getDatasetRunItemsWithoutIOByItemIds = async (
   opts: DatasetRunItemsByItemIdsWithoutIOQuery,
 ): Promise<DatasetRunItemDomain<false>[]> => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().datasetRunItems.listWithoutIOByItemIds(
+      {
+        projectId: opts.projectId,
+        datasetId: opts.datasetId,
+        runIds: opts.runIds,
+        datasetItemIds: opts.datasetItemIds,
+      },
+    );
+  }
+
   // Step 1: Get DRI data matching [datasetId, runId, datasetItemId]
   const { datasetItemIds, runIds, ...rest } = opts;
 
@@ -1051,6 +1144,21 @@ export const getDatasetItemIdsByTraceIdCh = async (
   });
 };
 
+export const getDatasetItemIdsByTraceId = async (
+  opts: DatasetItemIdsByTraceIdQuery,
+): Promise<
+  { id: string; datasetId: string; observationId: string | null }[]
+> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetItemIdsByTraceIdCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.datasetItemIdsByTraceId(
+    {
+      projectId: opts.projectId,
+      traceId: opts.traceId,
+      filters: opts.filter,
+    },
+  );
+};
+
 export const getDatasetRunItemsCountCh = async (
   opts: DatasetRunItemsTableQuery,
 ): Promise<number> => {
@@ -1071,6 +1179,46 @@ export const getDatasetRunItemsCountByDatasetIdCh = async (
   });
 
   return Number(rows[0]?.count);
+};
+
+export const getDatasetRunItemsCount = async (
+  opts: DatasetRunItemsTableQuery,
+): Promise<number> => {
+  if (!isDorisAnalyticsBackend()) return getDatasetRunItemsCountCh(opts);
+  return getDorisTelemetryRepositories().datasetRunItems.count({
+    projectId: opts.projectId,
+    datasetId: opts.datasetId,
+    filters: opts.filter,
+  });
+};
+
+export const getDatasetRunItemsCountByDatasetId = async (
+  opts: DatasetRunItemsByDatasetIdQuery,
+): Promise<number> => getDatasetRunItemsCount(opts);
+
+export const getExistingDatasetRunItemDatasetItemIds = async (input: {
+  projectId: string;
+  datasetId: string;
+  datasetRunId: string;
+}): Promise<Set<string>> => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().datasetRunItems.existingDatasetItemIds(
+      input,
+    );
+  }
+  const rows = await getDatasetRunItemsByDatasetIdCh({
+    projectId: input.projectId,
+    datasetId: input.datasetId,
+    filter: [
+      {
+        column: "datasetRunId",
+        operator: "=",
+        value: input.datasetRunId,
+        type: "string",
+      },
+    ],
+  });
+  return new Set(rows.map(({ datasetItemId }) => datasetItemId));
 };
 
 export const hasAnyDatasetRunItem = async (

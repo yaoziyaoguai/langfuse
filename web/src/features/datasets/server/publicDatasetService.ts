@@ -44,6 +44,8 @@ import {
 import { upsertDataset } from "./actions/createDataset";
 import {
   addToDeleteDatasetQueue,
+  analyticsDatasetDeletionQueueReference,
+  createAnalyticsDatasetDeletionIntent,
   createDatasetItemFilterState,
   createUnknownSdkIngestionAttribution,
   deleteDatasetItem,
@@ -58,6 +60,9 @@ import {
   upsertDatasetItem,
 } from "@langfuse/shared/src/server";
 import type { z } from "zod";
+import { env } from "@/src/env.mjs";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
+import { isInternalDorisCapabilityActive } from "@/src/server/communityCapabilityRuntime";
 
 type DatasetAuditScope = {
   projectId: string;
@@ -814,6 +819,11 @@ export const createDatasetRunItemForApi = async ({
   const ingestionResult = await processEventBatch([event], auth, {
     attribution: createUnknownSdkIngestionAttribution({ authCheck: auth }),
     isLangfuseInternal: true,
+    analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
+    enableDorisDatasetRunIngestion:
+      env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+        ? await isInternalDorisCapabilityActive("datasetRunIngestion")
+        : false,
   });
 
   if (ingestionResult.errors.length > 0) {
@@ -1152,13 +1162,23 @@ export const deleteDatasetRunForApi = async ({
     },
   );
 
-  await prisma.datasetRuns.delete({
-    where: {
-      id_projectId: {
-        projectId,
-        id: datasetRun.id,
+  const deletionIntent = await prisma.$transaction(async (transaction) => {
+    const intent = await createAnalyticsDatasetDeletionIntent({
+      transaction,
+      scope: "DATASET_RUNS",
+      projectId,
+      datasetId: datasetRun.datasetId,
+      datasetRunIds: [datasetRun.id],
+    });
+    await transaction.datasetRuns.delete({
+      where: {
+        id_projectId: {
+          projectId,
+          id: datasetRun.id,
+        },
       },
-    },
+    });
+    return intent;
   });
 
   await auditLog({
@@ -1177,6 +1197,7 @@ export const deleteDatasetRunForApi = async ({
     projectId,
     datasetRunIds: [datasetRun.id],
     datasetId: datasetRun.datasetId,
+    analyticsDeletion: analyticsDatasetDeletionQueueReference(deletionIntent),
   });
 
   return {
@@ -1198,13 +1219,23 @@ export const deleteDatasetRunByIdForApi = async ({
       datasetRunId,
     });
 
-  await prisma.datasetRuns.delete({
-    where: {
-      id_projectId: {
-        projectId,
-        id: datasetRun.id,
+  const deletionIntent = await prisma.$transaction(async (transaction) => {
+    const intent = await createAnalyticsDatasetDeletionIntent({
+      transaction,
+      scope: "DATASET_RUNS",
+      projectId,
+      datasetId: datasetRun.datasetId,
+      datasetRunIds: [datasetRun.id],
+    });
+    await transaction.datasetRuns.delete({
+      where: {
+        id_projectId: {
+          projectId,
+          id: datasetRun.id,
+        },
       },
-    },
+    });
+    return intent;
   });
 
   await auditLog({
@@ -1222,6 +1253,7 @@ export const deleteDatasetRunByIdForApi = async ({
     projectId,
     datasetRunIds: [datasetRun.id],
     datasetId: datasetRun.datasetId,
+    analyticsDeletion: analyticsDatasetDeletionQueueReference(deletionIntent),
   });
 
   return {

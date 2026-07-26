@@ -21,6 +21,8 @@ import {
 import { env } from "@/src/env.mjs";
 import { CreateObservationAddToDatasetActionSchema } from "../validation";
 import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
+import { randomUUID } from "node:crypto";
+import { withAnalyticsBatchActionPublicationAdmission } from "@/src/server/analyticsQueuePublicationAdmission";
 
 const MAX_BATCH_ADD_TO_DATASET_ITEMS = 1000;
 
@@ -75,53 +77,69 @@ export const addToDatasetRouter = createTRPCRouter({
           projectId,
         });
 
-        // Create table batch action record
-        const batchAction = await ctx.prisma.batchAction.create({
-          data: {
-            projectId,
-            userId,
-            actionType: ActionId.ObservationAddToDataset,
-            tableName,
-            status: BatchActionStatus.Queued,
-            query,
-            config,
+        const batchActionId = randomUUID();
+        return withAnalyticsBatchActionPublicationAdmission({
+          actionId: ActionId.ObservationAddToDataset,
+          resourceIdentity: batchActionId,
+          publish: async (guard) => {
+            const queue = BatchActionQueue.getInstance();
+            if (!queue) {
+              throw new Error("BatchActionQueue is not initialized");
+            }
+            const batchAction = await guard.withIoFence(async (tx) => {
+              const created = await tx.batchAction.create({
+                data: {
+                  id: batchActionId,
+                  projectId,
+                  userId,
+                  actionType: ActionId.ObservationAddToDataset,
+                  tableName,
+                  status: BatchActionStatus.Queued,
+                  query,
+                  config,
+                },
+              });
+              await auditLog(
+                {
+                  session: ctx.session,
+                  resourceType: "batchAction",
+                  resourceId: created.id,
+                  projectId,
+                  action: "create",
+                  after: created,
+                },
+                tx,
+              );
+              return created;
+            });
+
+            await guard.withIoFence(() =>
+              queue.add(
+                QueueJobs.BatchActionProcessingJob,
+                {
+                  id: batchAction.id,
+                  name: QueueJobs.BatchActionProcessingJob,
+                  timestamp: batchAction.createdAt,
+                  payload: {
+                    batchActionId: batchAction.id,
+                    projectId,
+                    actionId: ActionId.ObservationAddToDataset,
+                    tableName,
+                    cutoffCreatedAt: batchAction.createdAt,
+                    query,
+                    config,
+                    type: BatchActionType.Create,
+                  },
+                },
+                {
+                  jobId: batchAction.id,
+                },
+              ),
+            );
+
+            return { id: batchAction.id };
           },
         });
-
-        // Create audit log
-        await auditLog({
-          session: ctx.session,
-          resourceType: "batchAction",
-          resourceId: batchAction.id,
-          projectId,
-          action: "create",
-          after: batchAction,
-        });
-
-        // Queue the job
-        await BatchActionQueue.getInstance()?.add(
-          QueueJobs.BatchActionProcessingJob,
-          {
-            id: batchAction.id,
-            name: QueueJobs.BatchActionProcessingJob,
-            timestamp: new Date(),
-            payload: {
-              batchActionId: batchAction.id,
-              projectId,
-              actionId: ActionId.ObservationAddToDataset,
-              tableName,
-              cutoffCreatedAt: new Date(),
-              query,
-              config,
-              type: BatchActionType.Create,
-            },
-          },
-          {
-            jobId: batchAction.id,
-          },
-        );
-
-        return { id: batchAction.id };
       } catch (e) {
         logger.error(e);
         if (e instanceof TRPCError) {

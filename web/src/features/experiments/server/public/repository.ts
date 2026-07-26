@@ -5,6 +5,8 @@ import {
   FilterList,
   ExperimentsAggregationQueryBuilder,
   buildEventsFullTableSplitQuery,
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
   measureAndReturn,
   parseClickhouseUTCDateTimeFormat,
   publicApiExperimentItemColumnDefinitions,
@@ -245,6 +247,10 @@ const scoreTimestampBoundsFromRows = <TRow>(
 async function queryExperimentSummaryRowsForPublicApi(
   params: QueryExperimentSummariesParams,
 ) {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.publicSummaries(params);
+  }
+
   const filterList = deriveFilters(
     {
       projectId: params.projectId,
@@ -387,6 +393,10 @@ const experimentItemOrderByColumns = (alias: "e" | "b") => {
 async function queryExperimentItemRowsForPublicApi(
   params: QueryExperimentItemsParams,
 ) {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.publicItems(params);
+  }
+
   const filterList = deriveFilters(
     {
       projectId: params.projectId,
