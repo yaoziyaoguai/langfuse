@@ -1,6 +1,7 @@
 import { VERSION } from "@/src/constants";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { telemetry } from "@/src/features/telemetry";
+import { checkWebAnalyticsRuntimeReadiness } from "@/src/server/analyticsRuntime";
 import { isSigtermReceived } from "@/src/utils/shutdown";
 import { env } from "@/src/env.mjs";
 import { prisma } from "@langfuse/shared/src/db";
@@ -35,6 +36,27 @@ export default async function handler(
       });
     }
 
+    const expectedAnalyticsBackend = req.query.analyticsBackend;
+    if (
+      expectedAnalyticsBackend !== undefined &&
+      expectedAnalyticsBackend !== "clickhouse" &&
+      expectedAnalyticsBackend !== "doris"
+    ) {
+      return res.status(400).json({
+        status: "Invalid analytics backend expectation",
+        version: VERSION.replace("v", ""),
+      });
+    }
+    if (
+      expectedAnalyticsBackend !== undefined &&
+      expectedAnalyticsBackend !== env.LANGFUSE_ANALYTICS_BACKEND
+    ) {
+      return res.status(503).json({
+        status: "Expected analytics backend is not selected",
+        version: VERSION.replace("v", ""),
+      });
+    }
+
     if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
       const client = DorisClientManager.getInstance().getClient(
         parseDorisQueryConfig(
@@ -56,6 +78,13 @@ export default async function handler(
           version: VERSION.replace("v", ""),
         });
       }
+    }
+
+    if (!(await checkWebAnalyticsRuntimeReadiness())) {
+      return res.status(503).json({
+        status: "Analytics runtime readiness check failed",
+        version: VERSION.replace("v", ""),
+      });
     }
   } catch (e) {
     traceException(e);

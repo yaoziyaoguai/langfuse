@@ -18,6 +18,10 @@ import {
   getLastProcessedPartition,
   getLastRunStartedAt,
 } from "../eventPropagation/handleEventPropagationJob";
+import {
+  checkWorkerAnalyticsRuntimeReadiness,
+  isWorkerAnalyticsRuntimeFenced,
+} from "../../analyticsRuntime";
 
 export type EventPropagationHealth = {
   /** Whether the dual-write / event-propagation job runs in this deployment. */
@@ -162,6 +166,12 @@ export const checkContainerHealth = async (
     });
   }
 
+  if (isWorkerAnalyticsRuntimeFenced()) {
+    return res.status(503).json({
+      status: "Analytics runtime lease fenced",
+    });
+  }
+
   //check database health
   await prisma.$queryRaw`SELECT 1;`;
 
@@ -178,6 +188,12 @@ export const checkContainerHealth = async (
       ),
     ),
   ]);
+
+  if (failOnSigterm && !(await checkWorkerAnalyticsRuntimeReadiness())) {
+    return res.status(503).json({
+      status: "Analytics runtime readiness check failed",
+    });
+  }
 
   if (failOnSigterm && env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
     const client = DorisClientManager.getInstance().getClient(

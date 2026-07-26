@@ -619,7 +619,7 @@ export type ObservationsTableQueryResult = ObservationRecordReadType & {
   tool_calls_count?: string;
 };
 
-function buildDorisLegacyObservationQuery(filter: FilterState): {
+export function buildDorisLegacyObservationQuery(filter: FilterState): {
   readonly range: { readonly from: Date; readonly to: Date } | null;
   readonly filters: EventsTableFilterState;
 } {
@@ -2453,6 +2453,17 @@ export const getCostByEvaluatorIds = async (
   evaluatorIds: string[],
 ): Promise<Array<{ evaluatorId: string; totalCost: number }>> => {
   if (evaluatorIds.length === 0) return [];
+  if (isDorisAnalyticsBackend()) {
+    const rows =
+      await getDorisTelemetryRepositories().observations.evaluatorCostMetrics({
+        projectId,
+        evaluatorIds,
+      });
+    return rows.map(({ evaluatorId, totalCost }) => ({
+      evaluatorId,
+      totalCost,
+    }));
+  }
 
   const query = `
     SELECT

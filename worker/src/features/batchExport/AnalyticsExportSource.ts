@@ -4,6 +4,7 @@ import type {
   FilterCondition,
 } from "@langfuse/shared";
 import type { Readable } from "stream";
+import type { BatchExportIdentity } from "./BatchExportIdentityManifest";
 
 export type AnalyticsExportRequest = Omit<BatchExportQueryType, "filter"> & {
   readonly projectId: string;
@@ -12,8 +13,22 @@ export type AnalyticsExportRequest = Omit<BatchExportQueryType, "filter"> & {
   readonly fileFormat: BatchExportFileFormat;
 };
 
+export type AnalyticsExportOpenOptions = {
+  readonly identities?: AsyncIterable<BatchExportIdentity>;
+  readonly signal?: AbortSignal;
+  readonly revalidate?: () => Promise<void>;
+};
+
 export interface AnalyticsExportSource {
-  open(request: AnalyticsExportRequest): Promise<Readable>;
+  open(
+    request: AnalyticsExportRequest,
+    options?: AnalyticsExportOpenOptions,
+  ): Promise<Readable>;
+  scanIdentities?(
+    request: AnalyticsExportRequest,
+    hardLimit: number,
+    signal?: AbortSignal,
+  ): AsyncIterable<BatchExportIdentity>;
 }
 
 export class AnalyticsExportUnsupportedError extends Error {

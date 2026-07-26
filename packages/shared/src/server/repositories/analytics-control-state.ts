@@ -35,6 +35,8 @@ type ClaimAnalyticsEntityHeadInput = {
   entityKey: string;
   lookupId: string;
   owningTraceId: string | null;
+  owningDatasetId?: string | null;
+  owningDatasetRunId?: string | null;
   expectedSourceVersion: bigint | null;
   sourceVersion: bigint;
   canonicalPayloadHash: string;
@@ -43,6 +45,8 @@ type ClaimAnalyticsEntityHeadInput = {
   fenceGeneration: bigint;
   traceDeletionGeneration: bigint;
   projectDeletionGeneration: bigint;
+  datasetDeletionGeneration?: bigint;
+  runDeletionGeneration?: bigint;
 };
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -70,19 +74,22 @@ function classifyEntityHeadClaim(
   }
 
   if (
+    current.fenceGeneration > candidate.fenceGeneration ||
+    current.traceDeletionGeneration > candidate.traceDeletionGeneration ||
+    current.projectDeletionGeneration > candidate.projectDeletionGeneration ||
+    current.datasetDeletionGeneration >
+      (candidate.datasetDeletionGeneration ?? 0n) ||
+    current.runDeletionGeneration > (candidate.runDeletionGeneration ?? 0n)
+  ) {
+    return { outcome: "stale_fence", head: current };
+  }
+
+  if (
     samePartition(current.partitionDate, candidate.partitionDate) &&
     current.sourceVersion === candidate.sourceVersion &&
     current.canonicalPayloadHash === candidate.canonicalPayloadHash
   ) {
     return { outcome: "noop", head: current };
-  }
-
-  if (
-    current.fenceGeneration > candidate.fenceGeneration ||
-    current.traceDeletionGeneration > candidate.traceDeletionGeneration ||
-    current.projectDeletionGeneration > candidate.projectDeletionGeneration
-  ) {
-    return { outcome: "stale_fence", head: current };
   }
 
   if (!samePartition(current.partitionDate, candidate.partitionDate)) {
@@ -129,17 +136,25 @@ export async function claimAnalyticsEntityHead(
         projectDeletionGeneration: {
           lte: input.projectDeletionGeneration,
         },
+        datasetDeletionGeneration: {
+          lte: input.datasetDeletionGeneration ?? 0n,
+        },
+        runDeletionGeneration: { lte: input.runDeletionGeneration ?? 0n },
       },
       data: {
         operationId: input.operationId,
         lookupId: input.lookupId,
         owningTraceId: input.owningTraceId,
+        owningDatasetId: input.owningDatasetId ?? null,
+        owningDatasetRunId: input.owningDatasetRunId ?? null,
         sourceVersion: input.sourceVersion,
         canonicalPayloadHash: input.canonicalPayloadHash,
         canonicalizerVersion: input.canonicalizerVersion,
         fenceGeneration: input.fenceGeneration,
         traceDeletionGeneration: input.traceDeletionGeneration,
         projectDeletionGeneration: input.projectDeletionGeneration,
+        datasetDeletionGeneration: input.datasetDeletionGeneration ?? 0n,
+        runDeletionGeneration: input.runDeletionGeneration ?? 0n,
       },
     });
 
@@ -162,6 +177,8 @@ export async function claimAnalyticsEntityHead(
           entityKey: input.entityKey,
           lookupId: input.lookupId,
           owningTraceId: input.owningTraceId,
+          owningDatasetId: input.owningDatasetId ?? null,
+          owningDatasetRunId: input.owningDatasetRunId ?? null,
           sourceVersion: input.sourceVersion,
           canonicalPayloadHash: input.canonicalPayloadHash,
           partitionDate: input.partitionDate,
@@ -169,6 +186,8 @@ export async function claimAnalyticsEntityHead(
           fenceGeneration: input.fenceGeneration,
           traceDeletionGeneration: input.traceDeletionGeneration,
           projectDeletionGeneration: input.projectDeletionGeneration,
+          datasetDeletionGeneration: input.datasetDeletionGeneration ?? 0n,
+          runDeletionGeneration: input.runDeletionGeneration ?? 0n,
         },
       });
       return { outcome: "won", head };
@@ -372,6 +391,48 @@ export async function getTraceDeletionGeneration({
     where: { projectId_traceId: { projectId, traceId } },
   });
   return current?.generation ?? 0n;
+}
+
+export async function getDatasetDeletionGeneration({
+  client = prisma,
+  projectId,
+  datasetId,
+}: {
+  client?: AnalyticsControlClient;
+  projectId: string;
+  datasetId: string;
+}): Promise<bigint> {
+  const current = await client.analyticsDatasetDeletionGeneration.findUnique({
+    where: { projectId_datasetId: { projectId, datasetId } },
+    select: { generation: true },
+  });
+  return current?.generation ?? 0n;
+}
+
+export async function getDatasetRunDeletionState({
+  client = prisma,
+  projectId,
+  datasetRunId,
+}: {
+  client?: AnalyticsControlClient;
+  projectId: string;
+  datasetRunId: string;
+}): Promise<{
+  readonly datasetId: string;
+  readonly generation: bigint;
+} | null> {
+  return client.analyticsDatasetRunDeletionGeneration.findUnique({
+    where: { projectId_datasetRunId: { projectId, datasetRunId } },
+    select: { datasetId: true, generation: true },
+  });
+}
+
+export async function getDatasetRunDeletionGeneration(input: {
+  client?: AnalyticsControlClient;
+  projectId: string;
+  datasetRunId: string;
+}): Promise<bigint> {
+  return (await getDatasetRunDeletionState(input))?.generation ?? 0n;
 }
 
 export function findDeletionOperationForOrganization({

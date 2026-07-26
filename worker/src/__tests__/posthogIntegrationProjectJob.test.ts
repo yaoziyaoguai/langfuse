@@ -34,7 +34,9 @@ const h = vi.hoisted(() => {
 
   // Mutable row returned by the prisma findFirst mock so individual tests can
   // vary exportSource.
-  const db = { integration: defaultIntegration() as Record<string, unknown> };
+  const db: { integration: Record<string, unknown> | null } = {
+    integration: defaultIntegration(),
+  };
 
   return {
     posthogIntegrationUpdate,
@@ -156,5 +158,17 @@ describe("handlePostHogIntegrationProjectJob events_only legacy guard (LFE-10148
 
     expect(h.getTraces).toHaveBeenCalledTimes(1);
     expect(h.posthogIntegrationUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not export or advance state when no enabled integration exists", async () => {
+    h.db.integration = null;
+
+    await handlePostHogIntegrationProjectJob(makeJob());
+
+    expect(h.getScores).not.toHaveBeenCalled();
+    expect(h.getTraces).not.toHaveBeenCalled();
+    expect(h.getGenerations).not.toHaveBeenCalled();
+    expect(h.getEvents).not.toHaveBeenCalled();
+    expect(h.posthogIntegrationUpdate).not.toHaveBeenCalled();
   });
 });

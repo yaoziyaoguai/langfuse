@@ -31,7 +31,10 @@ import {
   CURRENT_ANALYTICS_CANONICALIZER_VERSION,
   CURRENT_ANALYTICS_SCHEMA_VERSION,
 } from "../analytics-persistence";
-import type { AnalyticsBackend } from "../analytics-persistence";
+import type {
+  AnalyticsBackend,
+  AnalyticsRuntimeAdmissionContext,
+} from "../analytics-persistence";
 import type { StorageService } from "../services/StorageService";
 import { OtelIngestionQueue } from "../redis/otelIngestionQueue";
 import { isValidDateString, flattenJsonToPathArrays } from "./utils";
@@ -65,6 +68,7 @@ export interface OtelIngestionProcessorConfig {
    * log line points at the replayable payload.
    */
   fileKey?: string;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
   acceptAnalytics?: typeof acceptAnalyticsIngestion;
   storageService?: StorageService;
 }
@@ -183,6 +187,7 @@ export class OtelIngestionProcessor {
   private readonly ingestionVersion?: string;
   private readonly isLangfuseInternal?: boolean;
   private readonly fileKey?: string;
+  private readonly analyticsAdmissionContext: AnalyticsRuntimeAdmissionContext | null;
   private readonly acceptAnalytics: typeof acceptAnalyticsIngestion;
   private readonly storageService?: StorageService;
 
@@ -200,6 +205,7 @@ export class OtelIngestionProcessor {
     this.ingestionVersion = config.ingestionVersion;
     this.isLangfuseInternal = config.isLangfuseInternal;
     this.fileKey = config.fileKey;
+    this.analyticsAdmissionContext = config.analyticsAdmissionContext ?? null;
     this.acceptAnalytics = config.acceptAnalytics ?? acceptAnalyticsIngestion;
     this.storageService = config.storageService;
   }
@@ -269,6 +275,7 @@ export class OtelIngestionProcessor {
       },
       canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
       schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+      admissionContext: this.analyticsAdmissionContext,
       storageService:
         this.storageService ??
         getS3EventStorageClient(env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET),

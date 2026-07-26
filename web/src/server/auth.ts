@@ -65,6 +65,7 @@ import { getSSOBlockedDomains } from "@/src/features/auth-credentials/server/sig
 import { createSupportEmailHash } from "@/src/features/support-chat/createSupportEmailHash";
 import { canToggleV4 } from "@/src/features/events/lib/v4Rollout";
 import { canCreateOrganizations } from "@/src/features/organizations/server/canCreateOrganizations";
+import { getActiveDorisCommunityCapabilities } from "@/src/server/communityCapabilityRuntime";
 
 const staticProviders: Provider[] = [
   CredentialsProvider({
@@ -851,6 +852,10 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
               selfHostedInstancePlan: getSelfHostedInstancePlanServerSide(),
               v4WriteMode,
               analyticsBackend: env.LANGFUSE_ANALYTICS_BACKEND,
+              activeAnalyticsCapabilities:
+                env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+                  ? await getActiveDorisCommunityCapabilities()
+                  : [],
             },
             user:
               dbUser !== null

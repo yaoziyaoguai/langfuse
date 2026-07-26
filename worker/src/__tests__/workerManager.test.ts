@@ -1,4 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../env", () => ({
+  env: { LANGFUSE_QUEUE_METRICS_SAMPLE_RATE: 0 },
+}));
+vi.mock("@langfuse/shared/src/server", () => ({
+  QueueName: {
+    TraceDelete: "trace-delete",
+    IngestionQueue: "ingestion-queue",
+    ScoreDelete: "score-delete",
+  },
+  contextWithLangfuseProps: vi.fn(() => ({})),
+  convertQueueNameToMetricName: vi.fn((queueName: string) =>
+    queueName === "ingestion-queue"
+      ? "langfuse.queue.ingestion"
+      : `langfuse.queue.${queueName.replaceAll("-", "_")}`,
+  ),
+  createBullMQWorkerOptionsWithRedis: vi.fn(() => undefined),
+  logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
+  recordDistribution: vi.fn(),
+  recordGauge: vi.fn(),
+  recordHistogram: vi.fn(),
+  recordIncrement: vi.fn(),
+  traceException: vi.fn(),
+}));
+vi.mock("../queues/shardedQueueRegistry", () => ({
+  resolveQueueInstance: vi.fn(),
+  SHARDED_QUEUE_BASE_NAMES: ["ingestion-queue"],
+}));
 
 import { QueueName } from "@langfuse/shared/src/server";
 import { WorkerManager } from "../queues/workerManager";
@@ -20,6 +48,17 @@ const resolveMetricInfo = (queueName: QueueName) =>
   ).resolveMetricInfo(queueName);
 
 describe("WorkerManager", () => {
+  beforeEach(() => {
+    const manager = WorkerManager as unknown as {
+      workers: Record<string, { close: () => Promise<void> }>;
+      registrationsFenced: boolean;
+      closeOperation: Promise<void> | null;
+    };
+    manager.workers = {};
+    manager.registrationsFenced = false;
+    manager.closeOperation = null;
+  });
+
   describe("extractProjectId", () => {
     it("extracts project ids from queue payloads", () => {
       expect(
@@ -73,5 +112,61 @@ describe("WorkerManager", () => {
           .baseMetric,
       ).toBe("langfuse.queue.ingestion");
     });
+  });
+
+  it("shares an in-flight close and permanently rejects registration after fencing", async () => {
+    let releaseClose!: () => void;
+    const close = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        }),
+    );
+    const manager = WorkerManager as unknown as {
+      workers: Record<string, { close: () => Promise<void> }>;
+    };
+    manager.workers[QueueName.TraceDelete] = { close };
+
+    const firstClose = WorkerManager.closeWorkers();
+    let fenceResolved = false;
+    const fence = WorkerManager.fenceRegistrations().then(() => {
+      fenceResolved = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(fenceResolved).toBe(false);
+
+    releaseClose();
+    await Promise.all([firstClose, fence]);
+    WorkerManager.register(QueueName.ScoreDelete, async () => undefined);
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(WorkerManager.getRegisteredQueueNames()).toEqual([]);
+  });
+
+  it("retains failed workers and retries only those closures", async () => {
+    const failedClose = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient close failure"))
+      .mockResolvedValueOnce(undefined);
+    const successfulClose = vi.fn(async () => undefined);
+    const manager = WorkerManager as unknown as {
+      workers: Record<string, { close: () => Promise<void> }>;
+    };
+    manager.workers[QueueName.TraceDelete] = { close: failedClose };
+    manager.workers[QueueName.ScoreDelete] = { close: successfulClose };
+
+    await expect(WorkerManager.closeWorkers()).rejects.toThrow(
+      "Failed to close all workers",
+    );
+    expect(WorkerManager.getRegisteredQueueNames()).toEqual([
+      QueueName.TraceDelete,
+    ]);
+
+    await expect(WorkerManager.closeWorkers()).resolves.toBeUndefined();
+    expect(failedClose).toHaveBeenCalledTimes(2);
+    expect(successfulClose).toHaveBeenCalledOnce();
+    expect(WorkerManager.getRegisteredQueueNames()).toEqual([]);
   });
 });

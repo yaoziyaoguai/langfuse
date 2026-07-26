@@ -1,8 +1,8 @@
 import { transformDbDatasetRunItemToAPIDatasetRunItemCh } from "@/src/features/public-api/types/datasets";
 import { isPresent } from "@langfuse/shared";
 import {
-  getDatasetRunItemsByDatasetIdCh,
-  getDatasetRunItemsCountByDatasetIdCh,
+  getDatasetRunItemsByDatasetId,
+  getDatasetRunItemsCountByDatasetId,
 } from "@langfuse/shared/src/server";
 
 type DatasetRunItemsQueryType = {
@@ -20,7 +20,7 @@ export const generateDatasetRunItemsForPublicApi = async ({
 }) => {
   const { datasetId, projectId, runId, limit, page } = props;
 
-  const result = await getDatasetRunItemsByDatasetIdCh({
+  const result = await getDatasetRunItemsByDatasetId({
     projectId,
     datasetId,
     filter: [
@@ -52,7 +52,7 @@ export const getDatasetRunItemsCountForPublicApi = async ({
 }) => {
   const { datasetId, projectId, runId } = props;
 
-  return await getDatasetRunItemsCountByDatasetIdCh({
+  return await getDatasetRunItemsCountByDatasetId({
     projectId,
     datasetId,
     filter: [

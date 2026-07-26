@@ -72,7 +72,7 @@ vi.mock("../../errors/UnrecoverableError", async () => {
 
 import { prisma } from "@langfuse/shared/src/db";
 import { processObservationEval } from "../../features/evaluation/observationEval";
-import { traceException } from "@langfuse/shared/src/server";
+import { logger, traceException } from "@langfuse/shared/src/server";
 import { CodeEvalDispatcherErrorCodes } from "../../../../packages/shared/src/server/evals/codeEvalDispatcherTypes";
 import { CodeEvalExecutionError } from "../../../../packages/shared/src/server/evals/codeEvalExecution";
 import { isUnrecoverableError } from "../../errors/UnrecoverableError";
@@ -151,7 +151,7 @@ describe("codeEvalExecutionQueueProcessor", () => {
       data: {
         status: JobExecutionStatus.ERROR,
         endTime: expect.any(Date),
-        error: "The evaluator returned an invalid result.",
+        error: "An internal error occurred",
         executionTraceId: "test-trace-id",
       },
     });
@@ -195,7 +195,7 @@ describe("codeEvalExecutionQueueProcessor", () => {
       data: {
         status: JobExecutionStatus.ERROR,
         endTime: expect.any(Date),
-        error: "Code-based eval execution is not implemented yet",
+        error: "An internal error occurred",
         executionTraceId: "test-trace-id",
       },
     });
@@ -203,15 +203,28 @@ describe("codeEvalExecutionQueueProcessor", () => {
   });
 
   it("should rethrow retryable errors without writing ERROR while retries remain", async () => {
-    const error = new Error("temporary dispatcher failure");
+    const error = new Error(
+      "postgresql://user:password@db prompt=secret input=private",
+    );
     (processObservationEval as Mock).mockRejectedValue(error);
 
     await expect(
       codeEvalExecutionQueueProcessor(createMockJob()),
-    ).rejects.toThrow(error);
+    ).rejects.toThrow("An internal error occurred");
 
     expect(prisma.jobExecution.update).not.toHaveBeenCalled();
-    expect(traceException).toHaveBeenCalledWith(error);
+    expect(traceException).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "An internal error occurred" }),
+      undefined,
+      expect.any(String),
+    );
+    const observabilityOutput = JSON.stringify([
+      (traceException as unknown as Mock).mock.calls,
+      (logger.error as unknown as Mock).mock.calls,
+    ]);
+    expect(observabilityOutput).not.toContain("password");
+    expect(observabilityOutput).not.toContain("prompt=secret");
+    expect(observabilityOutput).not.toContain("input=private");
   });
 
   it("should mark the job as ERROR with a masked message on the final retry attempt", async () => {
@@ -222,7 +235,7 @@ describe("codeEvalExecutionQueueProcessor", () => {
       codeEvalExecutionQueueProcessor(
         createMockJob({ attemptsMade: 9, opts: { attempts: 10 } }),
       ),
-    ).rejects.toThrow(error);
+    ).rejects.toThrow("An internal error occurred");
 
     expect(prisma.jobExecution.update).toHaveBeenCalledWith({
       where: {
@@ -236,7 +249,11 @@ describe("codeEvalExecutionQueueProcessor", () => {
         executionTraceId: "test-trace-id",
       },
     });
-    expect(traceException).toHaveBeenCalledWith(error);
+    expect(traceException).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "An internal error occurred" }),
+      undefined,
+      expect.any(String),
+    );
   });
 
   it("should preserve retryable code eval timeout messages on the final retry attempt", async () => {
@@ -267,6 +284,10 @@ describe("codeEvalExecutionQueueProcessor", () => {
         executionTraceId: "test-trace-id",
       },
     });
-    expect(traceException).toHaveBeenCalledWith(error);
+    expect(traceException).toHaveBeenCalledWith(
+      error,
+      undefined,
+      CodeEvalDispatcherErrorCodes.TIMEOUT,
+    );
   });
 });

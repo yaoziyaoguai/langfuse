@@ -173,6 +173,14 @@ export const transformDbToApiObservation = (
 
     toolCallNames,
 
+    // Exclude internal list/read-model fields.
+
+    traceTimestamp,
+
+    toolDefinitionsCount,
+
+    toolCallsCount,
+
     // Exclude publish/bookmark flags from V1 public observations API.
     // V2 observations already exposes these on the events-based contract.
     bookmarked,
@@ -186,6 +194,9 @@ export const transformDbToApiObservation = (
       // either `tags` or `traceTags` may exist on the input observation.
       // This is not part of the standard `EventsObservation` type.
       traceTags?: string[];
+      traceTimestamp?: Date | null;
+      toolDefinitionsCount?: number | null;
+      toolCallsCount?: number | null;
     };
 
   return {

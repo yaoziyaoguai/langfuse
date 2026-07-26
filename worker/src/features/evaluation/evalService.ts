@@ -2,7 +2,6 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import {
   EvalTemplateType,
-  JobConfigState,
   JobExecutionStatus,
   type JobExecution,
   type JobConfiguration,
@@ -13,15 +12,12 @@ import {
   EvalExecutionEvent,
   logger,
   EvalExecutionQueue,
-  checkTraceExistsAndGetTimestamp,
-  checkObservationExists,
   TraceQueueEventType,
   CreateEvalQueueEventType,
   InMemoryFilterService,
   recordIncrement,
   getCurrentSpan,
   instrumentAsync,
-  getDatasetItemIdsByTraceIdCh,
   mapDatasetRunItemFilterColumn,
   tableColumnsToSqlFilterAndPrefix,
   LangfuseInternalTraceEnvironment,
@@ -33,6 +29,7 @@ import {
   EvaluatorBlockSource,
   type CodeEvalScoreWithName,
   type EvaluatorLlmErrorClassification,
+  type AnalyticsEvaluationDispatchEventType,
 } from "@langfuse/shared/src/server";
 import {
   inMemoryFilterRequiresMetadata,
@@ -55,6 +52,8 @@ import {
   getEvaluatorBlockMetadata,
   getBlockReasonForInvalidModelConfig,
   isJobConfigExecutable,
+  isJobConfigExecutableForExecutionMode,
+  type JobConfigExecutionMode,
   type EvalTemplateLlmAsAJudge,
   PersistedEvalOutputDefinitionSchema,
   ScoreDataTypeEnum,
@@ -163,9 +162,15 @@ import { getAnalyticsEvaluationTargetSource } from "./analyticsEvaluationTargetR
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────── │
  */
+export type ManagedEvaluationDispatch = {
+  readonly envelope: AnalyticsEvaluationDispatchEventType;
+};
+
 type CreateEvalJobsParams = {
   jobTimestamp: Date;
   enforcedJobTimeScope?: JobTimeScope;
+  executionMode?: JobConfigExecutionMode;
+  analyticsEvaluationDispatch?: AnalyticsEvaluationDispatchEventType;
 } & (
   | {
       sourceEventType: "trace-upsert";
@@ -186,7 +191,10 @@ export const createEvalJobs = async ({
   sourceEventType,
   jobTimestamp,
   enforcedJobTimeScope,
+  executionMode,
+  analyticsEvaluationDispatch,
 }: CreateEvalJobsParams) => {
+  const targetSource = getAnalyticsEvaluationTargetSource();
   const span = getCurrentSpan();
   if (span) {
     span.setAttribute("messaging.bullmq.job.input.projectId", event.projectId);
@@ -197,8 +205,12 @@ export const createEvalJobs = async ({
     where: {
       jobType: "EVAL",
       projectId: event.projectId,
-      status: "ACTIVE",
-      blockedAt: null,
+      ...(executionMode === "MANUAL"
+        ? {}
+        : {
+            status: "ACTIVE" as const,
+            blockedAt: null,
+          }),
       targetObject: {
         in: [EvalTargetObject.TRACE, EvalTargetObject.DATASET],
       },
@@ -279,7 +291,7 @@ export const createEvalJobs = async ({
 
       // Fetch trace data and store it. If observation data is required, we'll make a separate lookup.
       // Those fields are used rarely, though.
-      cachedTrace = await getAnalyticsEvaluationTargetSource().getTrace({
+      cachedTrace = await targetSource.getTrace({
         traceId: event.traceId,
         projectId: event.projectId,
         timestamp:
@@ -304,7 +316,7 @@ export const createEvalJobs = async ({
       });
     } catch (error) {
       logger.error("Failed to fetch trace for evaluation optimization", {
-        error,
+        errorType: error instanceof Error ? error.name : "UnknownError",
         traceId: event.traceId,
         projectId: event.projectId,
       });
@@ -321,11 +333,12 @@ export const createEvalJobs = async ({
   let cachedDatasetItemIds: { id: string; datasetId: string }[] | null = null;
   if (datasetConfigs.length > 1) {
     try {
-      cachedDatasetItemIds = await getDatasetItemIdsByTraceIdCh({
-        projectId: event.projectId,
-        traceId: event.traceId,
-        filter: [],
-      });
+      cachedDatasetItemIds = [
+        ...(await targetSource.getDatasetItemsByTraceId({
+          projectId: event.projectId,
+          traceId: event.traceId,
+        })),
+      ];
       recordIncrement(
         "langfuse.evaluation-execution.dataset_item_cache_fetch",
         1,
@@ -343,7 +356,7 @@ export const createEvalJobs = async ({
       logger.error(
         "Failed to fetch datasetItemIds for evaluation optimization",
         {
-          error,
+          errorType: error instanceof Error ? error.name : "UnknownError",
           traceId: event.traceId,
           projectId: event.projectId,
         },
@@ -355,7 +368,9 @@ export const createEvalJobs = async ({
   // Optimization: Batch query for existing job executions
   // Instead of querying once per config (N queries), fetch all at once and filter in-memory
   const configIds = configs
-    .filter((c) => c.status !== JobConfigState.INACTIVE)
+    .filter((config) =>
+      isJobConfigExecutableForExecutionMode(config, executionMode),
+    )
     .map((c) => c.id);
 
   const allExistingJobs =
@@ -366,6 +381,8 @@ export const createEvalJobs = async ({
             jobConfigurationId: true,
             jobInputDatasetItemId: true,
             jobInputObservationId: true,
+            status: true,
+            analyticsEvaluationDispatchId: true,
           },
           where: {
             projectId: event.projectId,
@@ -394,8 +411,8 @@ export const createEvalJobs = async ({
   };
 
   for (const config of configs) {
-    if (config.status === JobConfigState.INACTIVE) {
-      logger.debug(`Skipping inactive config ${config.id}`);
+    if (!isJobConfigExecutableForExecutionMode(config, executionMode)) {
+      logger.debug(`Skipping non-executable config ${config.id}`);
       continue;
     }
 
@@ -470,7 +487,7 @@ export const createEvalJobs = async ({
         traceExistsDecisionSource = "identifier";
       } else {
         // Fall back to database query for complex filters or when no cached trace
-        ({ exists, timestamp } = await checkTraceExistsAndGetTimestamp({
+        ({ exists, timestamp } = await targetSource.checkTraceExists({
           projectId: event.projectId,
           traceId: event.traceId,
           // Fallback to jobTimestamp if no payload timestamp is set to allow for successful retry attempts.
@@ -560,15 +577,19 @@ export const createEvalJobs = async ({
             ),
           );
         } else {
-          const datasetItemIds = await getDatasetItemIdsByTraceIdCh({
+          const datasetItemIds = await targetSource.getDatasetItemsByTraceId({
             projectId: event.projectId,
             traceId: event.traceId,
-            filter:
+          });
+          datasetItem = datasetItemIds.find((item) =>
+            InMemoryFilterService.evaluateFilter(
+              item,
               config.targetObject === EvalTargetObject.DATASET
                 ? validatedFilter
                 : [],
-          });
-          datasetItem = datasetItemIds.shift();
+              mapDatasetRunItemFilterColumn,
+            ),
+          );
         }
       }
     }
@@ -595,14 +616,10 @@ export const createEvalJobs = async ({
         ? event.observationId
         : undefined;
     if (observationId) {
-      const observationExists = await checkObservationExists(
-        event.projectId,
+      const observationExists = await targetSource.checkObservationExists({
+        projectId: event.projectId,
         observationId,
-        // Fallback to jobTimestamp if no payload timestamp is set to allow for successful retry attempts.
-        "timestamp" in event
-          ? new Date(event.timestamp)
-          : new Date(jobTimestamp),
-      );
+      });
       if (!observationExists) {
         logger.warn(
           `Observation ${observationId} not found, will retry with exponential backoff`,
@@ -626,10 +643,53 @@ export const createEvalJobs = async ({
     // If we matched a trace for a trace event, we create a job or
     // if we have both trace and datasetItem.
     if (traceExists && (!isDatasetConfig || Boolean(datasetItem))) {
-      const jobExecutionId = randomUUID();
+      const jobExecutionId = analyticsEvaluationDispatch
+        ? createW3CTraceId(
+            JSON.stringify([
+              "managed-evaluation",
+              analyticsEvaluationDispatch.dispatchId,
+              config.id,
+              event.traceId,
+              datasetItem?.id ?? null,
+              observationId ?? null,
+            ]),
+          )
+        : randomUUID();
 
       // deduplication: if a job exists already for a trace event, we do not create a new one.
       if (existingJob.length > 0) {
+        if (
+          analyticsEvaluationDispatch &&
+          existingJob[0].id === jobExecutionId &&
+          existingJob[0].analyticsEvaluationDispatchId ===
+            analyticsEvaluationDispatch.dispatchId &&
+          (existingJob[0].status === "PENDING" ||
+            existingJob[0].status === "DELAYED")
+        ) {
+          const shardingKey = `${event.projectId}-${jobExecutionId}`;
+          await EvalExecutionQueue.getInstance({ shardingKey })?.add(
+            QueueName.EvaluationExecution,
+            {
+              name: QueueJobs.EvaluationExecution,
+              id: `${jobExecutionId}-managed`,
+              timestamp: new Date(),
+              payload: {
+                projectId: event.projectId,
+                jobExecutionId,
+                delay: config.delay,
+                analyticsEvaluationDispatch,
+              },
+              retryBaggage: {
+                originalJobTimestamp: new Date(),
+                attempt: 0,
+              },
+            },
+            {
+              delay: config.delay,
+              jobId: `${jobExecutionId}-managed`,
+            },
+          );
+        }
         logger.debug(
           `Eval job for config ${config.id} and trace ${event.traceId} already exists`,
         );
@@ -662,6 +722,12 @@ export const createEvalJobs = async ({
           jobTemplateId: config.evalTemplateId,
           status: "PENDING",
           startTime: new Date(),
+          ...(analyticsEvaluationDispatch
+            ? {
+                analyticsEvaluationDispatchId:
+                  analyticsEvaluationDispatch.dispatchId,
+              }
+            : {}),
           ...(datasetItem
             ? {
                 jobInputDatasetItemId: datasetItem.id,
@@ -686,6 +752,9 @@ export const createEvalJobs = async ({
             projectId: event.projectId,
             jobExecutionId: jobExecutionId,
             delay: config.delay,
+            ...(analyticsEvaluationDispatch
+              ? { analyticsEvaluationDispatch }
+              : {}),
           },
           retryBaggage: {
             originalJobTimestamp: new Date(),
@@ -694,6 +763,9 @@ export const createEvalJobs = async ({
         },
         {
           delay: config.delay, // milliseconds
+          ...(analyticsEvaluationDispatch
+            ? { jobId: `${jobExecutionId}-managed` }
+            : {}),
         },
       );
     } else {
@@ -772,7 +844,7 @@ export async function runLLMAsJudgeEvaluation({
   deps: EvalExecutionDeps;
 }): Promise<EvalExecutionResult> {
   return instrumentAsync(
-    { name: "eval.execute-llm-as-judge" },
+    { name: "eval.execute-llm-as-judge", recordException: false },
     async (span) => {
       span.setAttribute("langfuse.project.id", projectId);
       span.setAttribute("eval.job_execution.id", jobExecutionId);
@@ -811,15 +883,19 @@ export async function runLLMAsJudgeEvaluation({
         });
       } catch (e) {
         span.setAttribute("eval.prompt.compilation_fallback", true);
-        logger.error(
-          `Failed to compile prompt for job ${jobExecutionId}. Eval will fail. ${e}`,
-        );
+        logger.error("Failed to compile evaluator prompt", {
+          projectId,
+          jobExecutionId,
+          errorType: e instanceof Error ? e.name : "UnknownError",
+        });
         prompt = template.prompt;
       }
 
-      logger.debug(
-        `Compiled prompt for job ${jobExecutionId}: ${prompt.slice(0, 200)}...`,
-      );
+      logger.debug("Compiled evaluator prompt", {
+        projectId,
+        jobExecutionId,
+        promptLength: prompt.length,
+      });
 
       // Parse and validate output definition
       span.setAttribute("eval.execution.stage", "validate_template");
@@ -876,11 +952,13 @@ export async function runLLMAsJudgeEvaluation({
         });
         span.setAttribute("eval.llm.block.applied", true);
 
-        logger.warn(
-          `Eval job ${jobExecutionId} will fail. ${modelConfig.error}`,
-        );
+        logger.warn("Evaluator model configuration is invalid", {
+          projectId,
+          jobExecutionId,
+          blockReason,
+        });
         throw new UnrecoverableError(
-          `Invalid model configuration for job ${jobExecutionId}: ${modelConfig.error}`,
+          `Invalid model configuration for evaluation job ${jobExecutionId}`,
         );
       }
 
@@ -905,7 +983,7 @@ export async function runLLMAsJudgeEvaluation({
       let llmOutput: unknown;
       try {
         llmOutput = await instrumentAsync(
-          { name: "eval.call-llm" },
+          { name: "eval.call-llm", recordException: false },
           async (llmSpan) => {
             llmSpan.setAttribute("langfuse.project.id", projectId);
             llmSpan.setAttribute("eval.job_execution.id", jobExecutionId);
@@ -994,19 +1072,15 @@ export async function runLLMAsJudgeEvaluation({
       if (!parsedLLMOutput.success) {
         span.setAttribute("eval.execution.outcome", "invalid_model_output");
         throw new UnrecoverableError(
-          `Invalid LLM response format from model ${modelConfig.config.model}. Error: ${parsedLLMOutput.error}`,
+          `Invalid LLM response format for evaluation job ${jobExecutionId}`,
         );
       }
 
-      logger.debug(
-        `Job ${jobExecutionId} received LLM output: ${
-          parsedLLMOutput.data.dataType === ScoreDataTypeEnum.NUMERIC
-            ? `score=${parsedLLMOutput.data.score}`
-            : parsedLLMOutput.data.dataType === ScoreDataTypeEnum.BOOLEAN
-              ? `score=${parsedLLMOutput.data.score}`
-              : `matches=${parsedLLMOutput.data.matches.join(",")}`
-        }`,
-      );
+      logger.debug("Validated evaluator model output", {
+        projectId,
+        jobExecutionId,
+        dataType: parsedLLMOutput.data.dataType,
+      });
 
       const scores = toNormalizedScores({
         outputResult: parsedLLMOutput.data,
@@ -1094,6 +1168,7 @@ export async function executeLLMAsJudgeEvaluation(
     traceId: params.job.jobInputTraceId,
     observationId: params.job.jobInputObservationId,
     environment: params.environment,
+    scoreTimestamp: params.job.createdAt,
     deps,
     result,
   });
@@ -1471,9 +1546,11 @@ export const parseDatabaseRowValue = (
     dbRow[snakeToCamel(mapping.selectedColumnId)];
 
   if (logger.isLevelEnabled("debug") && mapping.jsonSelector) {
-    logger.debug(
-      `Parsing JSON for json selector ${mapping.jsonSelector} from ${JSON.stringify(selectedColumn)}`,
-    );
+    logger.debug("Parsing evaluator variable JSON selector", {
+      jsonSelector: mapping.jsonSelector,
+      selectedColumnId: mapping.selectedColumnId,
+      valueType: selectedColumn === null ? "null" : typeof selectedColumn,
+    });
   }
 
   const { value, error } = extractValueFromObject(
@@ -1483,10 +1560,11 @@ export const parseDatabaseRowValue = (
   );
 
   if (error) {
-    logger.error(
-      `Error parsing JSON for json selector ${mapping.jsonSelector}. Falling back to original value.`,
-      error,
-    );
+    logger.error("Failed to parse evaluator variable JSON selector", {
+      jsonSelector: mapping.jsonSelector,
+      selectedColumnId: mapping.selectedColumnId,
+      errorType: error instanceof Error ? error.name : "ParseError",
+    });
   }
 
   return value;

@@ -1,4 +1,4 @@
-import { type PrismaClient } from "@prisma/client";
+import { type Prisma, type PrismaClient } from "@prisma/client";
 import {
   ForbiddenError,
   LangfuseConflictError,
@@ -69,7 +69,7 @@ export async function deleteEvalTemplateFamily({
   auditScope,
   referencingEntityName = "running evaluator",
 }: {
-  prisma: PrismaClient;
+  prisma: PrismaClient | Prisma.TransactionClient;
   projectId: string;
   evalTemplateId: string;
   // for API-key callers (public API, MCP); tRPC logs with the user session
@@ -94,7 +94,7 @@ export async function deleteEvalTemplateFamily({
 
   // Resolve versions and check references inside one transaction so the
   // reference check and the delete see a consistent snapshot.
-  const deletedVersions = await prisma.$transaction(async (tx) => {
+  const deleteVersions = async (tx: Prisma.TransactionClient) => {
     // lock first: blocks concurrent rule creation (FK takes FOR KEY SHARE on
     // the template row) from slipping in between the check and the delete
     await lockEvalTemplateFamilyVersions({
@@ -136,7 +136,11 @@ export async function deleteEvalTemplateFamily({
     });
 
     return versions;
-  });
+  };
+  const deletedVersions =
+    "$transaction" in prisma
+      ? await prisma.$transaction(deleteVersions)
+      : await deleteVersions(prisma);
 
   if (auditScope) {
     await Promise.all(

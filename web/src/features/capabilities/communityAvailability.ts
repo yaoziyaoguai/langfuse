@@ -28,48 +28,48 @@ export const COMMUNITY_CAPABILITIES: Readonly<
   evaluations: {
     error: "UnsupportedFeature",
     code: "R1B_EVALUATIONS_UNAVAILABLE",
-    message: "Evaluator execution is not available in the Doris R1A release.",
+    message: "Evaluator execution is not active for this Doris deployment.",
     recovery:
-      "Adopt the R1B evaluation capability only after its owner, usage evidence, Doris implementation, and backlog policy are approved.",
+      "Complete the evaluator bootstrap and runtime census, then activate the durable evaluations capability.",
   },
   experiments: {
     error: "UnsupportedFeature",
     code: "R1B_EXPERIMENTS_UNAVAILABLE",
     message:
-      "Experiment execution and analytics are not available in the Doris R1A release.",
+      "Experiment execution and analytics are not active for this Doris deployment.",
     recovery:
-      "Adopt the R1B experiment capability only after its owner, usage evidence, Doris implementation, and backlog policy are approved.",
+      "Complete the experiment and dataset-run ingestion bootstrap, then activate both durable capabilities.",
   },
   monitors: {
     error: "UnsupportedFeature",
     code: "R2_MONITORS_UNAVAILABLE",
-    message: "Product monitors are not available in the Doris R1A release.",
+    message: "Product monitors are not active for this Doris deployment.",
     recovery:
-      "Create a separately reviewed Doris monitor implementation before enabling this capability.",
+      "Verify the shared analytics query runtime and enable the monitor worker and routes for this deployment.",
   },
   batchExports: {
     error: "UnsupportedFeature",
     code: "R2_BATCH_EXPORTS_UNAVAILABLE",
     message:
-      "Analytics batch exports are not available in the Doris R1A release.",
+      "Analytics batch exports are not active for this Doris deployment.",
     recovery:
-      "Create a separately reviewed Doris export implementation before enabling this capability.",
+      "Complete the core or dataset-run export bootstrap and runtime census, then activate the matching durable export capability.",
   },
   analyticsIntegrations: {
     error: "UnsupportedFeature",
     code: "R2_ANALYTICS_INTEGRATIONS_UNAVAILABLE",
     message:
-      "Third-party analytics integrations are not available with the Doris backend.",
+      "Third-party analytics integrations are not active for this Doris deployment.",
     recovery:
-      "Use the ClickHouse backend until the integration event source is migrated to the analytics storage interface.",
+      "Complete the sealed bootstrap and runtime census, then activate the durable analytics integrations capability.",
   },
   customDashboards: {
     error: "UnsupportedFeature",
     code: "R2_CUSTOM_DASHBOARDS_UNAVAILABLE",
     message:
-      "Custom dashboard and widget authoring is not available in the Doris R1A release.",
+      "Custom dashboard and widget authoring is not active for this Doris deployment.",
     recovery:
-      "Use the curated Home dashboard presets, or create a separately reviewed Doris custom-dashboard implementation before enabling authoring.",
+      "Verify the shared analytics query runtime and enable the dashboard and widget routes for this deployment.",
   },
 };
 
@@ -78,8 +78,11 @@ export const isCommunityCapabilityAvailable = (
   backend: AnalyticsBackend = "doris",
 ): boolean =>
   backend === "clickhouse" ||
+  capability === "evaluations" ||
+  capability === "experiments" ||
   capability === "monitors" ||
   capability === "batchExports" ||
+  capability === "analyticsIntegrations" ||
   capability === "customDashboards";
 
 export class CommunityCapabilityUnavailableError extends Error {
@@ -114,7 +117,7 @@ export function capabilityForTrpcPath(
   }
   if (path.startsWith("experiments.")) return "experiments";
   if (
-    /^datasets\.(runById|baseRunDataByDatasetId|runsByDatasetId|runsByDatasetIdMetrics|runFilterOptions|runItemFilterOptions|runItemsByItemId|runItemsByRunId|datasetItemsWithRunData|runItemCompareCount|deleteDatasetRuns|upsertRemoteExperiment|getRemoteExperiment|triggerRemoteExperiment|deleteRemoteExperiment)$/.test(
+    /^datasets\.(runById|baseRunDataByDatasetId|runsByDatasetId|runsByDatasetIdMetrics|runFilterOptions|runItemFilterOptions|runItemsByItemId|runItemsByRunId|datasetItemsWithRunData|runItemCompareCount|countAllDatasetItems|deleteDatasetRuns|upsertRemoteExperiment|getRemoteExperiment|triggerRemoteExperiment|deleteRemoteExperiment)$/.test(
       path,
     )
   ) {
@@ -139,35 +142,90 @@ export function capabilityForTrpcPath(
   return null;
 }
 
-export function capabilityForPublicApiPath(
+type PublicApiCapabilityResolution =
+  | {
+      readonly isValidRequestUrl: false;
+      readonly capability: null;
+    }
+  | {
+      readonly isValidRequestUrl: true;
+      readonly capability: CommunityCapability | null;
+    };
+
+const CAPABILITY_PATH_ORIGIN = "http://langfuse.local";
+const ENCODED_PATH_SEPARATOR = /%(?:25)*(?:2f|5c)/i;
+
+function canonicalizePublicApiPathname(path: string): string | null {
+  // 安全边界：这里只接受 Node/Next 传给 route handler 的 origin-form URL。
+  // WHATWG URL 负责拆分 query/hash 和处理 dot segments；随后按 Next 的路径边界
+  // decode 一层并规范化分隔符。多层编码分隔符不递归解释，而是直接判为无效。
+  if (!path.startsWith("/") || /^[\\/]{2}/.test(path)) return null;
+
+  try {
+    const parsedUrl = new URL(path, CAPABILITY_PATH_ORIGIN);
+    if (parsedUrl.origin !== CAPABILITY_PATH_ORIGIN) return null;
+
+    const decodedPathname = decodeURIComponent(parsedUrl.pathname);
+    if (
+      /^[\\/]{2}/.test(decodedPathname) ||
+      ENCODED_PATH_SEPARATOR.test(decodedPathname)
+    ) {
+      return null;
+    }
+
+    const normalizedSeparators = decodedPathname
+      .replace(/\\/g, "/")
+      .replace(/\/{2,}/g, "/");
+    const canonicalUrl = new URL(normalizedSeparators, CAPABILITY_PATH_ORIGIN);
+
+    return canonicalUrl.origin === CAPABILITY_PATH_ORIGIN
+      ? canonicalUrl.pathname
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolvePublicApiCapability(
   path: string,
-): CommunityCapability | null {
-  const pathname = path.split("?", 1)[0] ?? path;
+): PublicApiCapabilityResolution {
+  const pathname = canonicalizePublicApiPathname(path);
+  if (pathname === null) {
+    return { isValidRequestUrl: false, capability: null };
+  }
+
+  let capability: CommunityCapability | null = null;
   if (
     /^\/api\/public\/(dataset-run-items|datasets\/[^/]+\/runs(?:\/|$)|experiment-items(?:\/|$)|experiments(?:\/|$))/.test(
       pathname,
     )
   ) {
-    return "experiments";
-  }
-  if (/^\/api\/public\/integrations\/blob-storage(?:\/|$)/.test(pathname)) {
-    return "analyticsIntegrations";
-  }
-  if (
+    capability = "experiments";
+  } else if (
+    /^\/api\/public\/integrations\/blob-storage(?:\/|$)/.test(pathname)
+  ) {
+    capability = "analyticsIntegrations";
+  } else if (
     /^\/api\/public\/unstable\/(evaluation-rules|evaluators)(?:\/|$)/.test(
       pathname,
     )
   ) {
-    return "evaluations";
-  }
-  if (
+    capability = "evaluations";
+  } else if (
     /^\/api\/public\/unstable\/(dashboard-widgets|dashboards)(?:\/|$)/.test(
       pathname,
     )
   ) {
-    return "customDashboards";
+    capability = "customDashboards";
   }
-  return null;
+
+  return { isValidRequestUrl: true, capability };
+}
+
+export function capabilityForPublicApiPath(
+  path: string,
+): CommunityCapability | null {
+  return resolvePublicApiCapability(path).capability;
 }
 
 export function capabilityForPagePath(
@@ -205,18 +263,32 @@ export function capabilityForPagePath(
 export function isCommunityBatchExportTableAvailable(
   tableName: string,
   backend: AnalyticsBackend,
+  datasetRunExportsActive = false,
 ): boolean {
-  return backend === "clickhouse" || tableName !== "dataset_run_items";
+  return (
+    backend === "clickhouse" ||
+    tableName !== "dataset_run_items" ||
+    datasetRunExportsActive
+  );
 }
 
 export function isCommunityPageAvailable(
   path: string,
   backend: AnalyticsBackend,
+  activeDorisCapabilities: readonly CommunityCapability[] = [],
 ): boolean {
   const capability = capabilityForPagePath(path);
-  return (
-    capability === null || isCommunityCapabilityAvailable(capability, backend)
-  );
+  if (capability === null) return true;
+  if (!isCommunityCapabilityAvailable(capability, backend)) return false;
+  if (
+    backend === "doris" &&
+    (capability === "evaluations" ||
+      capability === "experiments" ||
+      capability === "analyticsIntegrations")
+  ) {
+    return activeDorisCapabilities.includes(capability);
+  }
+  return true;
 }
 
 export function capabilityForMcpFeature(

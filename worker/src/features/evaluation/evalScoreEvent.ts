@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import { ScoreSourceEnum } from "@langfuse/shared";
 import {
   buildDeterministicEvalScoreIds,
@@ -21,6 +20,7 @@ export function buildEvalScoreWritePayloads(params: {
   environment: string;
   executionTraceId: string;
   executionMetadata: Record<string, string>;
+  timestamp?: Date;
 }): EvalScoreWritePayload[] {
   const scoreIds = buildDeterministicEvalScoreIds({
     scores: params.scores,
@@ -28,15 +28,15 @@ export function buildEvalScoreWritePayloads(params: {
   });
 
   return params.scores.map((score, index) => {
-    const eventId = randomUUID();
     const scoreId = scoreIds[index]!;
+    const eventId = scoreId;
 
     return {
       eventId,
       scoreId,
       event: {
         id: eventId,
-        timestamp: new Date().toISOString(),
+        timestamp: (params.timestamp ?? new Date()).toISOString(),
         type: eventTypes.SCORE_CREATE,
         body: {
           id: scoreId,

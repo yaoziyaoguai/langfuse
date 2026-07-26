@@ -1,5 +1,6 @@
 import {
   prisma as _prisma,
+  type Prisma,
   type Role,
   AuditLogRecordType,
 } from "@langfuse/shared/src/db";
@@ -83,7 +84,24 @@ type AuditLog = {
     }
 );
 
-export async function auditLog(log: AuditLog, prisma?: typeof _prisma) {
+type AuditLogTransaction = Pick<
+  Prisma.TransactionClient,
+  "apiKey" | "auditLog"
+>;
+
+function isPrismaClient(
+  db: typeof _prisma | Prisma.TransactionClient,
+): db is typeof _prisma {
+  return (
+    "$transaction" in db &&
+    typeof (db as { $transaction?: unknown }).$transaction === "function"
+  );
+}
+
+export async function auditLog(
+  log: AuditLog,
+  prisma?: typeof _prisma | Prisma.TransactionClient,
+) {
   const db = prisma ?? _prisma;
   const shared = {
     resourceType: log.resourceType,
@@ -94,7 +112,7 @@ export async function auditLog(log: AuditLog, prisma?: typeof _prisma) {
   };
 
   if ("apiKeyId" in log) {
-    await db.$transaction(async (tx) => {
+    const createApiKeyAudit = async (tx: AuditLogTransaction) => {
       const apiKey = await tx.apiKey.findUnique({
         where: { id: log.apiKeyId },
         select: {
@@ -116,7 +134,13 @@ export async function auditLog(log: AuditLog, prisma?: typeof _prisma) {
           ...shared,
         },
       });
-    });
+    };
+
+    if (isPrismaClient(db)) {
+      await db.$transaction(createApiKeyAudit);
+    } else {
+      await createApiKeyAudit(db);
+    }
 
     return;
   }

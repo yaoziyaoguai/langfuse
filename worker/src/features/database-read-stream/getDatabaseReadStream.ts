@@ -25,7 +25,7 @@ import {
   getTracesTable,
   getTracesTableMetrics,
   getTraceIdentifiers,
-  getDatasetRunItemsCh,
+  getDatasetRunItems,
   getTracesByIds,
   getScoresForTraces,
   getDatasetItems,
@@ -155,6 +155,8 @@ export const getDatabaseReadStreamPaginated = async ({
   searchQuery,
   searchType,
   useEventsTable,
+  exactIdentityIds,
+  exactTraceId,
   rowLimit = env.BATCH_EXPORT_ROW_LIMIT,
 }: {
   projectId: string;
@@ -162,6 +164,8 @@ export const getDatabaseReadStreamPaginated = async ({
   searchQuery?: string;
   searchType?: TracingSearchType[];
   rowLimit?: number;
+  exactIdentityIds?: readonly string[];
+  exactTraceId?: string;
 } & BatchExportQueryType): Promise<DatabaseReadStream<unknown>> => {
   // Set createdAt cutoff to prevent exporting data that was created after the job was queued
   const createdAtCutoffFilter: FilterCondition = {
@@ -188,13 +192,53 @@ export const getDatabaseReadStreamPaginated = async ({
     },
   };
 
+  const identityColumn: Partial<Record<BatchTableNames, string>> = {
+    scores: "id",
+    sessions: "id",
+    traces: "ID",
+    observations: "id",
+    events: "id",
+    dataset_items: "id",
+    dataset_run_items: "id",
+    audit_logs: "id",
+  };
+  const exportFilters = (
+    createdAtFilter: FilterCondition,
+  ): FilterCondition[] => {
+    if (exactIdentityIds) {
+      const column = identityColumn[tableName];
+      if (!column) {
+        throw new Error(
+          `Exact identity reads are unsupported for ${tableName}`,
+        );
+      }
+      return [
+        {
+          type: "stringOptions",
+          operator: "any of",
+          column,
+          value: Array.from(exactIdentityIds),
+        },
+        ...(exactTraceId
+          ? [
+              {
+                type: "string" as const,
+                operator: "=" as const,
+                column: "traceId",
+                value: exactTraceId,
+              },
+            ]
+          : []),
+      ];
+    }
+    return filter ? filter.concat(createdAtFilter) : [createdAtFilter];
+  };
+
   switch (tableName) {
     case "scores": {
       return new DatabaseReadStream<unknown>(
         async (pageSize: number, offset: number) => {
-          const scoresFilter = filter
-            ? [...filter, createdAtCutoffFilter]
-            : [createdAtCutoffFilter];
+          const scoresFilter = exportFilters(createdAtCutoffFilter);
 
           // v4-enabled users (snapshotted as useEventsTable at dispatch) read
           // scores without the legacy traces JOIN; trace metadata (name,
@@ -267,9 +311,7 @@ export const getDatabaseReadStreamPaginated = async ({
     case "sessions":
       return new DatabaseReadStream<unknown>(
         async (pageSize: number, offset: number) => {
-          const finalFilter = filter
-            ? [...filter, createdAtCutoffFilter]
-            : [createdAtCutoffFilter];
+          const finalFilter = exportFilters(createdAtCutoffFilter);
 
           const sessionsFilter = await getPublicSessionsFilter(
             projectId,
@@ -357,9 +399,7 @@ export const getDatabaseReadStreamPaginated = async ({
           const distinctScoreNames = await getDistinctScoreNames({
             projectId,
             cutoffCreatedAt,
-            filter: filter
-              ? [...filter, createdAtCutoffFilterCh]
-              : [createdAtCutoffFilterCh],
+            filter: exportFilters(createdAtCutoffFilterCh),
             isTimestampFilter: isGenerationTimestampFilter,
             clickhouseConfigs,
           });
@@ -373,9 +413,7 @@ export const getDatabaseReadStreamPaginated = async ({
             projectId,
             limit: pageSize,
             offset: offset,
-            filter: filter
-              ? [...filter, createdAtCutoffFilterCh]
-              : [createdAtCutoffFilterCh],
+            filter: exportFilters(createdAtCutoffFilterCh),
             searchQuery,
             searchType: searchType ?? ["id" as const],
             orderBy,
@@ -430,9 +468,7 @@ export const getDatabaseReadStreamPaginated = async ({
 
       return new DatabaseReadStream<unknown>(
         async (pageSize: number, offset: number) => {
-          const finalFilter = filter
-            ? [...filter, createdAtCutoffFilterCh]
-            : [createdAtCutoffFilterCh];
+          const finalFilter = exportFilters(createdAtCutoffFilterCh);
           const distinctScoreNames = await getDistinctScoreNames({
             projectId,
             cutoffCreatedAt,
@@ -490,9 +526,7 @@ export const getDatabaseReadStreamPaginated = async ({
           const distinctScoreNames = await getDistinctScoreNames({
             projectId,
             cutoffCreatedAt,
-            filter: filter
-              ? [...filter, createdAtCutoffFilter]
-              : [createdAtCutoffFilter],
+            filter: exportFilters(createdAtCutoffFilter),
             isTimestampFilter: isTraceTimestampFilter,
             clickhouseConfigs,
           });
@@ -503,9 +537,7 @@ export const getDatabaseReadStreamPaginated = async ({
 
           const traces = await getTracesTable({
             projectId,
-            filter: filter
-              ? [...filter, createdAtCutoffFilter]
-              : [createdAtCutoffFilter],
+            filter: exportFilters(createdAtCutoffFilter),
             searchQuery,
             searchType: searchType ?? ["id" as const],
             orderBy,
@@ -518,7 +550,7 @@ export const getDatabaseReadStreamPaginated = async ({
             getTracesTableMetrics({
               projectId,
               filter: [
-                ...(filter ?? []),
+                ...exportFilters(createdAtCutoffFilter),
                 {
                   type: "stringOptions",
                   operator: "any of",
@@ -609,11 +641,9 @@ export const getDatabaseReadStreamPaginated = async ({
     case "dataset_run_items": {
       return new DatabaseReadStream<unknown>(
         async (pageSize: number, offset: number) => {
-          const items = await getDatasetRunItemsCh({
+          const items = await getDatasetRunItems({
             projectId,
-            filter: filter
-              ? [...filter, createdAtCutoffFilter]
-              : [createdAtCutoffFilter],
+            filter: exportFilters(createdAtCutoffFilter),
             limit: pageSize,
             orderBy: {
               column: "createdAt",
@@ -661,9 +691,7 @@ export const getDatabaseReadStreamPaginated = async ({
         async (pageSize: number, offset: number) => {
           const items = await getDatasetItems<true, true>({
             projectId,
-            filterState: filter
-              ? [...filter, createdAtCutoffFilter]
-              : [createdAtCutoffFilter],
+            filterState: exportFilters(createdAtCutoffFilter),
             includeIO: true,
             includeDatasetName: true,
             limit: pageSize,
@@ -692,9 +720,9 @@ export const getDatabaseReadStreamPaginated = async ({
           const auditLogs = await prisma.auditLog.findMany({
             where: {
               projectId: projectId,
-              createdAt: {
-                lt: cutoffCreatedAt,
-              },
+              ...(exactIdentityIds
+                ? { id: { in: Array.from(exactIdentityIds) } }
+                : { createdAt: { lt: cutoffCreatedAt } }),
             },
             orderBy: {
               createdAt: "desc",

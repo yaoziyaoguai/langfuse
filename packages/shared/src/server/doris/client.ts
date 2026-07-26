@@ -6,9 +6,15 @@ import mysql, {
   type PoolOptions,
   type RowDataPacket,
 } from "mysql2/promise";
+import type { Connection as CoreConnection } from "mysql2";
 
 import type { DorisQueryConfig } from "./config";
 import { toDorisError } from "./errors";
+import {
+  assertAnalyticsRuntimeIoAllowed,
+  onAnalyticsRuntimeIoFenced,
+  withAnalyticsRuntimeIoAbortSignal,
+} from "../analytics-persistence/analyticsRuntimeIoFence";
 
 export interface DorisQueryExecutor {
   query<T extends object = Record<string, unknown>>(
@@ -16,6 +22,11 @@ export interface DorisQueryExecutor {
     params?: readonly unknown[],
     options?: { readonly signal?: AbortSignal },
   ): Promise<readonly T[]>;
+  streamQuery?<T extends object = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[],
+    options?: { readonly signal?: AbortSignal },
+  ): AsyncIterable<T>;
 }
 
 function poolOptions(config: DorisQueryConfig): PoolOptions {
@@ -62,15 +73,11 @@ export class DorisClient implements DorisQueryExecutor {
     options?: { readonly signal?: AbortSignal },
   ): Promise<readonly T[]> {
     try {
-      if (options?.signal) {
-        return await this.queryWithSignal<T>(sql, params, options.signal);
-      }
-      const [rows] = await this.pool.query<RowDataPacket[]>({
-        sql,
-        values: [...params],
-        timeout: this.queryTimeoutMs,
+      return await withAnalyticsRuntimeIoAbortSignal({
+        timeoutMs: this.queryTimeoutMs,
+        signal: options?.signal,
+        execute: (signal) => this.queryWithSignal<T>(sql, params, signal),
       });
-      return rows as unknown as readonly T[];
     } catch (error) {
       throw toDorisError(error);
     }
@@ -106,15 +113,122 @@ export class DorisClient implements DorisQueryExecutor {
     }
   }
 
+  async *streamQuery<T extends object = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    options?: { readonly signal?: AbortSignal },
+  ): AsyncIterable<T> {
+    assertAnalyticsRuntimeIoAllowed();
+    let connection: Awaited<ReturnType<Pool["getConnection"]>> | undefined;
+    let destroyed = false;
+    let timedOut = false;
+    const controller = new AbortController();
+    const forwardCallerAbort = () => controller.abort(options?.signal?.reason);
+    const abort = () => {
+      destroyed = true;
+      connection?.destroy();
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("Doris query timed out"));
+    }, this.queryTimeoutMs);
+    timeout.unref();
+    if (options?.signal?.aborted) forwardCallerAbort();
+    else
+      options?.signal?.addEventListener("abort", forwardCallerAbort, {
+        once: true,
+      });
+    controller.signal.addEventListener("abort", abort, { once: true });
+    const removeFenceListener = onAnalyticsRuntimeIoFenced(() => {
+      let reason: unknown;
+      try {
+        assertAnalyticsRuntimeIoAllowed();
+      } catch (error) {
+        reason = error;
+      }
+      controller.abort(reason);
+    });
+
+    try {
+      connection = await this.pool.getConnection();
+      if (controller.signal.aborted) {
+        abort();
+        throw new Error("Doris query was cancelled");
+      }
+      const core = connection.connection as unknown as CoreConnection;
+      const stream = core
+        .query({
+          sql,
+          values: [...params],
+          timeout: this.queryTimeoutMs,
+        })
+        .stream({ highWaterMark: 100 });
+      for await (const row of stream) {
+        if (controller.signal.aborted) {
+          throw new Error("Doris query was cancelled");
+        }
+        yield row as T;
+      }
+      if (timedOut) throw new Error("Doris query timed out");
+      assertAnalyticsRuntimeIoAllowed();
+    } catch (error) {
+      if (controller.signal.aborted) {
+        const reason = controller.signal.reason;
+        throw toDorisError(
+          timedOut
+            ? new Error("Doris query timed out")
+            : reason instanceof Error
+              ? reason
+              : error,
+        );
+      }
+      throw toDorisError(error);
+    } finally {
+      clearTimeout(timeout);
+      removeFenceListener();
+      controller.signal.removeEventListener("abort", abort);
+      options?.signal?.removeEventListener("abort", forwardCallerAbort);
+      if (connection && !destroyed) connection.release();
+    }
+  }
+
   async execute(sql: string, params: readonly unknown[] = []): Promise<void> {
     try {
-      await this.pool.query({
+      await withAnalyticsRuntimeIoAbortSignal({
+        timeoutMs: this.queryTimeoutMs,
+        execute: (signal) => this.executeWithSignal(sql, params, signal),
+      });
+    } catch (error) {
+      throw toDorisError(error);
+    }
+  }
+
+  private async executeWithSignal(
+    sql: string,
+    params: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let destroyed = false;
+    const abort = () => {
+      destroyed = true;
+      connection.destroy();
+    };
+
+    try {
+      if (signal.aborted) {
+        abort();
+        throw new Error("Doris query was cancelled");
+      }
+      signal.addEventListener("abort", abort, { once: true });
+      await connection.query({
         sql,
         values: [...params],
         timeout: this.queryTimeoutMs,
       });
-    } catch (error) {
-      throw toDorisError(error);
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (!destroyed) connection.release();
     }
   }
 
@@ -141,6 +255,7 @@ export class DorisClientManager {
   }
 
   getClient(config: DorisQueryConfig): DorisClient {
+    assertAnalyticsRuntimeIoAllowed();
     const key = createHash("sha256")
       .update(
         JSON.stringify({

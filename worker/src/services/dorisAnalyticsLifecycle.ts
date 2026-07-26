@@ -8,6 +8,7 @@ import {
   getDorisQueryExecutor,
   parseDorisStreamLoadConfig,
   resolveDorisNodeEnv,
+  toDatasetRunItemIdentity,
   toEventIdentity,
   toFileReferenceIdentity,
   toScoreIdentity,
@@ -25,9 +26,10 @@ function optionalString(value: number | string | undefined) {
   return value === undefined ? undefined : String(value);
 }
 
-function lifecycleTransport(): LifecycleTransport {
+export function createDorisLifecycleTransport(): LifecycleTransport {
   const config = parseDorisStreamLoadConfig(
     {
+      DORIS_LOCAL_DEV_MODE: env.DORIS_LOCAL_DEV_MODE,
       DORIS_QUERY_USER: env.DORIS_QUERY_USER,
       DORIS_STREAM_LOAD_FE_URL: env.DORIS_STREAM_LOAD_FE_URL,
       DORIS_STREAM_LOAD_USER: env.DORIS_STREAM_LOAD_USER,
@@ -36,6 +38,10 @@ function lifecycleTransport(): LifecycleTransport {
       DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: env.DORIS_STREAM_LOAD_FE_IP_ALLOWLIST,
       DORIS_STREAM_LOAD_BE_ALLOWLIST: env.DORIS_STREAM_LOAD_BE_ALLOWLIST,
       DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: env.DORIS_STREAM_LOAD_BE_IP_ALLOWLIST,
+      DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+        env.DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP,
+      DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST:
+        env.DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST,
       DORIS_STREAM_LOAD_TLS_CA_PATH: env.DORIS_STREAM_LOAD_TLS_CA_PATH,
       DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: optionalString(
         env.DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS,
@@ -122,6 +128,28 @@ function batches(heads: readonly AnalyticsEntityHead[]): DeleteBatch[] {
         rows: [],
       },
     ],
+    [
+      "dataset_run_items_current",
+      {
+        columns: [
+          "project_id",
+          "run_item_date",
+          "run_item_id",
+          "version_token",
+          "dataset_run_id",
+          "dataset_item_id",
+          "dataset_id",
+          "trace_id",
+          "created_at",
+          "updated_at",
+          "dataset_run_name",
+          "dataset_run_created_at",
+          "dataset_deletion_generation",
+          "run_deletion_generation",
+        ],
+        rows: [],
+      },
+    ],
   ]);
 
   const orderedHeads = [...heads].sort((left, right) => {
@@ -172,7 +200,7 @@ function batches(heads: readonly AnalyticsEntityHead[]): DeleteBatch[] {
         created_at: `${date(head.partitionDate)} 00:00:00.000000`,
         updated_at: `${date(head.partitionDate)} 00:00:00.000000`,
       });
-    } else {
+    } else if (head.entityType === "FILE_REFERENCE") {
       const identity = toFileReferenceIdentity(head.entityKey);
       if (identity.projectId !== head.projectId) {
         throw new Error("Analytics entity head project mismatch");
@@ -186,6 +214,34 @@ function batches(heads: readonly AnalyticsEntityHead[]): DeleteBatch[] {
         version_token: TERMINAL_VERSION,
         created_at: `${date(head.partitionDate)} 00:00:00.000000`,
         updated_at: `${date(head.partitionDate)} 00:00:00.000000`,
+      });
+    } else if (head.entityType === "DATASET_RUN_ITEM") {
+      const identity = toDatasetRunItemIdentity(head.entityKey);
+      if (identity.projectId !== head.projectId) {
+        throw new Error("Analytics entity head project mismatch");
+      }
+      if (
+        !head.owningDatasetId ||
+        !head.owningDatasetRunId ||
+        !head.owningTraceId
+      ) {
+        throw new Error("Dataset-run-item entity head ownership is incomplete");
+      }
+      rows.get("dataset_run_items_current")!.rows.push({
+        project_id: identity.projectId,
+        run_item_date: date(head.partitionDate),
+        run_item_id: identity.runItemId,
+        version_token: TERMINAL_VERSION,
+        dataset_run_id: head.owningDatasetRunId,
+        dataset_item_id: "__deleted__",
+        dataset_id: head.owningDatasetId,
+        trace_id: head.owningTraceId,
+        created_at: `${date(head.partitionDate)} 00:00:00.000000`,
+        updated_at: `${date(head.partitionDate)} 00:00:00.000000`,
+        dataset_run_name: "__deleted__",
+        dataset_run_created_at: `${date(head.partitionDate)} 00:00:00.000000`,
+        dataset_deletion_generation: head.datasetDeletionGeneration.toString(),
+        run_deletion_generation: head.runDeletionGeneration.toString(),
       });
     }
   }
@@ -262,7 +318,7 @@ let runtime: DorisAnalyticsLifecycleRuntime | undefined;
 
 export function getDorisAnalyticsLifecycleRuntime(): DorisAnalyticsLifecycleRuntime {
   if (runtime) return runtime;
-  const streamLoad = lifecycleTransport();
+  const streamLoad = createDorisLifecycleTransport();
   const executor = getDorisQueryExecutor();
   runtime = {
     store: new DorisAnalyticsLifecycleStore({

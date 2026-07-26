@@ -20,7 +20,6 @@ import {
   BaseError,
   UnauthorizedError,
   ForbiddenError,
-  NotImplementedError,
 } from "@langfuse/shared";
 import { processEventBatch } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
@@ -28,6 +27,8 @@ import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import * as opentelemetry from "@opentelemetry/api";
 import { env } from "@/src/env.mjs";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
+import { isInternalDorisCapabilityActive } from "@/src/server/communityCapabilityRuntime";
 
 export const config = {
   api: {
@@ -79,12 +80,6 @@ export default async function handler(
     });
 
     if (req.method !== "POST") throw new MethodNotAllowedError();
-    if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
-      throw new NotImplementedError(
-        "The legacy ingestion endpoint is unavailable with the Doris analytics backend. Use the OTLP/v4 ingestion endpoint.",
-      );
-    }
-
     // CHECK AUTH FOR ALL EVENTS
     const authCheck = await new ApiAuthService(
       prisma,
@@ -165,12 +160,18 @@ export default async function handler(
           parsedSchema.data.batch,
           env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "events_only",
         );
+        const enableDorisDatasetRunIngestion =
+          env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+            ? await isInternalDorisCapabilityActive("datasetRunIngestion")
+            : false;
 
         const result = await processEventBatch(batchForProcessing, authCheck, {
           attribution: createIngestionAttribution({
             headers: req.headers,
             authCheck,
           }),
+          analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
+          enableDorisDatasetRunIngestion,
         });
         if (rejectedErrors.length > 0) {
           result.errors = [...result.errors, ...rejectedErrors];

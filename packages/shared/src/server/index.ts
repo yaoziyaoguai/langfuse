@@ -64,6 +64,8 @@ export * from "./utils/billingCycleHelpers";
 export * from "./utils/compareVersions";
 export * from "./otel/utils";
 export * from "./clickhouse/client";
+export * from "./clickhouse/emptiness";
+export * from "./clickhouse/testDatabase";
 export * from "./doris";
 export {
   getClickHouseCompatibilitySettings,
@@ -75,10 +77,18 @@ export * from "./clickhouse/queryTracking";
 export * from "./clickhouse/queryTags";
 export * from "./repositories/definitions";
 export * from "./repositories/analyticsIngestionOperations";
+export * from "./repositories/analyticsDeletionOperations";
 export * from "./repositories/analyticsLoadBatches";
+export * from "./repositories/analyticsDatasetDeletionOperations";
 export * from "./repositories/analyticsRetention";
 export * from "./repositories/analyticsCheckpoints";
 export * from "./repositories/analyticsBackgroundMigrationRetirement";
+export * from "./repositories/analyticsBackendDeployment";
+export * from "./repositories/analyticsRuntimeLeases";
+export * from "./repositories/analyticsCapabilityActivations";
+export * from "./repositories/analyticsEvaluationCapability";
+export * from "./repositories/analyticsEvaluationDispatches";
+export * from "./repositories/analyticsIntegrationDeliveries";
 export * from "./repositories/telemetry/doris";
 export * from "../utils/IORepresentation/chatML/types";
 export * from "../server/ingestion/types";
@@ -91,6 +101,7 @@ export * from "../server/queries/public-api-filter-builder";
 export * from "../server/queries/logical/searchPlan";
 export * from "../server/pricing-tiers";
 export * from "./redis/redis";
+export * from "./redis/analyticsQueueNamespace";
 export * from "./redis/traceUpsert";
 export * from "./redis/createEvalQueue";
 export * from "./redis/cloudUsageMeteringQueue";
@@ -109,6 +120,7 @@ export * from "./redis/batchExport";
 export * from "./redis/batchActionQueue";
 export * from "./redis/ingestionQueue";
 export * from "./redis/analyticsIngestionQueue";
+export * from "./redis/analyticsEvaluationDispatch";
 export * from "./redis/postHogIntegrationQueue";
 export * from "./redis/postHogIntegrationProcessingQueue";
 export * from "./redis/mixpanelIntegrationQueue";
@@ -184,6 +196,8 @@ export * from "./utils/formatAuthProvider";
 export * from "./traceDeletionProcessor";
 export * from "./deletionGuard";
 export * from "./analytics-integrations/types";
+export * from "./analytics-integrations/dorisExportSource";
+export * from "./analytics-integrations/dorisBlobExportSource";
 
 // Re-annotate these deprecated routing wrappers at the public server barrel.
 // They are otherwise exposed through multiple `export *` hops, where consumers

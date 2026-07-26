@@ -1,4 +1,5 @@
 import {
+  encodeDatasetRunItemIdentity,
   encodeEventIdentity,
   encodeScoreIdentity,
 } from "@langfuse/shared/src/server";
@@ -48,6 +49,18 @@ describe("analytics ingestion status response", () => {
           loadBatchId: "load-pending",
           reasonCode: null,
         },
+        {
+          candidateKey: "candidate-run-item",
+          entityType: "DATASET_RUN_ITEM" as const,
+          entityKey: encodeDatasetRunItemIdentity({
+            projectId,
+            runItemId: "run-item-visible",
+          }),
+          owningTraceId: "trace-visible",
+          disposition: "LOAD_REQUIRED" as const,
+          loadBatchId: "load-run-item",
+          reasonCode: null,
+        },
       ],
       loads: [
         {
@@ -68,6 +81,15 @@ describe("analytics ingestion status response", () => {
           lastErrorCode: null,
           visibleAt: null,
         },
+        {
+          id: "load-run-item",
+          targetTable: "dataset_run_items",
+          status: "VISIBLE" as const,
+          totalRows: 1,
+          filteredRows: 0,
+          lastErrorCode: null,
+          visibleAt: new Date("2026-07-18T13:00:01.000Z"),
+        },
       ],
     };
 
@@ -80,6 +102,10 @@ describe("analytics ingestion status response", () => {
       "/project/project-status/traces/trace-visible?observation=span-visible",
     );
     expect(response.candidates[1]?.entityLink).toBeNull();
+    expect(response.candidates[2]).toMatchObject({
+      entityType: "DATASET_RUN_ITEM",
+      entityLink: null,
+    });
     expect(JSON.stringify(response)).not.toContain(
       operation.candidates[0]!.entityKey,
     );

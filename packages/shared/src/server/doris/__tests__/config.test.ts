@@ -4,10 +4,19 @@ import {
   parseDorisQueryConfig,
   parseDorisStreamLoadConfig,
   redactDorisErrorMessage,
+  resolveDorisNodeEnv,
 } from "../config";
 import { toDorisError } from "../errors";
 
 describe("Doris runtime configuration", () => {
+  it("never allows local development mode to weaken production policy", () => {
+    expect(() => resolveDorisNodeEnv("production", "true")).toThrow(
+      /local development mode.*production/i,
+    );
+    expect(resolveDorisNodeEnv("development", "true")).toBe("development");
+    expect(resolveDorisNodeEnv("test", "true")).toBe("development");
+  });
+
   it("accepts explicit local query settings in development", () => {
     expect(
       parseDorisQueryConfig(
@@ -113,6 +122,151 @@ describe("Doris runtime configuration", () => {
       allowedFeAddresses: ["10.0.0.10"],
       tlsCaPath: "/run/secrets/doris-ca.pem",
     });
+  });
+
+  it("parses an exact local-dev redirect origin rewrite with independent IP pins", () => {
+    expect(
+      parseDorisStreamLoadConfig(
+        {
+          DORIS_LOCAL_DEV_MODE: "true",
+          DORIS_STREAM_LOAD_FE_URL: "http://127.0.0.1:8031",
+          DORIS_STREAM_LOAD_USER: "root",
+          DORIS_STREAM_LOAD_PASSWORD: "",
+          DORIS_STREAM_LOAD_BE_ALLOWLIST: "http://172.29.0.3:8040",
+          DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: "127.0.0.1",
+          DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: "172.29.0.3",
+          DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+            '{"http://172.29.0.3:8040":"http://127.0.0.1:8041"}',
+          DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: "127.0.0.1",
+        },
+        "development",
+      ),
+    ).toMatchObject({
+      redirectOriginRewriteMap: {
+        "http://172.29.0.3:8040": "http://127.0.0.1:8041",
+      },
+      allowedRewriteAddresses: ["127.0.0.1"],
+    });
+  });
+
+  it("rejects redirect origin rewrites outside explicit local development mode", () => {
+    const input = {
+      DORIS_STREAM_LOAD_FE_URL: "http://127.0.0.1:8031",
+      DORIS_STREAM_LOAD_USER: "root",
+      DORIS_STREAM_LOAD_PASSWORD: "",
+      DORIS_STREAM_LOAD_BE_ALLOWLIST: "http://172.29.0.3:8040",
+      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: "172.29.0.3",
+      DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+        '{"http://172.29.0.3:8040":"http://127.0.0.1:8041"}',
+      DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: "127.0.0.1",
+    };
+
+    expect(() => parseDorisStreamLoadConfig(input, "development")).toThrow(
+      /local development mode/i,
+    );
+    expect(() =>
+      parseDorisStreamLoadConfig(
+        { ...input, DORIS_LOCAL_DEV_MODE: "true" },
+        "production",
+      ),
+    ).toThrow(/production/i);
+  });
+
+  it.each([
+    [
+      "userinfo",
+      '{"http://user:secret@172.29.0.3:8040":"http://127.0.0.1:8041"}',
+    ],
+    ["path", '{"http://172.29.0.3:8040/private":"http://127.0.0.1:8041"}'],
+    ["query", '{"http://172.29.0.3:8040?private=1":"http://127.0.0.1:8041"}'],
+    ["hash", '{"http://172.29.0.3:8040#private":"http://127.0.0.1:8041"}'],
+    ["wildcard", '{"http://*.internal:8040":"http://127.0.0.1:8041"}'],
+    [
+      "TLS downgrade",
+      '{"https://doris-be.internal:8040":"http://127.0.0.1:8041"}',
+    ],
+    [
+      "target userinfo",
+      '{"http://172.29.0.3:8040":"http://user:secret@127.0.0.1:8041"}',
+    ],
+    [
+      "target path",
+      '{"http://172.29.0.3:8040":"http://127.0.0.1:8041/private"}',
+    ],
+    [
+      "target query",
+      '{"http://172.29.0.3:8040":"http://127.0.0.1:8041?private=1"}',
+    ],
+    [
+      "target hash",
+      '{"http://172.29.0.3:8040":"http://127.0.0.1:8041#private"}',
+    ],
+    ["target wildcard", '{"http://172.29.0.3:8040":"http://*.internal:8041"}'],
+  ])("rejects %s in a redirect origin rewrite", (_name, rewriteMap) => {
+    expect(() =>
+      parseDorisStreamLoadConfig(
+        {
+          DORIS_LOCAL_DEV_MODE: "true",
+          DORIS_STREAM_LOAD_FE_URL: "http://127.0.0.1:8031",
+          DORIS_STREAM_LOAD_USER: "root",
+          DORIS_STREAM_LOAD_PASSWORD: "",
+          DORIS_STREAM_LOAD_BE_ALLOWLIST:
+            "http://172.29.0.3:8040,https://doris-be.internal:8040",
+          DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: "172.29.0.3",
+          DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP: rewriteMap,
+          DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: "127.0.0.1",
+        },
+        "development",
+      ),
+    ).toThrow();
+  });
+
+  it("rejects rewrite chains and incomplete independent pinning", () => {
+    const base = {
+      DORIS_LOCAL_DEV_MODE: "true",
+      DORIS_STREAM_LOAD_FE_URL: "http://127.0.0.1:8031",
+      DORIS_STREAM_LOAD_USER: "root",
+      DORIS_STREAM_LOAD_PASSWORD: "",
+      DORIS_STREAM_LOAD_BE_ALLOWLIST:
+        "http://172.29.0.3:8040,http://127.0.0.1:8041",
+      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: "172.29.0.3",
+      DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: "127.0.0.1",
+    };
+
+    expect(() =>
+      parseDorisStreamLoadConfig(
+        {
+          ...base,
+          DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+            '{"http://172.29.0.3:8040":"http://127.0.0.1:8041","http://127.0.0.1:8041":"http://127.0.0.1:8042"}',
+        },
+        "development",
+      ),
+    ).toThrow(/chain/i);
+
+    expect(() =>
+      parseDorisStreamLoadConfig(
+        {
+          ...base,
+          DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: "",
+          DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+            '{"http://172.29.0.3:8040":"http://127.0.0.1:8041"}',
+        },
+        "development",
+      ),
+    ).toThrow(/BE IP allowlist/i);
+
+    expect(() =>
+      parseDorisStreamLoadConfig(
+        {
+          ...base,
+          DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: "",
+          DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+            '{"http://172.29.0.3:8040":"http://127.0.0.1:8041"}',
+        },
+        "development",
+      ),
+    ).toThrow(/rewrite.*IP allowlist/i);
   });
 
   it("rejects Stream Load credentials reused by the query role", () => {

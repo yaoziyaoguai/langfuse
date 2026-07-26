@@ -13,13 +13,26 @@ import {
 import { processObservationEval } from "../features/evaluation/observationEval";
 import { createW3CTraceId } from "../features/utils";
 import { isUnrecoverableError } from "../errors/UnrecoverableError";
+import { resolveAnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { env } from "../env";
+import { assertEvaluationExecutionAdmission } from "../features/evaluation/evaluationExecutionAdmission";
 
 export const codeEvalExecutionQueueProcessorBuilder = (
   _queueName: string,
 ): Processor => {
   return async (job: Job<TQueueJobTypes[QueueName.CodeEvalExecution]>) => {
     try {
-      logger.debug("Executing Code Evaluation Observation Job", job.data);
+      await assertEvaluationExecutionAdmission({
+        backend: resolveAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND),
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        analyticsEvaluationDispatch:
+          job.data.payload.analyticsEvaluationDispatch,
+      });
+      logger.debug("Executing Code Evaluation Observation Job", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+      });
 
       const span = getCurrentSpan();
 
@@ -69,19 +82,29 @@ export const codeEvalExecutionQueueProcessorBuilder = (
 
       if (isTerminalError) return;
 
-      traceException(e);
-      logger.error(
-        `Failed code eval execution job for id ${job.data.payload.jobExecutionId}`,
-        e,
-      );
+      const visibleError =
+        e instanceof CodeEvalExecutionError
+          ? {
+              code: e.code,
+              message: e.message,
+              retryable: e.retryable,
+            }
+          : getCodeEvalUserVisibleError(e);
+      const safeError = new CodeEvalExecutionError(visibleError);
+      traceException(safeError, undefined, visibleError.code);
+      logger.error("Failed code eval execution job", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        errorCode: visibleError.code,
+        retryable: visibleError.retryable,
+      });
 
-      throw e;
+      throw safeError;
     }
   };
 };
 
 function getJobExecutionErrorMessage(e: unknown): string {
-  if (isUnrecoverableError(e)) return e.message;
   if (e instanceof CodeEvalExecutionError) return e.message;
 
   return getCodeEvalUserVisibleError(e).message;

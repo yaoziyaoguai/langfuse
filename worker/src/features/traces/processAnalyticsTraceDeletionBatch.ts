@@ -1,8 +1,4 @@
-import {
-  scheduleTraceDeletionOperations,
-  type AnalyticsDeletionRequester,
-} from "@langfuse/shared/src/server";
-import { prisma } from "@langfuse/shared/src/db";
+import type { SerializedAnalyticsDurableProvenance } from "@langfuse/shared/src/server";
 
 import {
   processAnalyticsTraceDelete,
@@ -13,16 +9,12 @@ type SerializedTraceDeletionReference = {
   readonly operationId: string;
   readonly traceId: string;
   readonly generation: string;
-};
-
-const SYSTEM_REQUESTER: AnalyticsDeletionRequester = {
-  principalType: "system",
-  principalId: "analytics-trace-deletion-worker",
+  readonly analyticsProvenance?: SerializedAnalyticsDurableProvenance;
 };
 
 /**
- * Resolves rolling-deployment jobs that predate deletion-operation payloads,
- * then processes each fenced operation with bounded concurrency.
+ * Processes only authoritative deletion references. Legacy unstamped jobs stay
+ * on the ClickHouse compatibility path and are never upgraded by a consumer.
  */
 export async function processAnalyticsTraceDeletionBatch(input: {
   readonly projectId: string;
@@ -41,28 +33,13 @@ export async function processAnalyticsTraceDeletionBatch(input: {
       operationId: reference.operationId,
       traceId: reference.traceId,
       generation: BigInt(reference.generation),
+      analyticsProvenance: reference.analyticsProvenance,
     });
   }
 
   const missingTraceIds = traceIds.filter((traceId) => !provided.has(traceId));
   if (missingTraceIds.length > 0) {
-    const project = await prisma.project.findFirstOrThrow({
-      where: { id: input.projectId, deletedAt: null },
-      select: { orgId: true },
-    });
-    const scheduled = await scheduleTraceDeletionOperations({
-      projectId: input.projectId,
-      organizationId: project.orgId,
-      traceIds: missingTraceIds,
-      requester: SYSTEM_REQUESTER,
-    });
-    for (const item of scheduled) {
-      provided.set(item.traceId, {
-        operationId: item.operation.id,
-        traceId: item.traceId,
-        generation: item.generation,
-      });
-    }
+    throw new Error("Managed trace deletion queue references are missing");
   }
 
   for (const traceId of traceIds) {

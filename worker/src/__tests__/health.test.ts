@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   checkAnalyticsReadiness: vi.fn(),
   ping: vi.fn().mockResolvedValue("PONG"),
   queryRaw: vi.fn().mockResolvedValue([{ one: 1 }]),
+  runtimeReady: vi.fn().mockResolvedValue(true),
+  runtimeFenced: false,
 }));
 
 vi.mock("../env", () => ({
@@ -38,6 +40,10 @@ vi.mock("../features/eventPropagation/handleEventPropagationJob", () => ({
   getLastProcessedPartition: vi.fn().mockResolvedValue(null),
   getLastRunStartedAt: vi.fn().mockResolvedValue(null),
 }));
+vi.mock("../analyticsRuntime", () => ({
+  checkWorkerAnalyticsRuntimeReadiness: mocks.runtimeReady,
+  isWorkerAnalyticsRuntimeFenced: () => mocks.runtimeFenced,
+}));
 
 import { checkContainerHealth } from "../features/health";
 
@@ -55,6 +61,8 @@ describe("worker Doris readiness", () => {
   beforeEach(() => {
     mocks.analyticsBackend = "doris";
     mocks.checkAnalyticsReadiness.mockReset();
+    mocks.runtimeReady.mockReset().mockResolvedValue(true);
+    mocks.runtimeFenced = false;
   });
 
   it("keeps liveness independent from Doris", async () => {
@@ -64,6 +72,21 @@ describe("worker Doris readiness", () => {
 
     expect(res.json).toHaveBeenCalledWith({ status: "ok" });
     expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
+    expect(mocks.runtimeReady).not.toHaveBeenCalled();
+  });
+
+  it("fails liveness after the runtime lease is fenced", async () => {
+    mocks.runtimeFenced = true;
+    const res = response();
+
+    await checkContainerHealth(res as never, { failOnSigterm: false });
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "Analytics runtime lease fenced",
+    });
+    expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
+    expect(mocks.runtimeReady).not.toHaveBeenCalled();
   });
 
   it("fails readiness with a sanitized schema status", async () => {
@@ -82,5 +105,19 @@ describe("worker Doris readiness", () => {
       analytics: "SCHEMA_MISMATCH",
       schemaVersion: 1,
     });
+  });
+
+  it("fails readiness for either backend when the runtime lease is not ready", async () => {
+    mocks.analyticsBackend = "clickhouse";
+    mocks.runtimeReady.mockResolvedValue(false);
+    const res = response();
+
+    await checkContainerHealth(res as never, { failOnSigterm: true });
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "Analytics runtime readiness check failed",
+    });
+    expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
   });
 });

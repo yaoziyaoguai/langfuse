@@ -47,6 +47,7 @@ export type SpanCtx = {
   traceScope?: string;
   traceContext?: TCarrier;
   startNewTrace?: boolean; // Start a new trace, severing any parent trace relationships
+  recordException?: boolean; // Disable only when the caller records an allowlisted error classification.
 };
 
 type AsyncCallbackFn<T> = (span: opentelemetry.Span) => Promise<T>;
@@ -91,7 +92,9 @@ export async function instrumentAsync<T>(
         span.end();
         return result;
       } catch (ex) {
-        traceException(ex as opentelemetry.Exception, span);
+        if (ctx.recordException !== false) {
+          traceException(ex as opentelemetry.Exception, span);
+        }
         span.end();
         throw ex;
       }
@@ -141,7 +144,9 @@ export function instrumentSync<T>(
         span.end();
         return result;
       } catch (ex) {
-        traceException(ex as opentelemetry.Exception, span);
+        if (ctx.recordException !== false) {
+          traceException(ex as opentelemetry.Exception, span);
+        }
         span.end();
         throw ex;
       }

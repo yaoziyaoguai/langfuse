@@ -29,6 +29,7 @@ import {
 import Decimal from "decimal.js";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { legacyPublicApiRateLimitUpgradePaths } from "@/src/features/public-api/server/rateLimitUpgradePaths";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export default withMiddlewares(
   {
@@ -223,6 +224,7 @@ export default withMiddlewares(
           [traceId],
           {
             organizationId: auth.scope.orgId,
+            analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
             requester: {
               principalType: "api_key",
               principalId: auth.scope.apiKeyId,

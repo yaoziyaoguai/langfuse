@@ -240,6 +240,204 @@ describe("Doris traces repository", () => {
     );
   });
 
+  it("loads multiple exact trace details with one locator lookup and one Doris query", async () => {
+    const locateTraces = vi.fn().mockResolvedValue([
+      {
+        partitionDate: "2026-03-15",
+        traceId: "trace-new",
+        observationId: "new-span",
+      },
+      {
+        partitionDate: "2026-01-01",
+        traceId: "trace-old",
+        observationId: "old-span",
+      },
+    ]);
+    const query = vi.fn().mockResolvedValue([
+      {
+        project_id: "project-1",
+        trace_id: "trace-new",
+        trace_timestamp: "2026-03-15 10:00:00.000000",
+        trace_end_time: "2026-03-15 10:00:01.000000",
+        representative_span_id: "new-span",
+        representative_is_root: 1,
+        name: "new",
+        environment: "production",
+        user_id: null,
+        session_id: null,
+        release: null,
+        version: null,
+        tags: "[]",
+        input_preview: null,
+        output_preview: null,
+        input: '{"kind":"new"}',
+        output: null,
+        metadata: "{}",
+        observation_count: "1",
+        total_input_tokens: "1",
+        total_output_tokens: "0",
+        total_cost: "0.01",
+      },
+      {
+        project_id: "project-1",
+        trace_id: "trace-old",
+        trace_timestamp: "2026-01-01 10:00:00.000000",
+        trace_end_time: "2026-01-01 10:00:01.000000",
+        representative_span_id: "old-span",
+        representative_is_root: 1,
+        name: "old",
+        environment: "production",
+        user_id: null,
+        session_id: null,
+        release: null,
+        version: null,
+        tags: "[]",
+        input_preview: null,
+        output_preview: null,
+        input: '{"kind":"old"}',
+        output: null,
+        metadata: "{}",
+        observation_count: "1",
+        total_input_tokens: "1",
+        total_output_tokens: "0",
+        total_cost: "0.01",
+      },
+    ]);
+    const repository = new DorisTracesRepository({ query, locateTraces });
+
+    await expect(
+      repository.getMany({
+        projectId: "project-1",
+        traceIds: ["trace-old", "trace-new", "missing"],
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "trace-new", input: { kind: "new" } }),
+      expect.objectContaining({ id: "trace-old", input: { kind: "old" } }),
+    ]);
+    expect(locateTraces).toHaveBeenCalledOnce();
+    expect(locateTraces).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceIds: ["trace-old", "trace-new", "missing"],
+    });
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]?.[0]).toContain("e.partition_date IN (?, ?)");
+    expect(query.mock.calls[0]?.[0]).toContain("e.input");
+    expect(query.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        "2026-01-01",
+        "2026-03-15",
+        "trace-old",
+        "trace-new",
+      ]),
+    );
+  });
+
+  it("chunks large exact-ID reads without falling back to per-trace queries", async () => {
+    const traceIds = Array.from(
+      { length: 1_000 },
+      (_, index) => `trace-${index}`,
+    );
+    const locateTraces = vi.fn().mockResolvedValue(
+      traceIds.map((traceId) => ({
+        partitionDate: "2026-07-17",
+        traceId,
+        observationId: `${traceId}-span`,
+      })),
+    );
+    const query = vi.fn().mockResolvedValue([]);
+    const repository = new DorisTracesRepository({ query, locateTraces });
+
+    await expect(
+      repository.getMany({ projectId: "project-1", traceIds }),
+    ).resolves.toEqual([]);
+
+    expect(locateTraces).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it("aggregates dynamic usage, cost, latency, and levels for matching traces", async () => {
+    const locateTraces = vi.fn().mockResolvedValue([
+      {
+        partitionDate: "2026-07-17",
+        traceId: "trace-1",
+        observationId: "span-1",
+      },
+      {
+        partitionDate: "2026-07-18",
+        traceId: "trace-1",
+        observationId: "span-2",
+      },
+    ]);
+    const query = vi.fn().mockResolvedValue([
+      {
+        project_id: "project-1",
+        trace_id: "trace-1",
+        trace_timestamp: "2026-07-17 10:00:00.000000",
+        latency_milliseconds: "2500",
+        observation_count: "2",
+        usage_details:
+          '{"input":3,"input_cached":2,"total":10,"output":4,"custom":1}',
+        cost_details: '{"input":0.1,"total":0.3,"output":0.2}',
+        aggregated_level: "ERROR",
+        error_count: "1",
+        warning_count: "0",
+        default_count: "1",
+        debug_count: "0",
+      },
+    ]);
+    const repository = new DorisTracesRepository({ query, locateTraces });
+
+    await expect(
+      repository.metrics({
+        projectId: "project-1",
+        range,
+        filters: [
+          {
+            type: "stringOptions",
+            column: "traceId",
+            operator: "any of",
+            value: ["trace-1"],
+          },
+        ],
+        orderBy: { column: "timestamp", order: "DESC" },
+        limit: 50,
+      }),
+    ).resolves.toEqual([
+      {
+        id: "trace-1",
+        projectId: "project-1",
+        timestamp: new Date("2026-07-17T10:00:00.000Z"),
+        latency: 2.5,
+        observationCount: 2,
+        usageDetails: {
+          input: 3,
+          input_cached: 2,
+          total: 10,
+          output: 4,
+          custom: 1,
+        },
+        costDetails: { input: 0.1, total: 0.3, output: 0.2 },
+        level: "ERROR",
+        errorCount: 1,
+        warningCount: 0,
+        defaultCount: 1,
+        debugCount: 0,
+      },
+    ]);
+    const sql = query.mock.calls[0]?.[0] as string;
+    expect(locateTraces).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceIds: ["trace-1"],
+    });
+    expect(sql).toContain("e.partition_date IN (?, ?)");
+    expect(sql).toContain("MAP_AGG(usage_key, usage_value)");
+    expect(sql).toContain("MAP_AGG(cost_key, cost_value)");
+    expect(sql).toContain("DECIMAL(38, 18)");
+    expect(sql).toContain("COALESCE(e.usage_details_json");
+    expect(sql).toContain("SUM(CASE WHEN e.level = 'ERROR'");
+    expect(sql).toContain("ORDER BY e.trace_timestamp DESC, e.trace_id DESC");
+  });
+
   it("counts distinct matching traces through the bounded visibility scope", async () => {
     const query = vi.fn().mockResolvedValue([{ count: "4" }]);
     const repository = new DorisTracesRepository({ query });
@@ -252,6 +450,49 @@ describe("Doris traces repository", () => {
     );
     expect(query.mock.calls[0]?.[0]).toContain(
       "project_deletion.project_id IS NULL",
+    );
+  });
+
+  it("streams historical evaluation targets with matched filters and canonical trace timestamps", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        trace_id: "trace-1",
+        trace_timestamp: "2026-01-01 00:00:00.000000",
+        environment: "production",
+      },
+    ]);
+    const repository = new DorisTracesRepository({ query });
+
+    const targets = [];
+    for await (const target of repository.scanEvaluationTargets({
+      projectId: "project-1",
+      range: {
+        from: new Date("2026-01-01T00:00:00.000Z"),
+        to: new Date("2026-07-18T00:00:00.000Z"),
+      },
+      filters: [],
+      search: { query: "needle", searchType: ["content"] },
+      limit: 500,
+    })) {
+      targets.push(target);
+    }
+
+    expect(targets).toEqual([
+      {
+        id: "trace-1",
+        timestamp: new Date("2026-01-01T00:00:00.000Z"),
+        environment: "production",
+      },
+    ]);
+    const sql = query.mock.calls[0]?.[0] as string;
+    expect(sql).toContain("WITH matched_trace_ids AS");
+    expect(sql).toContain(
+      "INNER JOIN matched_trace_ids matched ON matched.trace_id = e.trace_id",
+    );
+    expect(sql).toContain("MIN(e.start_time) AS trace_timestamp");
+    expect(sql).toContain("ORDER BY e.trace_id ASC");
+    expect(query.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(["project-1", "%needle%", 500]),
     );
   });
 

@@ -29,6 +29,11 @@ import {
   contentSearchFixtures,
   type CurrentStateFixture,
 } from "./fixtures/analyticsCompatibilityCorpus";
+import {
+  parseDorisTestNamespace,
+  resetOwnedDorisTestDatabase,
+  truncateOwnedDorisTestTables,
+} from "../testDatabase";
 
 // The package compiles to CommonJS, so __dirname is available directly.
 const SCHEMA_PATH = path.resolve(
@@ -39,7 +44,8 @@ const SCHEMA_PATH = path.resolve(
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
 const FE_HTTP_ORIGIN =
   process.env.DORIS_POC_FE_HTTP_ORIGIN ?? "http://127.0.0.1:8031";
-const DB = "langfuse_poc";
+const TEST_NAMESPACE = ENABLED ? parseDorisTestNamespace() : null;
+const DB = TEST_NAMESPACE?.database ?? "doris_test_disabled";
 
 /**
  * Minimal NDJSON row for events_current with all NOT NULL columns populated.
@@ -109,12 +115,7 @@ const DELETE_COLUMNS = [
   "__DORIS_DELETE_SIGN__",
 ];
 
-async function applySchema(
-  admin: DorisPoCMysqlClient,
-  db: DorisPoCMysqlClient,
-): Promise<void> {
-  await admin.execute(`DROP DATABASE IF EXISTS ${DB}`);
-  await admin.execute(`CREATE DATABASE ${DB}`);
+async function applySchema(db: DorisPoCMysqlClient): Promise<void> {
   const sql = readFileSync(SCHEMA_PATH, "utf8");
   for (const stmt of splitSqlStatements(sql)) {
     // DDL goes through the text protocol; the binary prepared-statement path
@@ -131,15 +132,34 @@ describe.skipIf(!ENABLED)(
     let sl: DorisPoCStreamLoadClient;
     let labelSeq = 0;
     const nextLabel = (tag: string) =>
-      dorisLabel(["poc", tag, String(++labelSeq)]);
+      dorisLabel(["poc", TEST_NAMESPACE!.runId, tag, String(++labelSeq)]);
 
     beforeAll(async () => {
+      if (!TEST_NAMESPACE) throw new Error("Doris test namespace is required");
       // Admin client has no default database so it can DROP/CREATE the PoC DB.
       admin = new DorisPoCMysqlClient({
         host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
         port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
         user: process.env.DORIS_POC_USER ?? "root",
         password: process.env.DORIS_POC_PASSWORD ?? "",
+      });
+      const version = await admin.ping();
+      // Revalidate the pinned stable at implementation start (plan §Resolved).
+      expect(version, `pinned Doris 4.0.7 expected, got ${version}`).toMatch(
+        /doris-4\.0\.7/,
+      );
+
+      await resetOwnedDorisTestDatabase({
+        admin,
+        connectDatabase: (database) =>
+          new DorisPoCMysqlClient({
+            host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
+            port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
+            user: process.env.DORIS_POC_USER ?? "root",
+            password: process.env.DORIS_POC_PASSWORD ?? "",
+            database,
+          }),
+        namespace: TEST_NAMESPACE,
       });
       db = new DorisPoCMysqlClient({
         host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
@@ -148,11 +168,6 @@ describe.skipIf(!ENABLED)(
         password: process.env.DORIS_POC_PASSWORD ?? "",
         database: DB,
       });
-      const version = await admin.ping();
-      // Revalidate the pinned stable at implementation start (plan §Resolved).
-      expect(version, `pinned Doris 4.0.7 expected, got ${version}`).toMatch(
-        /doris-4\.0\.7/,
-      );
 
       sl = new DorisPoCStreamLoadClient({
         feHttpOrigin: FE_HTTP_ORIGIN,
@@ -162,7 +177,8 @@ describe.skipIf(!ENABLED)(
         // Allowlisted FE->BE redirect: the internal BE origin is rewritten to the
         // host-published BE port. Any other redirect origin is rejected.
         beRedirectAllowlist: {
-          "172.28.0.3:8040": "http://127.0.0.1:8041",
+          [process.env.DORIS_POC_BE_REDIRECT_AUTHORITY ?? "172.28.0.3:8040"]:
+            process.env.DORIS_POC_BE_REDIRECT_ORIGIN ?? "http://127.0.0.1:8041",
         },
         reconcileLabelStatus: async (label: string) => {
           const rows = await db.query<{ status: string }>(
@@ -176,7 +192,7 @@ describe.skipIf(!ENABLED)(
         },
       });
 
-      await applySchema(admin, db);
+      await applySchema(db);
     }, 120_000);
 
     afterAll(async () => {
@@ -541,11 +557,12 @@ describe.skipIf(!ENABLED)(
 
     afterEach(async () => {
       // Keep the suite isolated without re-applying the whole schema each test.
-      try {
-        await db?.execute(`TRUNCATE TABLE events_current`);
-        await db?.execute(`TRUNCATE TABLE trace_tombstones`);
-      } catch {
-        // ignore during setup/teardown races
+      if (db && TEST_NAMESPACE) {
+        await truncateOwnedDorisTestTables({
+          executor: db,
+          namespace: TEST_NAMESPACE,
+          tables: ["events_current", "trace_tombstones"],
+        });
       }
     });
   },

@@ -237,6 +237,30 @@ export const getTracesByIds = async (
   timestamp?: Date,
   clickhouseConfigs?: ClickHouseClientConfigOptions | undefined,
 ) => {
+  if (isDorisAnalyticsBackend()) {
+    if (traceIds.length === 0) return [];
+    const traces = await getDorisTelemetryRepositories().traces.getMany({
+      projectId,
+      traceIds,
+    });
+    const controls = await prisma.traceControlState.findMany({
+      where: {
+        projectId,
+        traceId: { in: traces.map(({ id }) => id) },
+      },
+      select: { traceId: true, bookmarked: true, public: true },
+    });
+    const controlsByTraceId = new Map(
+      controls.map((control) => [control.traceId, control]),
+    );
+    return traces.map((trace) => {
+      const control = controlsByTraceId.get(trace.id);
+      return toDorisTraceDomain(trace, {
+        bookmarked: control?.bookmarked ?? false,
+        public: control?.public ?? false,
+      });
+    });
+  }
   const records = await measureAndReturn({
     operationName: "getTracesByIds",
     projectId,

@@ -137,8 +137,8 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
             name: "quality",
             value: "detailed result",
             dataType: "TEXT",
-            traceId: "trace-1",
-            observationId: "span-1",
+            datasetRunId: "run-1",
+            executionTraceId: "evaluation-trace-1",
             environment: "production",
             metadata: { evaluator: "human" },
           },
@@ -160,8 +160,10 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
       sourceContract: "score",
       dataType: "TEXT",
       stringValue: "detailed result",
-      traceId: "trace-1",
-      observationId: "span-1",
+      traceId: null,
+      observationId: null,
+      datasetRunId: "run-1",
+      executionTraceId: "evaluation-trace-1",
       metadata: { evaluator: "human" },
     });
     expect(batch.children[1]?.entity).toMatchObject({
@@ -171,6 +173,147 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
       fileId: "operation-1",
       eventId: "score-event-1",
       bucketPath: "analytics-ingestion/raw/project-1/operation-1.json",
+    });
+  });
+
+  it("resolves score configs through the injected control database", async () => {
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "score",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "internal",
+        ingestionSdkVersion: "1",
+      },
+      payload: [
+        {
+          id: "configured-score-event-1",
+          type: "score-create",
+          timestamp: "2026-07-18T14:00:00.123Z",
+          body: {
+            id: "configured-score-1",
+            name: "request-name",
+            traceId: "trace-1",
+            value: 0.9,
+            dataType: "NUMERIC",
+            configId: "11111111-1111-4111-8111-111111111111",
+            source: "EVAL",
+            environment: "production",
+          },
+        },
+      ],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const findFirst = vi.fn(async () => ({
+      id: "11111111-1111-4111-8111-111111111111",
+      createdAt: new Date("2026-07-18T12:00:00.000Z"),
+      updatedAt: new Date("2026-07-18T12:00:00.000Z"),
+      projectId: "project-1",
+      name: "configured-quality",
+      dataType: "NUMERIC",
+      isArchived: false,
+      minValue: null,
+      maxValue: 1,
+      categories: null,
+      description: null,
+    }));
+
+    const batch = await canonicalizer(body, {
+      client: { scoreConfig: { findFirst } } as never,
+    }).canonicalize(operation(body));
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        projectId: "project-1",
+        id: "11111111-1111-4111-8111-111111111111",
+      },
+    });
+    expect(batch.children[0]?.entity).toMatchObject({
+      kind: "score",
+      name: "configured-quality",
+      configId: "11111111-1111-4111-8111-111111111111",
+      resolvedEnrichmentIds: {
+        configId: "11111111-1111-4111-8111-111111111111",
+      },
+    });
+  });
+
+  it("enriches a durable dataset-run-item from Postgres context", async () => {
+    const envelope: RawAnalyticsIngestionEnvelope = {
+      formatVersion: 1,
+      source: "dataset-run-item",
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "internal",
+        ingestionSdkVersion: "1",
+      },
+      payload: [
+        {
+          id: "run-item-event-1",
+          type: "dataset-run-item-create",
+          timestamp: "2026-07-18T14:00:00.123456789Z",
+          body: {
+            id: "run-item-1",
+            runId: "run-1",
+            datasetId: "dataset-1",
+            datasetItemId: "item-1",
+            datasetVersion: "2026-07-18T12:00:00.000Z",
+            traceId: "trace-1",
+            observationId: "span-1",
+            createdAt: "2026-07-18T13:59:59.000000001Z",
+          },
+        },
+      ],
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(envelope);
+    const loadDatasetRunItemContext = vi.fn(async () => ({
+      run: {
+        name: "run one",
+        description: "description",
+        metadata: { owner: "team-a" },
+        createdAt: new Date("2026-07-18T11:00:00.000Z"),
+      },
+      item: {
+        input: { question: "life" },
+        expectedOutput: { answer: 42 },
+        metadata: { difficulty: "hard" },
+        validFrom: new Date("2026-07-18T12:00:00.000Z"),
+      },
+    }));
+
+    const batch = await canonicalizer(body, {
+      loadDatasetRunItemContext,
+    }).canonicalize(operation(body));
+
+    expect(loadDatasetRunItemContext).toHaveBeenCalledWith({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      datasetRunId: "run-1",
+      datasetItemId: "item-1",
+      datasetVersion: new Date("2026-07-18T12:00:00.000Z"),
+    });
+    expect(batch.children).toHaveLength(1);
+    expect(batch.children[0]).toMatchObject({
+      traceDeletionGeneration: 3n,
+      projectDeletionGeneration: 2n,
+      entity: {
+        kind: "datasetRunItem",
+        runItemId: "run-item-1",
+        datasetRunId: "run-1",
+        datasetItemId: "item-1",
+        datasetId: "dataset-1",
+        traceId: "trace-1",
+        observationId: "span-1",
+        datasetRunName: "run one",
+        datasetRunMetadata: { owner: "team-a" },
+        datasetItemInput: { question: "life" },
+        datasetItemExpectedOutput: { answer: 42 },
+        datasetItemMetadata: { difficulty: "hard" },
+        sourceContract: "dataset-run-item",
+        partitionDate: "2026-07-18",
+        datasetDeletionGeneration: 0n,
+        runDeletionGeneration: 0n,
+      },
     });
   });
 
@@ -383,7 +526,7 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     });
   });
 
-  it("marks a confirmed missing raw artifact as unrecoverable", async () => {
+  it("retries while a ledger-first raw artifact is still pending", async () => {
     const body = encodeRawAnalyticsIngestionEnvelope({
       formatVersion: 1,
       source: "otlp",
@@ -401,8 +544,9 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     await expect(
       canonicalizer(body, { storageService }).canonicalize(operation(body)),
     ).rejects.toMatchObject({
-      code: "ANALYTICS_UNRECOVERABLE",
-      retryable: false,
+      code: "ANALYTICS_UNAVAILABLE",
+      retryable: true,
+      tags: expect.objectContaining({ reasonCode: "RAW_ARTIFACT_PENDING" }),
     });
   });
 

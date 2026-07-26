@@ -5,6 +5,7 @@ import {
   assertAnalyticsBatchBoundary,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
+  encodeDatasetRunItemIdentity,
   encodeScoreIdentity,
   type CanonicalAnalyticsBatch,
   type CanonicalAnalyticsEntity,
@@ -28,9 +29,14 @@ const TABLE_BY_KIND = {
   event: "events_current",
   score: "scores_current",
   fileReference: "blob_storage_file_log",
+  datasetRunItem: "dataset_run_items_current",
 } as const;
 
-type AnalyticsEntityType = "EVENT" | "SCORE" | "FILE_REFERENCE";
+type AnalyticsEntityType =
+  | "EVENT"
+  | "SCORE"
+  | "FILE_REFERENCE"
+  | "DATASET_RUN_ITEM";
 
 export interface CanonicalCandidateDescriptor {
   readonly candidateKey: string;
@@ -38,6 +44,8 @@ export interface CanonicalCandidateDescriptor {
   readonly entityKey: string;
   readonly lookupId: string;
   readonly owningTraceId: string | null;
+  readonly owningDatasetId: string | null;
+  readonly owningDatasetRunId: string | null;
   readonly partitionDate: string;
   readonly claim: CanonicalAnalyticsEntityClaim;
 }
@@ -192,6 +200,8 @@ function entityType(entity: CanonicalAnalyticsEntity): AnalyticsEntityType {
       return "SCORE";
     case "fileReference":
       return "FILE_REFERENCE";
+    case "datasetRunItem":
+      return "DATASET_RUN_ITEM";
   }
 }
 
@@ -215,15 +225,23 @@ function entityKey(entity: CanonicalAnalyticsEntity): string {
         entityId: entity.entityId,
         fileId: entity.fileId,
       });
+    case "datasetRunItem":
+      return encodeDatasetRunItemIdentity({
+        projectId: entity.projectId,
+        runItemId: entity.runItemId,
+      });
   }
 }
 
 function owningTraceId(entity: CanonicalAnalyticsEntity): string | null {
-  return entity.kind === "event"
-    ? entity.traceId
-    : entity.kind === "score"
-      ? entity.traceId
-      : entity.owningTraceId;
+  switch (entity.kind) {
+    case "event":
+    case "score":
+    case "datasetRunItem":
+      return entity.traceId;
+    case "fileReference":
+      return entity.owningTraceId;
+  }
 }
 
 function lookupId(entity: CanonicalAnalyticsEntity): string {
@@ -234,6 +252,8 @@ function lookupId(entity: CanonicalAnalyticsEntity): string {
       return entity.scoreId;
     case "fileReference":
       return entity.fileId;
+    case "datasetRunItem":
+      return entity.runItemId;
   }
 }
 
@@ -268,6 +288,8 @@ export function describeCanonicalCandidates(
       entityKey: entityKey(claim.entity),
       lookupId: lookupId(claim.entity),
       owningTraceId: owningTraceId(claim.entity),
+      owningDatasetId: claim.owningDatasetId ?? null,
+      owningDatasetRunId: claim.owningDatasetRunId ?? null,
       partitionDate: claim.entity.partitionDate,
       claim,
     };
@@ -342,6 +364,10 @@ function eventRow(
 ) {
   const input = stringifyIo(entity.input);
   const output = stringifyIo(entity.output);
+  const experimentMetadata = stableJsonValue(entity.experimentMetadata ?? {});
+  const experimentItemMetadata = stableJsonValue(
+    entity.experimentItemMetadata ?? {},
+  );
   return {
     project_id: entity.projectId,
     partition_date: entity.partitionDate,
@@ -380,12 +406,25 @@ function eventRow(
     total_cost: entity.totalCost === null ? null : String(entity.totalCost),
     tags: [...entity.tags],
     metadata: stableJsonValue(entity.metadata),
+    metadata_json: JSON.stringify(stableJsonValue(entity.metadata)),
     usage_details: stableRecord(entity.usageDetails),
+    usage_details_json: JSON.stringify(stableRecord(entity.usageDetails)),
     cost_details: stableRecord(entity.costDetails),
+    cost_details_json: JSON.stringify(stableRecord(entity.costDetails)),
     provided_usage_details: stableRecord(entity.providedUsageDetails),
+    provided_usage_details_json: JSON.stringify(
+      stableRecord(entity.providedUsageDetails),
+    ),
     provided_cost_details: stableRecord(entity.providedCostDetails),
+    provided_cost_details_json: JSON.stringify(
+      stableRecord(entity.providedCostDetails),
+    ),
     model_parameters: stableJsonValue(entity.modelParameters),
+    model_parameters_json: JSON.stringify(
+      stableJsonValue(entity.modelParameters),
+    ),
     tool_definitions: stableRecord(entity.toolDefinitions),
+    tool_definitions_json: JSON.stringify(stableRecord(entity.toolDefinitions)),
     tool_calls: [...entity.toolCalls],
     tool_call_names: [...entity.toolCallNames],
     input,
@@ -399,6 +438,26 @@ function eventRow(
     telemetry_sdk_language: entity.telemetrySdkLanguage,
     blob_storage_file_path: null,
     event_bytes: entity.eventBytes,
+    ...(entity.schemaVersion >= 2
+      ? {
+          experiment_id: entity.experimentId ?? null,
+          experiment_name: entity.experimentName ?? null,
+          experiment_metadata: experimentMetadata,
+          experiment_metadata_json: JSON.stringify(experimentMetadata),
+          experiment_description: entity.experimentDescription ?? null,
+          experiment_dataset_id: entity.experimentDatasetId ?? null,
+          experiment_item_id: entity.experimentItemId ?? null,
+          experiment_item_version:
+            entity.experimentItemVersion == null
+              ? null
+              : dorisDateTime(entity.experimentItemVersion),
+          experiment_item_expected_output:
+            entity.experimentItemExpectedOutput ?? null,
+          experiment_item_metadata: experimentItemMetadata,
+          experiment_item_metadata_json: JSON.stringify(experimentItemMetadata),
+          experiment_item_root_span_id: entity.experimentItemRootSpanId ?? null,
+        }
+      : {}),
   };
 }
 
@@ -426,9 +485,16 @@ function scoreRow(
     queue_id: entity.queueId,
     environment: entity.environment,
     metadata: stableJsonValue(entity.metadata),
+    metadata_json: JSON.stringify(stableJsonValue(entity.metadata)),
     timestamp: dorisDateTime(entity.timestamp),
     created_at: dorisDateTime(entity.systemTimestamp),
     updated_at: dorisDateTime(entity.systemTimestamp),
+    ...(entity.schemaVersion >= 2
+      ? {
+          dataset_run_id: entity.datasetRunId ?? null,
+          execution_trace_id: entity.executionTraceId ?? null,
+        }
+      : {}),
   };
 }
 
@@ -450,6 +516,42 @@ function fileReferenceRow(
   };
 }
 
+function datasetRunItemRow(
+  entity: Extract<CanonicalAnalyticsEntity, { kind: "datasetRunItem" }>,
+) {
+  const runMetadata = stableJsonValue(entity.datasetRunMetadata);
+  const itemMetadata = stableJsonValue(entity.datasetItemMetadata);
+  return {
+    project_id: entity.projectId,
+    run_item_date: entity.partitionDate,
+    run_item_id: entity.runItemId,
+    version_token: entity.sourceVersion.toString(),
+    dataset_run_id: entity.datasetRunId,
+    dataset_item_id: entity.datasetItemId,
+    dataset_id: entity.datasetId,
+    trace_id: entity.traceId,
+    observation_id: entity.observationId,
+    error: entity.error,
+    created_at: dorisDateTime(entity.createdAt),
+    updated_at: dorisDateTime(entity.updatedAt),
+    dataset_run_name: entity.datasetRunName,
+    dataset_run_description: entity.datasetRunDescription,
+    dataset_run_metadata: runMetadata,
+    dataset_run_metadata_json: JSON.stringify(runMetadata),
+    dataset_run_created_at: dorisDateTime(entity.datasetRunCreatedAt),
+    dataset_item_version:
+      entity.datasetItemVersion === null
+        ? null
+        : dorisDateTime(entity.datasetItemVersion),
+    dataset_item_input: stringifyIo(entity.datasetItemInput),
+    dataset_item_expected_output: stringifyIo(entity.datasetItemExpectedOutput),
+    dataset_item_metadata: itemMetadata,
+    dataset_item_metadata_json: JSON.stringify(itemMetadata),
+    dataset_deletion_generation: entity.datasetDeletionGeneration.toString(),
+    run_deletion_generation: entity.runDeletionGeneration.toString(),
+  };
+}
+
 function row(entity: CanonicalAnalyticsEntity) {
   switch (entity.kind) {
     case "event":
@@ -458,6 +560,8 @@ function row(entity: CanonicalAnalyticsEntity) {
       return scoreRow(entity);
     case "fileReference":
       return fileReferenceRow(entity);
+    case "datasetRunItem":
+      return datasetRunItemRow(entity);
   }
 }
 
@@ -481,8 +585,12 @@ export function prepareDorisLoadBatches(
       table,
       candidate.partitionDate,
       candidate.owningTraceId,
+      candidate.owningDatasetId,
+      candidate.owningDatasetRunId,
       candidate.claim.traceDeletionGeneration.toString(),
       candidate.claim.projectDeletionGeneration.toString(),
+      (candidate.claim.datasetDeletionGeneration ?? 0n).toString(),
+      (candidate.claim.runDeletionGeneration ?? 0n).toString(),
     ]);
     groups.set(key, [...(groups.get(key) ?? []), candidate]);
   }

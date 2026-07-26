@@ -5,15 +5,24 @@ import type {
 } from "@prisma/client";
 import {
   advanceAnalyticsRetentionRun,
+  analyticsDurableProvenanceFromRecord,
   completeAnalyticsRetentionRun,
   countUnresolvedAnalyticsLoadsBefore,
+  createAnalyticsBackendClaimLease,
   deleteAnalyticsEntityHeadsForRetention,
   findAnalyticsEntityHeadsForRetention,
+  getAnalyticsRetentionDatabaseClock,
+  lockAnalyticsBackendClaimLeaseForIo,
+  lockLegacyAnalyticsAdmission,
   logger,
   recordAnalyticsRetentionFailure,
+  releaseAnalyticsBackendClaimLease,
   startOrResumeAnalyticsRetention,
   type ActiveAnalyticsRetentionRun,
+  type AnalyticsBackend,
+  type AnalyticsRetentionClient,
   type AnalyticsRetentionPhase,
+  type AnalyticsRuntimeAdmissionContext,
 } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 
@@ -37,23 +46,6 @@ const PHASE_ENTITY_TYPE: Readonly<
   BLOB_REFERENCES: "FILE_REFERENCE",
 };
 
-function cutoffDate(now: Date, retentionDays: number): Date {
-  if (
-    !Number.isFinite(now.getTime()) ||
-    !Number.isSafeInteger(retentionDays) ||
-    retentionDays < 3
-  ) {
-    throw new TypeError("Invalid Doris global retention configuration");
-  }
-  return new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() - retentionDays,
-    ),
-  );
-}
-
 export type DorisGlobalRetentionStepResult =
   | { readonly outcome: "idle" }
   | {
@@ -76,16 +68,95 @@ type RetentionDependencies = {
     operationId: string,
     heads: readonly AnalyticsEntityHead[],
   ) => Promise<void>;
+  readonly withWorkFence?: RetentionWorkFence;
+  readonly getDatabaseNow?: typeof getAnalyticsRetentionDatabaseClock;
+};
+
+type RetentionWorkFence = <T>(input: {
+  readonly client: PrismaClient;
+  readonly run: ActiveAnalyticsRetentionRun;
+  readonly admissionContext: AnalyticsRuntimeAdmissionContext | null;
+  readonly execute: (client: AnalyticsRetentionClient) => Promise<T>;
+}) => Promise<T>;
+
+const RETENTION_CLAIM_MS = 30 * 60_000;
+const RETENTION_FENCE_TIMEOUT_MS = 35 * 60_000;
+
+const withAnalyticsRetentionWorkFence: RetentionWorkFence = async (input) => {
+  const provenance = analyticsDurableProvenanceFromRecord(input.run);
+  if (!provenance) {
+    if (input.admissionContext) {
+      throw new Error(
+        "Legacy analytics retention cannot use managed admission",
+      );
+    }
+    return input.client.$transaction(
+      async (transaction) => {
+        await lockLegacyAnalyticsAdmission(transaction);
+        return input.execute(transaction);
+      },
+      { timeout: RETENTION_FENCE_TIMEOUT_MS },
+    );
+  }
+
+  const expectedBackend: AnalyticsBackend =
+    provenance.analyticsBackend === "DORIS" ? "doris" : "clickhouse";
+  if (
+    !input.admissionContext ||
+    input.admissionContext.backend !== expectedBackend ||
+    input.admissionContext.deploymentGeneration !==
+      provenance.deploymentGeneration
+  ) {
+    throw new Error("Analytics retention runtime is not admitted");
+  }
+  const fence = {
+    runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    expectedBackend,
+    expectedDeploymentGeneration: provenance.deploymentGeneration,
+    expectedWorkloadEpochFingerprint: provenance.workloadEpochFingerprint,
+    expectedRuntimeContractVersion: provenance.runtimeContractVersion,
+    action: "foundation" as const,
+  };
+  const claim = await createAnalyticsBackendClaimLease({
+    client: input.client,
+    ...fence,
+    claimKind: "analytics-retention",
+    resourceIdentity: input.run.id,
+    leaseMs: RETENTION_CLAIM_MS,
+  });
+  if (!claim) throw new Error("Analytics retention work is already claimed");
+
+  try {
+    return await input.client.$transaction(
+      async (transaction) => {
+        await lockAnalyticsBackendClaimLeaseForIo({
+          transaction,
+          claimLeaseId: claim.id,
+          fence,
+        });
+        return input.execute(transaction);
+      },
+      { timeout: RETENTION_FENCE_TIMEOUT_MS },
+    );
+  } finally {
+    await releaseAnalyticsBackendClaimLease({
+      client: input.client,
+      claimLeaseId: claim.id,
+      runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    });
+  }
 };
 
 export async function processDorisGlobalRetentionStep(input: {
   readonly retentionDays: number;
   readonly drainMs: number;
   readonly batchSize: number;
-  readonly now?: Date;
+  readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly dependencies?: RetentionDependencies;
 }): Promise<DorisGlobalRetentionStepResult> {
-  const now = input.now ?? new Date();
+  if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 3) {
+    throw new TypeError("Invalid Doris global retention configuration");
+  }
   if (!Number.isSafeInteger(input.drainMs) || input.drainMs < 60_000) {
     throw new TypeError("Invalid Doris retention drain window");
   }
@@ -102,83 +173,100 @@ export async function processDorisGlobalRetentionStep(input: {
     dependencies.startOrResume ?? startOrResumeAnalyticsRetention;
   const run = await startOrResume({
     client,
-    cutoffDate: cutoffDate(now, input.retentionDays),
-    now,
+    retentionDays: input.retentionDays,
+    admissionContext: input.admissionContext ?? null,
   });
   if (!run) return { outcome: "idle" };
 
   try {
-    if (run.phase === "DRAIN") {
-      if (now.getTime() - run.startedAt.getTime() < input.drainMs) {
-        return result("waiting", run);
-      }
-      const unresolvedLoads = await (
-        dependencies.countUnresolvedLoads ?? countUnresolvedAnalyticsLoadsBefore
-      )({ client, cutoffDate: run.cutoffDate });
-      if (unresolvedLoads > 0) return result("waiting", run);
-    }
-    if (run.phase === "COMPLETE") {
-      const completed = await (
-        dependencies.complete ?? completeAnalyticsRetentionRun
-      )({ client, runId: run.id, now });
-      if (!completed) {
-        throw new Error("Analytics retention completion lost its active fence");
-      }
-      return result("completed", run);
-    }
-
-    if (run.phase !== "DRAIN") {
-      const entityType = PHASE_ENTITY_TYPE[run.phase];
-      if (!entityType) {
-        throw new Error(`Missing retention entity type for ${run.phase}`);
-      }
-      const heads = await (
-        dependencies.findHeads ?? findAnalyticsEntityHeadsForRetention
-      )({
-        client,
-        cutoffDate: run.cutoffDate,
-        entityType,
-        limit: input.batchSize,
-      });
-      if (heads.length > 0) {
-        await (
-          dependencies.deleteDorisHeads ??
-          ((operationId, selected) =>
-            getDorisAnalyticsLifecycleRuntime().materializedDeletion.deleteHeads(
-              operationId,
-              selected,
-            ))
-        )(`${run.id}-${run.phase}`, heads);
-        const deleted = await (
-          dependencies.deleteHeads ?? deleteAnalyticsEntityHeadsForRetention
-        )({
-          client,
-          cutoffDate: run.cutoffDate,
-          entityType,
-          headIds: heads.map(({ id }) => id),
-        });
-        if (deleted !== heads.length) {
-          throw new Error("Analytics retention entity-head fence was lost");
-        }
-        return result("processed", run);
-      }
-    }
-
-    const nextPhase = NEXT_PHASE[run.phase];
-    if (!nextPhase)
-      throw new Error(`Missing retention phase after ${run.phase}`);
-    const advanced = await (
-      dependencies.advance ?? advanceAnalyticsRetentionRun
+    return await (
+      dependencies.withWorkFence ?? withAnalyticsRetentionWorkFence
     )({
       client,
-      runId: run.id,
-      expectedPhase: run.phase,
-      nextPhase,
+      run,
+      admissionContext: input.admissionContext ?? null,
+      execute: async (fencedClient) => {
+        const now = await (
+          dependencies.getDatabaseNow ?? getAnalyticsRetentionDatabaseClock
+        )({ client: fencedClient });
+        if (run.phase === "DRAIN") {
+          if (now.getTime() - run.startedAt.getTime() < input.drainMs) {
+            return result("waiting", run);
+          }
+          const unresolvedLoads = await (
+            dependencies.countUnresolvedLoads ??
+            countUnresolvedAnalyticsLoadsBefore
+          )({ client: fencedClient, cutoffDate: run.cutoffDate });
+          if (unresolvedLoads > 0) return result("waiting", run);
+        }
+        if (run.phase === "COMPLETE") {
+          const completed = await (
+            dependencies.complete ?? completeAnalyticsRetentionRun
+          )({ client: fencedClient, runId: run.id });
+          if (!completed) {
+            throw new Error(
+              "Analytics retention completion lost its active fence",
+            );
+          }
+          return result("completed", run);
+        }
+
+        if (run.phase !== "DRAIN") {
+          const entityType = PHASE_ENTITY_TYPE[run.phase];
+          if (!entityType) {
+            throw new Error(`Missing retention entity type for ${run.phase}`);
+          }
+          const heads = await (
+            dependencies.findHeads ?? findAnalyticsEntityHeadsForRetention
+          )({
+            client: fencedClient,
+            cutoffDate: run.cutoffDate,
+            entityType,
+            limit: input.batchSize,
+          });
+          if (heads.length > 0) {
+            await (
+              dependencies.deleteDorisHeads ??
+              ((operationId, selected) =>
+                getDorisAnalyticsLifecycleRuntime().materializedDeletion.deleteHeads(
+                  operationId,
+                  selected,
+                ))
+            )(`${run.id}-${run.phase}`, heads);
+            const deleted = await (
+              dependencies.deleteHeads ?? deleteAnalyticsEntityHeadsForRetention
+            )({
+              client: fencedClient,
+              cutoffDate: run.cutoffDate,
+              entityType,
+              headIds: heads.map(({ id }) => id),
+            });
+            if (deleted !== heads.length) {
+              throw new Error("Analytics retention entity-head fence was lost");
+            }
+            return result("processed", run);
+          }
+        }
+
+        const nextPhase = NEXT_PHASE[run.phase];
+        if (!nextPhase)
+          throw new Error(`Missing retention phase after ${run.phase}`);
+        const advanced = await (
+          dependencies.advance ?? advanceAnalyticsRetentionRun
+        )({
+          client: fencedClient,
+          runId: run.id,
+          expectedPhase: run.phase,
+          nextPhase,
+        });
+        if (!advanced) {
+          throw new Error(
+            "Analytics retention phase transition lost its fence",
+          );
+        }
+        return result("advanced", run);
+      },
     });
-    if (!advanced) {
-      throw new Error("Analytics retention phase transition lost its fence");
-    }
-    return result("advanced", run);
   } catch (error) {
     await (dependencies.recordFailure ?? recordAnalyticsRetentionFailure)({
       client,
@@ -210,6 +298,7 @@ export class DorisGlobalRetentionRunner extends PeriodicExclusiveRunner {
       readonly drainMs: number;
       readonly batchSize: number;
       readonly assertReady?: () => Promise<void>;
+      readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
       readonly processStep?: typeof processDorisGlobalRetentionStep;
     },
   ) {
@@ -240,6 +329,7 @@ export class DorisGlobalRetentionRunner extends PeriodicExclusiveRunner {
         retentionDays: this.dependencies.retentionDays,
         drainMs: this.dependencies.drainMs,
         batchSize: this.dependencies.batchSize,
+        admissionContext: this.dependencies.getAdmissionContext?.() ?? null,
       });
       if (result.outcome !== "idle" && result.outcome !== "waiting") {
         logger.info("Advanced Doris global retention", result);

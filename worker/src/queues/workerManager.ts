@@ -21,6 +21,8 @@ import {
 
 export class WorkerManager {
   private static workers: { [key: string]: Worker } = {};
+  private static registrationsFenced = false;
+  private static closeOperation: Promise<void> | null = null;
 
   private static extractProjectId(job: Job): string | undefined {
     const data = job.data as {
@@ -140,11 +142,44 @@ export class WorkerManager {
     };
   }
 
-  public static async closeWorkers(): Promise<void> {
-    await Promise.all(
-      Object.values(WorkerManager.workers).map((worker) => worker.close()),
-    );
-    logger.info("All workers have been closed.");
+  public static closeWorkers(): Promise<void> {
+    if (WorkerManager.closeOperation) return WorkerManager.closeOperation;
+
+    const workers = Object.entries(WorkerManager.workers);
+    const operation = Promise.allSettled(
+      workers.map(([, worker]) => worker.close()),
+    )
+      .then((results) => {
+        const failures: unknown[] = [];
+        results.forEach((result, index) => {
+          const entry = workers[index];
+          if (!entry) return;
+          const [queueName, worker] = entry;
+          if (result.status === "rejected") {
+            failures.push(result.reason);
+            return;
+          }
+          if (WorkerManager.workers[queueName] === worker) {
+            delete WorkerManager.workers[queueName];
+          }
+        });
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Failed to close all workers");
+        }
+        logger.info("All workers have been closed.");
+      })
+      .finally(() => {
+        if (WorkerManager.closeOperation === operation) {
+          WorkerManager.closeOperation = null;
+        }
+      });
+    WorkerManager.closeOperation = operation;
+    return operation;
+  }
+
+  public static fenceRegistrations(): Promise<void> {
+    WorkerManager.registrationsFenced = true;
+    return WorkerManager.closeWorkers();
   }
 
   public static getWorker(queueName: QueueName): Worker | undefined {
@@ -160,6 +195,12 @@ export class WorkerManager {
     processor: Processor,
     additionalOptions: Partial<WorkerOptions> = {},
   ): void {
+    if (WorkerManager.registrationsFenced) {
+      logger.error(
+        `Worker ${queueName} was not registered after runtime fence`,
+      );
+      return;
+    }
     if (WorkerManager.workers[queueName]) {
       logger.info(`Worker ${queueName} is already registered`);
       return;

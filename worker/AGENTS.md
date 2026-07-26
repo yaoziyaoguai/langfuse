@@ -23,6 +23,13 @@ Use root [AGENTS.md](../AGENTS.md) for monorepo-level rules.
 - Worker registration/lifecycle: `src/queues/workerManager.ts`
 - Queue processors: `src/queues/*`
 - Feature processors: `src/features/*`
+- Doris batch-export execution and manifests: `src/features/batchExport/*`
+- Doris batch-export durable dispatch recovery:
+  `src/features/batch-export-dispatch-runner/*`
+- Doris batch-export manifest cleanup:
+  `src/features/batch-export-manifest-orphan-cleaner/*`
+- Selected-backend runtime admission/fencing: `src/analyticsRuntime.ts`,
+  `src/app.ts`
 - Service layer: `src/services/*`
 - Tests: `src/__tests__/*`, `src/queues/__tests__/*`
 

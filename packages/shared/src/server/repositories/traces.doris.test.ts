@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   filterOptionValues: vi.fn(),
   traceList: vi.fn(),
+  traceGetMany: vi.fn(),
+  queryClickhouse: vi.fn(),
   userCount: vi.fn(),
   userList: vi.fn(),
   traceControlFindMany: vi.fn(),
@@ -21,10 +23,21 @@ vi.mock("./telemetry/doris/runtime", () => ({
     traces: {
       filterOptionValues: mocks.filterOptionValues,
       list: mocks.traceList,
+      getMany: mocks.traceGetMany,
     },
     observations: { listForTrace: mocks.observationListForTrace },
     users: { count: mocks.userCount, list: mocks.userList },
   }),
+}));
+
+vi.mock("./clickhouse", () => ({
+  BLOB_EXPORT_PARQUET_CLICKHOUSE_SETTINGS: {},
+  commandClickhouse: vi.fn(),
+  parseClickhouseUTCDateTimeFormat: vi.fn(),
+  queryClickhouse: mocks.queryClickhouse,
+  queryClickhouseExecRaw: vi.fn(),
+  queryClickhouseStream: vi.fn(),
+  upsertClickhouse: vi.fn(),
 }));
 
 import {
@@ -34,6 +47,7 @@ import {
   getTracesGroupedByUsers,
   getTotalUserCount,
   getTracesBySessionId,
+  getTracesByIds,
   getAgentGraphData,
   getUserMetrics,
   hasAnyUser,
@@ -208,6 +222,60 @@ describe("trace repository Doris routing", () => {
         ]),
       }),
     );
+  });
+
+  it("loads exact trace IDs from Doris without a ClickHouse fallback", async () => {
+    mocks.traceGetMany.mockResolvedValue([
+      {
+        id: "trace-1",
+        projectId: "project-1",
+        timestamp: new Date("2026-01-01T10:00:00.000Z"),
+        endTime: new Date("2026-01-01T10:00:01.000Z"),
+        name: "old trace",
+        environment: "production",
+        userId: null,
+        sessionId: null,
+        release: null,
+        version: null,
+        tags: [],
+        inputPreview: null,
+        outputPreview: null,
+        input: { question: "old" },
+        output: { answer: "found" },
+        metadata: {},
+        rootObservationId: "span-1",
+        fallbackObservationId: "span-1",
+        incomplete: false,
+        observationCount: 1,
+        totalInputTokens: 1,
+        totalOutputTokens: 1,
+        totalUsage: 2,
+        totalCost: 0.01,
+        latency: 1,
+      },
+    ]);
+    mocks.traceControlFindMany.mockResolvedValue([
+      { traceId: "trace-1", bookmarked: true, public: false },
+    ]);
+
+    await expect(
+      getTracesByIds(
+        ["trace-1", "missing"],
+        "project-1",
+        new Date("2026-07-01T00:00:00.000Z"),
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "trace-1",
+        bookmarked: true,
+        input: { question: "old" },
+      }),
+    ]);
+    expect(mocks.traceGetMany).toHaveBeenCalledWith({
+      projectId: "project-1",
+      traceIds: ["trace-1", "missing"],
+    });
+    expect(mocks.queryClickhouse).not.toHaveBeenCalled();
   });
 
   it("routes agent graph reads through Doris", async () => {

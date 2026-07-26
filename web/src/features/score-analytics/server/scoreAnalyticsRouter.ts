@@ -8,9 +8,14 @@ import {
   getScoresGroupedByNameSourceType,
   queryClickhouse,
   convertDateToClickhouseDateTime,
+  isDorisAnalyticsBackend,
 } from "@langfuse/shared/src/server";
 import { buildEstimateQuery } from "./buildEstimateQuery";
 import { buildScoreComparisonQuery } from "./buildScoreComparisonQuery";
+import {
+  estimateDorisScoreComparison,
+  getDorisScoreComparisonAnalytics,
+} from "./dorisScoreAnalytics";
 
 /**
  * Adaptive FINAL threshold
@@ -92,6 +97,40 @@ export const scoreAnalyticsRouter = createTRPCRouter({
         toTimestamp,
         objectType,
       } = input;
+
+      if (isDorisAnalyticsBackend()) {
+        const estimates = await estimateDorisScoreComparison({
+          projectId,
+          score1,
+          score2,
+          fromTimestamp,
+          toTimestamp,
+          objectType,
+        });
+        const willSample =
+          estimates.score1Count > SAMPLING_THRESHOLD ||
+          estimates.score2Count > SAMPLING_THRESHOLD;
+        const willSkipFinal =
+          estimates.score1Count >= ADAPTIVE_FINAL_THRESHOLD ||
+          estimates.score2Count >= ADAPTIVE_FINAL_THRESHOLD;
+        const estimatedQueryTime =
+          estimates.matchedCount > 1_000_000
+            ? "30-60s"
+            : estimates.matchedCount > 500_000
+              ? "15-30s"
+              : estimates.matchedCount > 100_000
+                ? "10-20s"
+                : "<10s";
+        return {
+          score1Count: estimates.score1Count,
+          score2Count: estimates.score2Count,
+          estimatedMatchedCount: estimates.matchedCount,
+          willSample,
+          willSkipFinal,
+          estimatedQueryTime,
+          mode: input.mode ?? "two",
+        };
+      }
 
       // Run preflight estimate (uses 1% sampling)
       const estimates = await buildEstimateQuery({
@@ -229,6 +268,20 @@ export const scoreAnalyticsRouter = createTRPCRouter({
         nBins,
         objectType,
       } = input;
+
+      if (isDorisAnalyticsBackend()) {
+        return await getDorisScoreComparisonAnalytics({
+          projectId,
+          score1,
+          score2,
+          fromTimestamp,
+          toTimestamp,
+          interval,
+          nBins,
+          objectType,
+          mode: input.mode ?? "two",
+        });
+      }
 
       // Note: The backend always returns both matched and unmatched datasets,
       // as well as individual-bound distributions. The frontend chooses which

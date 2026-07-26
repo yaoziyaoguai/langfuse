@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import {
   type ExperimentMetadata,
   createDatasetItemFilterState,
+  createDorisExperimentExecutionIntent,
   ExperimentCreateQueue,
   getCategoricalScoresGroupedByName,
   getBooleanScoresGroupedByName,
@@ -28,6 +29,8 @@ import {
   getExperimentNamesFromEvents,
   getExperimentItemsFilterOptions,
   getExperimentScoreOptions,
+  logger,
+  publishExperimentExecutionDispatch,
 } from "@langfuse/shared/src/server";
 import {
   createTRPCRouter,
@@ -55,6 +58,9 @@ import {
 } from "@langfuse/shared";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { aggregateScores } from "@/src/features/scores/lib/aggregateScores";
+import { env } from "@/src/env.mjs";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
+import { CommunityCapabilityUnavailableError } from "@/src/features/capabilities/communityAvailability";
 
 const ExperimentFilterOptions = z.object({
   projectId: z.string(),
@@ -265,23 +271,81 @@ export const experimentsRouter = createTRPCRouter({
         }),
       };
 
-      const datasetRun = await ctx.prisma.datasetRuns.create({
-        data: {
-          name: input.runName,
-          description: input.description,
-          datasetId: input.datasetId,
-          metadata: {
-            ...metadata,
-            experiment_name: input.name,
-            experiment_run_name: input.runName,
+      const persistedMetadata = {
+        ...metadata,
+        ...(metadata.dataset_version
+          ? { dataset_version: metadata.dataset_version.toISOString() }
+          : {}),
+        experiment_name: input.name,
+        experiment_run_name: input.runName,
+      };
+      const isDoris = env.LANGFUSE_ANALYTICS_BACKEND === "doris";
+      const admissionContext = isDoris
+        ? getWebAnalyticsAdmissionContext()
+        : null;
+      if (isDoris && !admissionContext) {
+        throw new CommunityCapabilityUnavailableError("experiments");
+      }
+      const managedDatasetRun = isDoris
+        ? await createDorisExperimentExecutionIntent({
+            client: ctx.prisma,
+            admissionContext: admissionContext!,
+            name: input.runName,
+            description: input.description,
+            datasetId: input.datasetId,
+            metadata: persistedMetadata,
+            projectId: input.projectId,
+          })
+        : null;
+      const datasetRun =
+        managedDatasetRun ??
+        (await ctx.prisma.datasetRuns.create({
+          data: {
+            name: input.runName,
+            description: input.description,
+            datasetId: input.datasetId,
+            metadata: persistedMetadata,
+            projectId: input.projectId,
           },
-          projectId: input.projectId,
-        },
-      });
+        }));
 
       const queue = ExperimentCreateQueue.getInstance();
 
-      if (queue) {
+      if (queue && managedDatasetRun) {
+        try {
+          await publishExperimentExecutionDispatch({
+            client: ctx.prisma,
+            admissionContext: admissionContext!,
+            action: "externalProducer",
+            projectId: input.projectId,
+            runId: datasetRun.id,
+            expectedGeneration:
+              managedDatasetRun.experimentDispatchOutbox.generation,
+            publish: async (payload) => {
+              const jobId = `${datasetRun.id}-g${managedDatasetRun.experimentDispatchOutbox.generation}`;
+              await queue.add(
+                QueueName.ExperimentCreate,
+                {
+                  name: QueueJobs.ExperimentCreateJob,
+                  id: jobId,
+                  timestamp: new Date(),
+                  payload,
+                  retryBaggage: {
+                    originalJobTimestamp: new Date(),
+                    attempt: 0,
+                  },
+                },
+                { jobId },
+              );
+            },
+          });
+        } catch (error) {
+          logger.error(
+            "Deferred Doris experiment queue publication to durable recovery",
+            { runId: datasetRun.id, error },
+          );
+        }
+      } else if (queue) {
         await queue.add(QueueName.ExperimentCreate, {
           name: QueueJobs.ExperimentCreateJob,
           id: randomUUID(),

@@ -8,6 +8,15 @@ import type {
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+import type { AnalyticsRuntimeAdmissionContext } from "../analytics-persistence/analyticsBackendAdmission";
+import {
+  captureAnalyticsEvaluationDispatches,
+  type AnalyticsEvaluationDispatchTargetInput,
+} from "./analyticsEvaluationDispatches";
+import {
+  captureAnalyticsIntegrationDeliveries,
+  type AnalyticsIntegrationDeliveryTargetInput,
+} from "./analyticsIntegrationDeliveries";
 import { lockAnalyticsIngestionOperation } from "./analyticsIngestionLock";
 
 export function analyticsLoadBatchIdentity(input: {
@@ -137,7 +146,26 @@ export async function cancelAnalyticsLoadBatchIfDeleted(input: {
         ),
       ),
     ];
-    const [projectGeneration, traceTombstones] = await Promise.all([
+    const datasetIds = [
+      ...new Set(
+        candidates.flatMap(({ owningDatasetId }) =>
+          owningDatasetId ? [owningDatasetId] : [],
+        ),
+      ),
+    ];
+    const datasetRunIds = [
+      ...new Set(
+        candidates.flatMap(({ owningDatasetRunId }) =>
+          owningDatasetRunId ? [owningDatasetRunId] : [],
+        ),
+      ),
+    ];
+    const [
+      projectGeneration,
+      traceTombstones,
+      datasetGenerations,
+      runGenerations,
+    ] = await Promise.all([
       transaction.analyticsProjectDeletionGeneration.findUnique({
         where: { projectId: input.projectId },
         select: { generation: true },
@@ -149,18 +177,50 @@ export async function cancelAnalyticsLoadBatchIfDeleted(input: {
         },
         select: { traceId: true, generation: true },
       }),
+      transaction.analyticsDatasetDeletionGeneration.findMany({
+        where: {
+          projectId: input.projectId,
+          datasetId: { in: datasetIds },
+        },
+        select: { datasetId: true, generation: true },
+      }),
+      transaction.analyticsDatasetRunDeletionGeneration.findMany({
+        where: {
+          projectId: input.projectId,
+          datasetRunId: { in: datasetRunIds },
+        },
+        select: { datasetRunId: true, generation: true },
+      }),
     ]);
     const traceGenerationById = new Map(
       traceTombstones.map(({ traceId, generation }) => [traceId, generation]),
+    );
+    const datasetGenerationById = new Map(
+      datasetGenerations.map(({ datasetId, generation }) => [
+        datasetId,
+        generation,
+      ]),
+    );
+    const runGenerationById = new Map(
+      runGenerations.map(({ datasetRunId, generation }) => [
+        datasetRunId,
+        generation,
+      ]),
     );
     // Tombstones are permanent anti-resurrection barriers. A candidate that
     // was canonicalized after a barrier must be cancelled as well as one that
     // raced with it; equality is therefore not permission to write.
     const stale = candidates.map(
-      ({ owningTraceId }) =>
+      ({ owningTraceId, owningDatasetId, owningDatasetRunId }) =>
         (projectGeneration?.generation ?? 0n) !== 0n ||
         (owningTraceId
           ? (traceGenerationById.get(owningTraceId) ?? 0n) !== 0n
+          : false) ||
+        (owningDatasetId
+          ? (datasetGenerationById.get(owningDatasetId) ?? 0n) !== 0n
+          : false) ||
+        (owningDatasetRunId
+          ? (runGenerationById.get(owningDatasetRunId) ?? 0n) !== 0n
           : false),
     );
     if (!stale.some(Boolean)) return { outcome: "current" as const };
@@ -602,6 +662,14 @@ export async function completeAnalyticsIngestionOperation(input: {
   operationId: string;
   projectId: string;
   now: Date;
+  evaluationCapture?: {
+    readonly admissionContext: AnalyticsRuntimeAdmissionContext;
+    readonly targets: readonly AnalyticsEvaluationDispatchTargetInput[];
+  };
+  integrationCapture?: {
+    readonly admissionContext: AnalyticsRuntimeAdmissionContext;
+    readonly targets: readonly AnalyticsIntegrationDeliveryTargetInput[];
+  };
 }): Promise<{
   readonly outcome: "completed" | "already_completed" | "pending";
   readonly status: AnalyticsIngestionOperationStatus;
@@ -682,6 +750,24 @@ export async function completeAnalyticsIngestionOperation(input: {
           : ("pending" as const),
         status: current.status,
       };
+    }
+    if (input.evaluationCapture && (hasVisible || status === "VISIBLE")) {
+      await captureAnalyticsEvaluationDispatches({
+        transaction,
+        operation,
+        admissionContext: input.evaluationCapture.admissionContext,
+        targets: input.evaluationCapture.targets,
+        now: input.now,
+      });
+    }
+    if (input.integrationCapture && (hasVisible || status === "VISIBLE")) {
+      await captureAnalyticsIntegrationDeliveries({
+        transaction,
+        operation,
+        admissionContext: input.integrationCapture.admissionContext,
+        targets: input.integrationCapture.targets,
+        now: input.now,
+      });
     }
     return { outcome: "completed" as const, status };
   });

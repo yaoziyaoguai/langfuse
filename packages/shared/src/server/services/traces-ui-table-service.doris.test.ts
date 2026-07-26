@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   count: vi.fn(),
+  metrics: vi.fn(),
   traceControlFindMany: vi.fn(),
 }));
 
@@ -15,11 +16,16 @@ vi.mock("../../db", () => ({
 vi.mock("../repositories/telemetry/doris/runtime", () => ({
   isDorisAnalyticsBackend: () => true,
   getDorisTelemetryRepositories: () => ({
-    traces: { list: mocks.list, count: mocks.count },
+    traces: { list: mocks.list, count: mocks.count, metrics: mocks.metrics },
   }),
 }));
 
-import { getTracesTable, getTracesTableCount } from "./traces-ui-table-service";
+import {
+  getTraceDeleteCursorPageFromTraces,
+  getTracesTable,
+  getTracesTableCount,
+  getTracesTableMetrics,
+} from "./traces-ui-table-service";
 
 const trace = {
   id: "trace-1",
@@ -128,6 +134,151 @@ describe("Doris traces UI service", () => {
     ).resolves.toBe(3);
     expect(mocks.count).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "project-1" }),
+    );
+  });
+
+  it("routes trace metrics and the export ID alias through Doris", async () => {
+    mocks.metrics.mockResolvedValue([
+      {
+        id: "trace-1",
+        projectId: "project-1",
+        timestamp: new Date("2026-07-17T10:00:00.000Z"),
+        latency: 2,
+        level: "ERROR",
+        observationCount: 2,
+        usageDetails: {
+          input: 10,
+          input_cached: 2,
+          output: 5,
+          total: 17,
+        },
+        costDetails: { input: 0.1, output: 0.2, total: 0.3 },
+        errorCount: 1,
+        warningCount: 0,
+        defaultCount: 1,
+        debugCount: 0,
+      },
+    ]);
+
+    await expect(
+      getTracesTableMetrics({
+        projectId: "project-1",
+        filter: [
+          ...dateFilters,
+          {
+            type: "stringOptions",
+            column: "ID",
+            operator: "any of",
+            value: ["trace-1"],
+          },
+        ],
+        orderBy: { column: "timestamp", order: "DESC" },
+        limit: 50,
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "trace-1",
+        promptTokens: 12n,
+        completionTokens: 5n,
+        totalTokens: 17n,
+        observationCount: 2n,
+        level: "ERROR",
+        errorCount: 1n,
+      }),
+    ]);
+    expect(mocks.metrics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        filters: expect.arrayContaining([
+          expect.objectContaining({
+            column: "traceId",
+            operator: "any of",
+            value: ["trace-1"],
+          }),
+        ]),
+        orderBy: { column: "timestamp", order: "DESC" },
+        offset: 0,
+        limit: 50,
+      }),
+    );
+  });
+
+  it("preserves null latency and empty usage/cost details", async () => {
+    mocks.metrics.mockResolvedValue([
+      {
+        id: "trace-1",
+        projectId: "project-1",
+        timestamp: new Date("2026-07-17T10:00:00.000Z"),
+        latency: null,
+        level: "DEBUG",
+        observationCount: 1,
+        usageDetails: {},
+        costDetails: {},
+        errorCount: 0,
+        warningCount: 0,
+        defaultCount: 0,
+        debugCount: 1,
+      },
+    ]);
+
+    await expect(
+      getTracesTableMetrics({
+        projectId: "project-1",
+        filter: dateFilters,
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "trace-1",
+        latency: null,
+        promptTokens: 0n,
+        completionTokens: 0n,
+        totalTokens: 0n,
+        calculatedTotalCost: null,
+        calculatedInputCost: null,
+        calculatedOutputCost: null,
+        usageDetails: {},
+        costDetails: {},
+      }),
+    ]);
+  });
+
+  it("routes the durable trace-delete cursor through Doris", async () => {
+    mocks.list.mockResolvedValue({ items: [trace], nextCursor: null });
+
+    await expect(
+      getTraceDeleteCursorPageFromTraces({
+        projectId: "project-1",
+        filter: [],
+        cutoffCreatedAt: new Date("2026-07-18T00:00:00.000Z"),
+        cursor: {
+          traceId: "trace-cursor",
+          timestamp: "2026-07-17T12:00:00.000Z",
+        },
+        limit: 50,
+      }),
+    ).resolves.toEqual([
+      {
+        traceId: "trace-1",
+        timestamp: "2026-07-17T10:00:00.000Z",
+      },
+    ]);
+
+    const cursor = mocks.list.mock.calls[0]?.[0]?.cursor as string;
+    expect(
+      JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
+    ).toEqual({
+      version: 1,
+      timestamp: "2026-07-17T12:00:00.000Z",
+      traceId: "trace-cursor",
+    });
+    expect(mocks.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        cursor,
+        limit: 50,
+        offset: 0,
+        orderBy: undefined,
+      }),
     );
   });
 });

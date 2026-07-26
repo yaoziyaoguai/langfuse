@@ -1,5 +1,6 @@
 import type { AnalyticsEntityHead } from "@prisma/client";
 import {
+  encodeDatasetRunItemIdentity,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
   encodeScoreIdentity,
@@ -19,6 +20,8 @@ function head(
     entityKey,
     lookupId: "lookup-1",
     owningTraceId: "trace-1",
+    owningDatasetId: null,
+    owningDatasetRunId: null,
     sourceVersion: 1n,
     canonicalPayloadHash: "hash",
     partitionDate: new Date("2026-07-18T00:00:00.000Z"),
@@ -26,6 +29,8 @@ function head(
     fenceGeneration: 1n,
     traceDeletionGeneration: 0n,
     projectDeletionGeneration: 0n,
+    datasetDeletionGeneration: 0n,
+    runDeletionGeneration: 0n,
     operationId: "ingestion-1",
     createdAt: new Date("2026-07-18T00:00:00.000Z"),
     updatedAt: new Date("2026-07-18T00:00:00.000Z"),
@@ -67,9 +72,20 @@ describe("DorisMaterializedDeletionWriter", () => {
           fileId: "file-1",
         }),
       ),
+      {
+        ...head(
+          "DATASET_RUN_ITEM",
+          encodeDatasetRunItemIdentity({
+            projectId: "project-1",
+            runItemId: "run-item-1",
+          }),
+        ),
+        owningDatasetId: "dataset-1",
+        owningDatasetRunId: "run-1",
+      },
     ]);
 
-    expect(load).toHaveBeenCalledTimes(3);
+    expect(load).toHaveBeenCalledTimes(4);
     expect(load).toHaveBeenCalledWith(
       expect.objectContaining({
         table: "events_current",
@@ -84,6 +100,12 @@ describe("DorisMaterializedDeletionWriter", () => {
     );
     expect(load).toHaveBeenCalledWith(
       expect.objectContaining({ table: "blob_storage_file_log" }),
+    );
+    expect(load).toHaveBeenCalledWith(
+      expect.objectContaining({
+        table: "dataset_run_items_current",
+        ndjsonBody: expect.stringContaining('"run_item_id":"run-item-1"'),
+      }),
     );
     expect(
       load.mock.calls.every(([request]) => request.mergeType === "DELETE"),

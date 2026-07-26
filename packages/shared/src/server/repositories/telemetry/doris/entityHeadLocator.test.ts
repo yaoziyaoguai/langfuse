@@ -5,6 +5,7 @@ import {
   findObservationHeadLocators,
   findScoreHeadLocators,
   findTraceEventHeadLocators,
+  findTraceEventHeadLocatorsByIds,
 } from "./entityHeadLocator";
 
 describe("Doris entity-head locators", () => {
@@ -89,6 +90,41 @@ describe("Doris entity-head locators", () => {
           projectId: "project-1",
           entityType: "EVENT",
           owningTraceId: "trace-1",
+        },
+      }),
+    );
+  });
+
+  it("enumerates multiple traces with one project-scoped locator lookup", async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        partitionDate: new Date("2026-07-18T00:00:00.000Z"),
+        owningTraceId: "trace-2",
+        lookupId: "span-2",
+      },
+      {
+        partitionDate: new Date("2026-07-17T00:00:00.000Z"),
+        owningTraceId: "trace-1",
+        lookupId: "span-1",
+      },
+    ]);
+    const client = {
+      analyticsEntityHead: { findMany },
+    } as unknown as PrismaClient;
+
+    await expect(
+      findTraceEventHeadLocatorsByIds({
+        client,
+        projectId: "project-1",
+        traceIds: ["trace-1", "trace-2", "trace-1"],
+      }),
+    ).resolves.toHaveLength(2);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          projectId: "project-1",
+          entityType: "EVENT",
+          owningTraceId: { in: ["trace-1", "trace-2"] },
         },
       }),
     );

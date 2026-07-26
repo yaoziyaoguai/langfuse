@@ -10,14 +10,24 @@ import {
 } from "../../../queries/logical/searchPlan";
 import {
   findTraceEventHeadLocators,
+  findTraceEventHeadLocatorsByIds,
   type EventHeadLocator,
 } from "./entityHeadLocator";
+import {
+  ObservationLevelDomain,
+  type ObservationLevelType,
+} from "../../../../domain";
 
 const MAX_PAGE_SIZE = 999;
 
 type LocateTrace = (input: {
   readonly projectId: string;
   readonly traceId: string;
+}) => Promise<readonly EventHeadLocator[]>;
+
+type LocateTraces = (input: {
+  readonly projectId: string;
+  readonly traceIds: readonly string[];
 }) => Promise<readonly EventHeadLocator[]>;
 
 type DorisTraceRow = Record<string, unknown> & {
@@ -57,6 +67,21 @@ export type DorisTrace = {
 export type DorisTracesPage = {
   readonly items: readonly DorisTrace[];
   readonly nextCursor: string | null;
+};
+
+export type DorisTraceMetrics = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly timestamp: Date;
+  readonly latency: number | null;
+  readonly level: ObservationLevelType;
+  readonly observationCount: number;
+  readonly usageDetails: Readonly<Record<string, number>>;
+  readonly costDetails: Readonly<Record<string, number>>;
+  readonly errorCount: number;
+  readonly warningCount: number;
+  readonly defaultCount: number;
+  readonly debugCount: number;
 };
 
 export type DorisTraceOrderBy = {
@@ -157,6 +182,52 @@ function objectValue(value: unknown): Readonly<Record<string, unknown>> {
     : {};
 }
 
+function numericRecord(value: unknown): Readonly<Record<string, number>> {
+  return Object.fromEntries(
+    Object.entries(objectValue(value)).flatMap(([key, item]) => {
+      const parsed = nullableNumber(item);
+      return parsed === null ? [] : [[key, parsed]];
+    }),
+  );
+}
+
+function exactTraceIdsFromFilters(
+  filters: EventsTableFilterState,
+): readonly string[] {
+  let exactIds: string[] | null = null;
+  for (const filter of filters) {
+    if (filter.column !== "traceId") continue;
+    const candidateIds =
+      filter.type === "string" && filter.operator === "="
+        ? [filter.value]
+        : filter.type === "stringOptions" && filter.operator === "any of"
+          ? filter.value
+          : null;
+    if (candidateIds === null) continue;
+    const candidates = new Set(candidateIds);
+    exactIds =
+      exactIds === null
+        ? [...candidates]
+        : exactIds.filter((traceId) => candidates.has(traceId));
+  }
+  return exactIds ?? [];
+}
+
+function locatorRange(locators: readonly EventHeadLocator[]): {
+  readonly range: AnalyticsTimeRange;
+  readonly partitionDates: readonly string[];
+} {
+  const partitionDates = [
+    ...new Set(locators.map(({ partitionDate }) => partitionDate)),
+  ].sort();
+  const from = new Date(`${partitionDates[0]}T00:00:00.000Z`);
+  const to = new Date(
+    `${partitionDates[partitionDates.length - 1]}T00:00:00.000Z`,
+  );
+  to.setUTCDate(to.getUTCDate() + 1);
+  return { range: { from, to }, partitionDates };
+}
+
 function decodeTrace(row: DorisTraceRow): DorisTrace {
   const timestamp = dateTime(row.trace_timestamp);
   const endTime = dateTime(row.trace_end_time);
@@ -197,7 +268,9 @@ function decodeTrace(row: DorisTraceRow): DorisTrace {
   };
 }
 
-function encodeCursor(trace: DorisTrace): string {
+export function encodeDorisTraceCursor(
+  trace: Pick<DorisTrace, "timestamp" | "id">,
+): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
@@ -377,16 +450,186 @@ LIMIT ?${offsetSql}`;
   return { sql, params };
 }
 
+function compileTraceMetrics(input: {
+  readonly projectId: string;
+  readonly range: AnalyticsTimeRange | null;
+  readonly filters: EventsTableFilterState;
+  readonly search?: {
+    readonly query: string;
+    readonly searchType?: readonly TracingSearchType[];
+  };
+  readonly limit: number;
+  readonly offset?: number;
+  readonly orderBy?: DorisTraceOrderBy;
+  readonly exactEventRange?: AnalyticsTimeRange;
+  readonly partitionDates?: readonly string[];
+}): { readonly sql: string; readonly params: readonly unknown[] } {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > MAX_PAGE_SIZE ||
+    !Number.isSafeInteger(input.offset ?? 0) ||
+    (input.offset ?? 0) < 0
+  ) {
+    throw new InvalidRequestError("Invalid Doris trace metrics page size");
+  }
+  const matchedEvents = compileDorisVisibleEventScope({
+    projectId: input.projectId,
+    range: input.range,
+    filters: input.filters,
+    search: input.search,
+  });
+  const allEvents = compileDorisVisibleEventScope({
+    projectId: input.projectId,
+    range: input.exactEventRange ?? input.range,
+    filters: [],
+    partitionDates: input.partitionDates,
+  });
+  const direction = input.orderBy?.order ?? "DESC";
+  const offsetSql = input.offset ? " OFFSET ?" : "";
+  return {
+    sql: `WITH matched_trace_ids AS (
+  SELECT DISTINCT e.trace_id
+  ${matchedEvents.fromSql}
+  WHERE ${matchedEvents.whereSql}
+), scoped_events AS (
+  SELECT
+    e.project_id,
+    e.trace_id,
+    e.start_time,
+    e.end_time,
+    e.level,
+    COALESCE(e.usage_details_json, CAST(e.usage_details AS STRING)) AS usage_details,
+    COALESCE(e.cost_details_json, CAST(e.cost_details AS STRING)) AS cost_details
+  ${allEvents.fromSql}
+  INNER JOIN matched_trace_ids matched ON matched.trace_id = e.trace_id
+  WHERE ${allEvents.whereSql}
+), trace_metrics AS (
+  SELECT
+    e.project_id,
+    e.trace_id,
+    MIN(e.start_time) AS trace_timestamp,
+    CASE
+      WHEN COUNT(e.end_time) = 0 THEN NULL
+      ELSE (
+        UNIX_TIMESTAMP(GREATEST(MAX(e.start_time), MAX(e.end_time)))
+        - UNIX_TIMESTAMP(LEAST(MIN(e.start_time), MIN(e.end_time)))
+      ) * 1000
+    END AS latency_milliseconds,
+    COUNT(*) AS observation_count,
+    CASE
+      WHEN SUM(CASE WHEN e.level = 'ERROR' THEN 1 ELSE 0 END) > 0 THEN 'ERROR'
+      WHEN SUM(CASE WHEN e.level = 'WARNING' THEN 1 ELSE 0 END) > 0 THEN 'WARNING'
+      WHEN SUM(CASE WHEN e.level = 'DEFAULT' THEN 1 ELSE 0 END) > 0 THEN 'DEFAULT'
+      ELSE 'DEBUG'
+    END AS aggregated_level,
+    SUM(CASE WHEN e.level = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+    SUM(CASE WHEN e.level = 'WARNING' THEN 1 ELSE 0 END) AS warning_count,
+    SUM(CASE WHEN e.level = 'DEFAULT' THEN 1 ELSE 0 END) AS default_count,
+    SUM(CASE WHEN e.level = 'DEBUG' THEN 1 ELSE 0 END) AS debug_count
+  FROM scoped_events e
+  GROUP BY e.project_id, e.trace_id
+), usage_detail_values AS (
+  SELECT
+    e.project_id,
+    e.trace_id,
+    usage_key,
+    SUM(CAST(JSON_EXTRACT_DOUBLE(
+      CAST(e.usage_details AS JSON),
+      CONCAT('$.', CHAR(34), REPLACE(usage_key, CHAR(34), CONCAT(CHAR(92), CHAR(34))), CHAR(34))
+    ) AS DECIMAL(38, 18))) AS usage_value
+  FROM scoped_events e
+  LATERAL VIEW explode(JSON_KEYS(CAST(e.usage_details AS JSON))) exploded_usage AS usage_key
+  GROUP BY e.project_id, e.trace_id, usage_key
+), usage_details AS (
+  SELECT project_id, trace_id, MAP_AGG(usage_key, usage_value) AS usage_details
+  FROM usage_detail_values
+  GROUP BY project_id, trace_id
+), cost_detail_values AS (
+  SELECT
+    e.project_id,
+    e.trace_id,
+    cost_key,
+    SUM(CAST(JSON_EXTRACT_DOUBLE(
+      CAST(e.cost_details AS JSON),
+      CONCAT('$.', CHAR(34), REPLACE(cost_key, CHAR(34), CONCAT(CHAR(92), CHAR(34))), CHAR(34))
+    ) AS DECIMAL(38, 18))) AS cost_value
+  FROM scoped_events e
+  LATERAL VIEW explode(JSON_KEYS(CAST(e.cost_details AS JSON))) exploded_cost AS cost_key
+  GROUP BY e.project_id, e.trace_id, cost_key
+), cost_details AS (
+  SELECT project_id, trace_id, MAP_AGG(cost_key, cost_value) AS cost_details
+  FROM cost_detail_values
+  GROUP BY project_id, trace_id
+)
+SELECT
+  e.project_id,
+  e.trace_id,
+  e.trace_timestamp,
+  e.latency_milliseconds,
+  e.observation_count,
+  usage.usage_details,
+  cost.cost_details,
+  e.aggregated_level,
+  e.error_count,
+  e.warning_count,
+  e.default_count,
+  e.debug_count
+FROM trace_metrics e
+LEFT JOIN usage_details usage
+  ON usage.project_id = e.project_id AND usage.trace_id = e.trace_id
+LEFT JOIN cost_details cost
+  ON cost.project_id = e.project_id AND cost.trace_id = e.trace_id
+ORDER BY e.trace_timestamp ${direction}, e.trace_id ${direction}
+LIMIT ?${offsetSql}`,
+    params: [
+      ...matchedEvents.params,
+      ...allEvents.params,
+      input.limit,
+      ...(input.offset ? [input.offset] : []),
+    ],
+  };
+}
+
+type DorisTraceMetricsRow = Record<string, unknown> & {
+  readonly project_id: string;
+  readonly trace_id: string;
+  readonly trace_timestamp: string | Date;
+};
+
+function decodeTraceMetrics(row: DorisTraceMetricsRow): DorisTraceMetrics {
+  const latencyMilliseconds = nullableNumber(row.latency_milliseconds);
+  return {
+    id: row.trace_id,
+    projectId: row.project_id,
+    timestamp: dateTime(row.trace_timestamp),
+    latency: latencyMilliseconds === null ? null : latencyMilliseconds / 1_000,
+    level: ObservationLevelDomain.parse(row.aggregated_level),
+    observationCount: numberValue(row.observation_count),
+    usageDetails: numericRecord(row.usage_details),
+    costDetails: numericRecord(row.cost_details),
+    errorCount: numberValue(row.error_count),
+    warningCount: numberValue(row.warning_count),
+    defaultCount: numberValue(row.default_count),
+    debugCount: numberValue(row.debug_count),
+  };
+}
+
 export class DorisTracesRepository {
   private readonly locateTrace: LocateTrace;
+  private readonly locateTraces: LocateTraces;
 
   constructor(
     private readonly dependencies: {
       readonly query: DorisQueryExecutor["query"];
+      readonly streamQuery?: NonNullable<DorisQueryExecutor["streamQuery"]>;
       readonly locateTrace?: LocateTrace;
+      readonly locateTraces?: LocateTraces;
     },
   ) {
     this.locateTrace = dependencies.locateTrace ?? findTraceEventHeadLocators;
+    this.locateTraces =
+      dependencies.locateTraces ?? findTraceEventHeadLocatorsByIds;
   }
 
   async list(input: {
@@ -419,9 +662,106 @@ export class DorisTracesRepository {
       items,
       nextCursor:
         !input.orderBy && rows.length > input.limit && items.length > 0
-          ? encodeCursor(items[items.length - 1]!)
+          ? encodeDorisTraceCursor(items[items.length - 1]!)
           : null,
     };
+  }
+
+  async *scanIdentities(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly limit: number;
+    readonly signal?: AbortSignal;
+  }): AsyncIterable<{ readonly id: string }> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Doris trace identity limit is invalid");
+    }
+    const scope = compileDorisVisibleEventScope(input);
+    const sql = `SELECT DISTINCT e.trace_id\n${scope.fromSql}\nWHERE ${scope.whereSql}\nORDER BY e.trace_id ASC\nLIMIT ?`;
+    const params = scope.params.concat(input.limit);
+    const rows = this.dependencies.streamQuery
+      ? this.dependencies.streamQuery<{ readonly trace_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        )
+      : await this.dependencies.query<{ readonly trace_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        );
+    for await (const row of rows) yield { id: String(row.trace_id) };
+  }
+
+  async *scanEvaluationTargets(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly limit: number;
+    readonly signal?: AbortSignal;
+  }): AsyncIterable<{
+    readonly id: string;
+    readonly timestamp: Date;
+    readonly environment: string;
+  }> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Doris evaluation trace limit is invalid");
+    }
+    const matched = compileDorisVisibleEventScope({
+      ...input,
+      allowUnboundedFullContent: true,
+    });
+    const allEvents = compileDorisVisibleEventScope({
+      projectId: input.projectId,
+      range: input.range,
+      filters: [],
+    });
+    const sql = `WITH matched_trace_ids AS (
+  SELECT DISTINCT e.trace_id
+  ${matched.fromSql}
+  WHERE ${matched.whereSql}
+)
+SELECT
+  e.trace_id,
+  MIN(e.start_time) AS trace_timestamp,
+  MIN(e.environment) AS environment
+${allEvents.fromSql}
+INNER JOIN matched_trace_ids matched ON matched.trace_id = e.trace_id
+WHERE ${allEvents.whereSql}
+GROUP BY e.trace_id
+ORDER BY e.trace_id ASC
+LIMIT ?`;
+    const rows = this.dependencies.streamQuery
+      ? this.dependencies.streamQuery<{
+          readonly trace_id: string;
+          readonly trace_timestamp: string | Date;
+          readonly environment: string;
+        }>(sql, [...matched.params, ...allEvents.params, input.limit], {
+          signal: input.signal,
+        })
+      : await this.dependencies.query<{
+          readonly trace_id: string;
+          readonly trace_timestamp: string | Date;
+          readonly environment: string;
+        }>(sql, [...matched.params, ...allEvents.params, input.limit], {
+          signal: input.signal,
+        });
+    for await (const row of rows) {
+      yield {
+        id: String(row.trace_id),
+        timestamp: dateTime(row.trace_timestamp),
+        environment: String(row.environment),
+      };
+    }
   }
 
   async count(input: {
@@ -439,6 +779,43 @@ export class DorisTracesRepository {
       scope.params,
     );
     return numberValue(rows[0]?.count);
+  }
+
+  async metrics(input: {
+    readonly projectId: string;
+    readonly range: AnalyticsTimeRange | null;
+    readonly filters: EventsTableFilterState;
+    readonly search?: {
+      readonly query: string;
+      readonly searchType?: readonly TracingSearchType[];
+    };
+    readonly limit: number;
+    readonly offset?: number;
+    readonly orderBy?: DorisTraceOrderBy;
+  }): Promise<readonly DorisTraceMetrics[]> {
+    const exactTraceIds = exactTraceIdsFromFilters(input.filters);
+    let exactEventRange: AnalyticsTimeRange | undefined;
+    let partitionDates: readonly string[] | undefined;
+    if (exactTraceIds.length > 0) {
+      const locators = await this.locateTraces({
+        projectId: input.projectId,
+        traceIds: exactTraceIds,
+      });
+      if (locators.length === 0) return [];
+      const located = locatorRange(locators);
+      exactEventRange = located.range;
+      partitionDates = located.partitionDates;
+    }
+    const compiled = compileTraceMetrics({
+      ...input,
+      exactEventRange,
+      partitionDates,
+    });
+    const rows = await this.dependencies.query<DorisTraceMetricsRow>(
+      compiled.sql,
+      compiled.params,
+    );
+    return rows.map(decodeTraceMetrics);
   }
 
   async filterOptionValues(input: {
@@ -536,17 +913,10 @@ LIMIT ?${offsetSql}`,
   }): Promise<DorisTrace | null> {
     const locators = await this.locateTrace(input);
     if (locators.length === 0) return null;
-    const partitionDates = [
-      ...new Set(locators.map(({ partitionDate }) => partitionDate)),
-    ].sort();
-    const from = new Date(`${partitionDates[0]}T00:00:00.000Z`);
-    const to = new Date(
-      `${partitionDates[partitionDates.length - 1]}T00:00:00.000Z`,
-    );
-    to.setUTCDate(to.getUTCDate() + 1);
+    const { range, partitionDates } = locatorRange(locators);
     const compiled = compileTraceList({
       projectId: input.projectId,
-      range: { from, to },
+      range,
       filters: [
         {
           type: "string",
@@ -564,6 +934,58 @@ LIMIT ?${offsetSql}`,
       compiled.params,
     );
     return rows[0] ? decodeTrace(rows[0]) : null;
+  }
+
+  async getMany(input: {
+    readonly projectId: string;
+    readonly traceIds: readonly string[];
+  }): Promise<readonly DorisTrace[]> {
+    const traceIds = [...new Set(input.traceIds)];
+    if (traceIds.length === 0) return [];
+    const locators = await this.locateTraces({
+      projectId: input.projectId,
+      traceIds,
+    });
+    if (locators.length === 0) return [];
+    const locatedTraceIds = [
+      ...new Set(locators.map(({ traceId }) => traceId)),
+    ];
+    const traces: DorisTrace[] = [];
+    for (
+      let offset = 0;
+      offset < locatedTraceIds.length;
+      offset += MAX_PAGE_SIZE
+    ) {
+      const chunk = locatedTraceIds.slice(offset, offset + MAX_PAGE_SIZE);
+      const chunkIds = new Set(chunk);
+      const chunkLocators = locators.filter(({ traceId }) =>
+        chunkIds.has(traceId),
+      );
+      const { range, partitionDates } = locatorRange(chunkLocators);
+      const compiled = compileTraceList({
+        projectId: input.projectId,
+        range,
+        filters: [
+          {
+            type: "stringOptions",
+            column: "traceId",
+            operator: "any of",
+            value: chunk,
+          },
+        ],
+        limit: chunk.length,
+        partitionDates,
+        includeFullContent: true,
+      });
+      const rows = await this.dependencies.query<DorisTraceRow>(
+        compiled.sql,
+        compiled.params,
+      );
+      for (const row of rows) {
+        traces.push(decodeTrace(row));
+      }
+    }
+    return traces;
   }
 
   async countByProjectCreatedAt(input: {

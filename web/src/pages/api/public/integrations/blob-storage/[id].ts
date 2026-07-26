@@ -13,6 +13,10 @@ import {
 } from "@langfuse/shared";
 import type { BlobStorageIntegrationStatusResponseType } from "@/src/features/public-api/types/blob-storage-integrations";
 import { deriveSyncStatus } from "@/src/features/blobstorage-integration/deriveSyncStatus";
+import {
+  getDorisIntegrationMutationAdmission,
+  syncDorisIntegrationMutation,
+} from "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle";
 
 export default withMiddlewares({
   GET: handleGetBlobStorageIntegrationStatus,
@@ -73,9 +77,18 @@ async function handleDeleteBlobStorageIntegration(
     throw new LangfuseNotFoundError("Blob storage integration not found");
   }
 
-  // Delete the integration
-  await prisma.blobStorageIntegration.delete({
-    where: { projectId: id },
+  const integrationAdmission = getDorisIntegrationMutationAdmission();
+  await prisma.$transaction(async (transaction) => {
+    await syncDorisIntegrationMutation({
+      transaction,
+      admissionContext: integrationAdmission,
+      projectId: id,
+      integrationType: "BLOB_STORAGE",
+      enabled: false,
+    });
+    await transaction.blobStorageIntegration.delete({
+      where: { projectId: id },
+    });
   });
 
   await auditLog({

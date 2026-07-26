@@ -1099,6 +1099,54 @@ Respond with JSON: {"score": <number>, "reasoning": "<explanation>"}`;
       expect(jobs.length).toBe(0);
     }, 10_000);
 
+    test("creates a managed manual job for an inactive config", async () => {
+      const { projectId } = await createOrgProjectAndApiKey();
+      const traceId = randomUUID();
+      const configId = randomUUID();
+      const traceTimestamp = new Date();
+
+      await upsertTrace({
+        id: traceId,
+        project_id: projectId,
+        timestamp: convertDateToClickhouseDateTime(traceTimestamp),
+        created_at: convertDateToClickhouseDateTime(traceTimestamp),
+        updated_at: convertDateToClickhouseDateTime(traceTimestamp),
+      });
+      await prisma.jobConfiguration.create({
+        data: {
+          id: configId,
+          projectId,
+          filter: JSON.parse("[]"),
+          jobType: "EVAL",
+          delay: 0,
+          sampling: new Decimal("1"),
+          targetObject: EvalTargetObject.TRACE,
+          scoreName: "manual-score",
+          variableMapping: JSON.parse("[]"),
+          status: "INACTIVE",
+        },
+      });
+
+      await createEvalJobs({
+        sourceEventType: "ui-create-eval",
+        event: {
+          projectId,
+          traceId,
+          configId,
+          timestamp: traceTimestamp,
+          exactTimestamp: traceTimestamp,
+        },
+        jobTimestamp,
+        executionMode: "MANUAL",
+      });
+
+      await expect(
+        prisma.jobExecution.count({
+          where: { projectId, jobConfigurationId: configId },
+        }),
+      ).resolves.toBe(1);
+    }, 10_000);
+
     test("does not create eval job for existing job execution", async () => {
       const { projectId } = await createOrgProjectAndApiKey();
       const traceId = randomUUID();
@@ -1848,7 +1896,7 @@ Respond with JSON: {"score": <number>, "reasoning": "<explanation>"}`;
 
       await expect(evaluate({ event: payload })).rejects.toThrowError(
         new UnrecoverableError(
-          `Invalid model configuration for job ${jobExecutionId}: API key for provider "openai" not found in project ${projectId}`,
+          `Invalid model configuration for evaluation job ${jobExecutionId}`,
         ),
       );
 

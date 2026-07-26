@@ -25,6 +25,10 @@ type DorisEvaluationTargetDependencies = {
     readonly bookmarked: boolean;
     readonly public: boolean;
   } | null>;
+  readonly checkTraceExists: AnalyticsEvaluationTargetSource["checkTraceExists"];
+  readonly checkObservationExists: AnalyticsEvaluationTargetSource["checkObservationExists"];
+  readonly getDatasetItemsByTraceId: AnalyticsEvaluationTargetSource["getDatasetItemsByTraceId"];
+  readonly getObservationForEvaluation: AnalyticsEvaluationTargetSource["getObservationForEvaluation"];
 };
 
 export class DorisEvaluationTargetSource implements AnalyticsEvaluationTargetSource {
@@ -73,5 +77,35 @@ export class DorisEvaluationTargetSource implements AnalyticsEvaluationTargetSou
         limit: 999,
       });
     return page.items.map(this.dependencies.toObservationDomain);
+  }
+
+  checkTraceExists(
+    request: Parameters<AnalyticsEvaluationTargetSource["checkTraceExists"]>[0],
+  ) {
+    return this.dependencies.checkTraceExists(request);
+  }
+
+  checkObservationExists(
+    request: Parameters<
+      AnalyticsEvaluationTargetSource["checkObservationExists"]
+    >[0],
+  ) {
+    return this.dependencies.checkObservationExists(request);
+  }
+
+  getDatasetItemsByTraceId(
+    request: Parameters<
+      AnalyticsEvaluationTargetSource["getDatasetItemsByTraceId"]
+    >[0],
+  ) {
+    return this.dependencies.getDatasetItemsByTraceId(request);
+  }
+
+  getObservationForEvaluation(
+    request: Parameters<
+      AnalyticsEvaluationTargetSource["getObservationForEvaluation"]
+    >[0],
+  ) {
+    return this.dependencies.getObservationForEvaluation(request);
   }
 }

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   invalidateProjectEvalConfigCaches,
   type ApiAccessScope,
@@ -41,6 +43,7 @@ import {
 } from "./validation";
 import { createUnstablePublicApiError } from "@/src/features/public-api/server/unstable-public-api-error-contract";
 import { assertUnreachable } from "@/src/utils/types";
+import { withAnalyticsEvaluationMutationAdmission } from "@/src/features/evals/server/evaluationMutationAdmission";
 
 const MAX_ACTIVE_EVALUATION_RULES = 500;
 
@@ -260,30 +263,36 @@ export async function createPublicEvaluationRule(params: {
     });
   }
 
-  const created = await prisma.jobConfiguration.create({
-    data: {
-      projectId: params.projectId,
-      jobType: "EVAL",
-      evalTemplateId: template.id,
-      scoreName: data.scoreName,
-      targetObject: data.targetObject,
-      filter: data.filter,
-      variableMapping: data.variableMapping,
-      sampling: data.sampling,
-      delay: 0,
-      status: data.status,
-      timeScope: ["NEW"],
-    },
-    include: {
-      evalTemplate: {
-        select: {
-          id: true,
-          projectId: true,
-          name: true,
-          type: true,
-        },
-      },
-    },
+  const created = await withAnalyticsEvaluationMutationAdmission({
+    resourceIdentity: `public-rule-create:${randomUUID()}`,
+    mutate: (guard) =>
+      guard.withIoFence((tx) =>
+        tx.jobConfiguration.create({
+          data: {
+            projectId: params.projectId,
+            jobType: "EVAL",
+            evalTemplateId: template.id,
+            scoreName: data.scoreName,
+            targetObject: data.targetObject,
+            filter: data.filter,
+            variableMapping: data.variableMapping,
+            sampling: data.sampling,
+            delay: 0,
+            status: data.status,
+            timeScope: ["NEW"],
+          },
+          include: {
+            evalTemplate: {
+              select: {
+                id: true,
+                projectId: true,
+                name: true,
+                type: true,
+              },
+            },
+          },
+        }),
+      ),
   });
 
   if (created.status === JobConfigState.ACTIVE) {
@@ -410,37 +419,43 @@ export async function updatePublicEvaluationRule(params: {
     });
   }
 
-  const updated = await prisma.jobConfiguration.update({
-    where: {
-      id: params.evaluationRuleId,
-      projectId: params.projectId,
-    },
-    data: {
-      evalTemplateId: template.id,
-      scoreName: data.scoreName,
-      targetObject: data.targetObject,
-      filter: data.filter,
-      variableMapping: data.variableMapping,
-      sampling: data.sampling,
-      status: data.status,
-      ...(shouldResetBlockState
-        ? {
-            blockedAt: null,
-            blockReason: null,
-            blockMessage: null,
-          }
-        : {}),
-    },
-    include: {
-      evalTemplate: {
-        select: {
-          id: true,
-          projectId: true,
-          name: true,
-          type: true,
-        },
-      },
-    },
+  const updated = await withAnalyticsEvaluationMutationAdmission({
+    resourceIdentity: `public-rule-update:${params.evaluationRuleId}`,
+    mutate: (guard) =>
+      guard.withIoFence((tx) =>
+        tx.jobConfiguration.update({
+          where: {
+            id: params.evaluationRuleId,
+            projectId: params.projectId,
+          },
+          data: {
+            evalTemplateId: template.id,
+            scoreName: data.scoreName,
+            targetObject: data.targetObject,
+            filter: data.filter,
+            variableMapping: data.variableMapping,
+            sampling: data.sampling,
+            status: data.status,
+            ...(shouldResetBlockState
+              ? {
+                  blockedAt: null,
+                  blockReason: null,
+                  blockMessage: null,
+                }
+              : {}),
+          },
+          include: {
+            evalTemplate: {
+              select: {
+                id: true,
+                projectId: true,
+                name: true,
+                type: true,
+              },
+            },
+          },
+        }),
+      ),
   });
 
   await invalidateProjectEvalConfigCaches(params.projectId);
@@ -471,11 +486,17 @@ export async function deletePublicEvaluationRule(params: {
   const existing = await findPublicEvaluationRuleOrThrow(params);
   const existingPublic = toApiEvaluationRule(existing);
 
-  await prisma.jobConfiguration.delete({
-    where: {
-      id: params.evaluationRuleId,
-      projectId: params.projectId,
-    },
+  await withAnalyticsEvaluationMutationAdmission({
+    resourceIdentity: `public-rule-delete:${params.evaluationRuleId}`,
+    mutate: (guard) =>
+      guard.withIoFence((tx) =>
+        tx.jobConfiguration.delete({
+          where: {
+            id: params.evaluationRuleId,
+            projectId: params.projectId,
+          },
+        }),
+      ),
   });
 
   await invalidateProjectEvalConfigCaches(params.projectId);

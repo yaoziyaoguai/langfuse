@@ -17,6 +17,10 @@ import {
   InvalidRequestError,
   validateExportSource,
 } from "@langfuse/shared";
+import {
+  getDorisIntegrationMutationAdmission,
+  syncDorisIntegrationMutation,
+} from "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle";
 
 export const mixpanelIntegrationRouter = createTRPCRouter({
   get: protectedProjectProcedure
@@ -139,6 +143,7 @@ export const mixpanelIntegrationRouter = createTRPCRouter({
       const { mixpanelProjectToken, ...config } = input;
 
       const encryptedMixpanelProjectToken = encrypt(mixpanelProjectToken);
+      const integrationAdmission = getDorisIntegrationMutationAdmission();
 
       await ctx.prisma.$transaction(async (tx) => {
         const result = await tx.mixpanelIntegration.upsert({
@@ -184,6 +189,13 @@ export const mixpanelIntegrationRouter = createTRPCRouter({
           });
           if (!validation.ok) throw new InvalidRequestError(validation.message);
         }
+        await syncDorisIntegrationMutation({
+          transaction: tx,
+          admissionContext: integrationAdmission,
+          projectId: input.projectId,
+          integrationType: "MIXPANEL",
+          enabled: result.enabled,
+        });
       });
     }),
   delete: protectedProjectProcedure
@@ -202,10 +214,20 @@ export const mixpanelIntegrationRouter = createTRPCRouter({
           resourceId: input.projectId,
         });
 
-        await ctx.prisma.mixpanelIntegration.delete({
-          where: {
+        const integrationAdmission = getDorisIntegrationMutationAdmission();
+        await ctx.prisma.$transaction(async (transaction) => {
+          await syncDorisIntegrationMutation({
+            transaction,
+            admissionContext: integrationAdmission,
             projectId: input.projectId,
-          },
+            integrationType: "MIXPANEL",
+            enabled: false,
+          });
+          await transaction.mixpanelIntegration.delete({
+            where: {
+              projectId: input.projectId,
+            },
+          });
         });
       } catch (e) {
         console.log("mixpanel integration delete", e);

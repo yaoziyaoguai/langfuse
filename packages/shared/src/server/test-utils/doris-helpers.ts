@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { DorisStreamLoadClient } from "../doris";
 import type {
   EventRecordInsertType,
-  DatasetRunItemRecordInsertType,
   ObservationRecordInsertType,
   ScoreRecordInsertType,
   TraceRecordInsertType,
@@ -451,11 +450,4 @@ export async function createScoresDoris(
       is_deleted: score.is_deleted,
     })),
   );
-}
-
-/** Dataset-run analytics is intentionally unavailable in the R1A Doris cut. */
-export async function createDatasetRunItemsDoris(
-  _items: readonly DatasetRunItemRecordInsertType[],
-): Promise<never> {
-  throw new Error("Dataset-run analytics requires the R1B Doris schema");
 }

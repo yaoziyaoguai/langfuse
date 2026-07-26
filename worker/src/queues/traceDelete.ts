@@ -1,4 +1,4 @@
-import { Job, Processor } from "bullmq";
+import { Job, Processor, UnrecoverableError } from "bullmq";
 import {
   getCurrentSpan,
   isDorisAnalyticsBackend,
@@ -12,6 +12,8 @@ import { prisma } from "@langfuse/shared/src/db";
 import { processClickhouseTraceDelete } from "../features/traces/processClickhouseTraceDelete";
 import { processPostgresTraceDelete } from "../features/traces/processPostgresTraceDelete";
 import { processAnalyticsTraceDeletionBatch } from "../features/traces/processAnalyticsTraceDeletionBatch";
+import { withAnalyticsDeletionWorkFence } from "../features/analytics-deletion/analyticsDeletionWorkFence";
+import { getWorkerAnalyticsAdmissionContext } from "../analyticsRuntime";
 import { env } from "../env";
 
 export const traceDeleteProcessor: Processor = async (
@@ -65,7 +67,21 @@ export const traceDeleteProcessor: Processor = async (
     ]),
   );
 
-  if (allTraceIds.length === 0) {
+  const deletionOperations = job.data.payload.deletionOperations;
+  const selectedBackend = isDorisAnalyticsBackend()
+    ? ("doris" as const)
+    : ("clickhouse" as const);
+  if (selectedBackend === "clickhouse" && deletionOperations) {
+    throw new UnrecoverableError(
+      "ClickHouse trace deletion must use the legacy queue contract",
+    );
+  }
+  if (selectedBackend === "doris" && !deletionOperations) {
+    throw new UnrecoverableError(
+      "Doris trace deletion requires a durable operation",
+    );
+  }
+  if (allTraceIds.length === 0 && !deletionOperations) {
     logger.debug(`No traces to delete for project ${projectId}`);
     return;
   }
@@ -74,7 +90,13 @@ export const traceDeleteProcessor: Processor = async (
     `Batch deleting ${allTraceIds.length} traces for project ${projectId}`,
   );
 
-  const traceIdsToDelete = allTraceIds.slice(0, env.LANGFUSE_DELETE_BATCH_SIZE);
+  const deletionOperationsToDelete = deletionOperations?.slice(
+    0,
+    env.LANGFUSE_DELETE_BATCH_SIZE,
+  );
+  const traceIdsToDelete = deletionOperationsToDelete
+    ? deletionOperationsToDelete.map(({ traceId }) => traceId)
+    : allTraceIds.slice(0, env.LANGFUSE_DELETE_BATCH_SIZE);
 
   // Add all trace IDs to span attributes for observability
   if (span) {
@@ -97,17 +119,26 @@ export const traceDeleteProcessor: Processor = async (
       return;
     }
 
-    if (isDorisAnalyticsBackend()) {
+    if (deletionOperationsToDelete) {
       await processAnalyticsTraceDeletionBatch({
         projectId,
         traceIds: traceIdsToDelete,
-        deletionOperations: job.data.payload.deletionOperations,
+        deletionOperations: deletionOperationsToDelete,
       });
     } else {
-      await Promise.all([
-        processPostgresTraceDelete(projectId, traceIdsToDelete),
-        processClickhouseTraceDelete(projectId, traceIdsToDelete),
-      ]);
+      await withAnalyticsDeletionWorkFence({
+        client: prisma,
+        operation: null,
+        serializedProvenance: undefined,
+        admissionContext: getWorkerAnalyticsAdmissionContext(),
+        selectedBackend,
+        claimKind: "analytics-deletion-operation",
+        run: () =>
+          Promise.all([
+            processPostgresTraceDelete(projectId, traceIdsToDelete),
+            processClickhouseTraceDelete(projectId, traceIdsToDelete),
+          ]).then(() => undefined),
+      });
     }
 
     // Mark only the pending traces as deleted (not the ones from the event, as they might be legacy)

@@ -1,4 +1,8 @@
 import type { AnalyticsDeletionOperation } from "@prisma/client";
+import {
+  analyticsDurableProvenanceFromRecord,
+  serializeAnalyticsDurableProvenance,
+} from "@langfuse/shared/src/server";
 
 import { processAnalyticsProjectDelete } from "../projects/processAnalyticsProjectDelete";
 import { markPendingTraceDeletionsCompleted } from "../traces/markPendingTraceDeletionsCompleted";
@@ -20,6 +24,10 @@ export async function processAnalyticsDeletionRecoveryOperation(
   operation: AnalyticsDeletionOperation,
   dependencies: RecoveryDependencies = defaultDependencies,
 ): Promise<void> {
+  const provenance = analyticsDurableProvenanceFromRecord(operation);
+  const analyticsProvenance = provenance
+    ? serializeAnalyticsDurableProvenance(provenance)
+    : undefined;
   if (operation.scope === "TRACE") {
     if (!operation.traceId) {
       throw new Error("Trace deletion recovery is missing traceId");
@@ -28,6 +36,7 @@ export async function processAnalyticsDeletionRecoveryOperation(
       operationId: operation.id,
       traceId: operation.traceId,
       generation: operation.generation,
+      analyticsProvenance,
     });
     await dependencies.markPendingTraceCompleted({
       projectId: operation.projectId,
@@ -36,12 +45,19 @@ export async function processAnalyticsDeletionRecoveryOperation(
     return;
   }
 
-  await dependencies.processProject({
-    projectId: operation.projectId,
-    organizationId: operation.organizationId,
-    reference: {
-      operationId: operation.id,
-      generation: operation.generation,
-    },
-  });
+  if (operation.scope === "PROJECT") {
+    await dependencies.processProject({
+      projectId: operation.projectId,
+      organizationId: operation.organizationId,
+      reference: {
+        operationId: operation.id,
+        generation: operation.generation,
+        analyticsProvenance,
+      },
+    });
+    return;
+  }
+
+  operation.scope satisfies never;
+  throw new Error("Unsupported analytics deletion recovery scope");
 }

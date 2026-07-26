@@ -17,7 +17,12 @@ import {
 import { buildEvalMessages } from "./evalRuntime";
 import { getEvalS3StorageClient } from "./s3StorageClient";
 import { createInternalEventsWriter } from "../internal-tracing/createInternalEventsWriter";
+import { getWorkerAnalyticsAdmissionContext } from "../../analyticsRuntime";
 import { recordExportVolume } from "../../services/exportVolumeMetric";
+import { resolveAnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { env } from "../../env";
+import { persistDorisEvalScoreBatch } from "./dorisEvalScorePersistence";
+import type { EvalScoreWritePayload } from "./evalScoreEvent";
 
 type StructuredOutputSchema = z.ZodType;
 
@@ -126,6 +131,12 @@ export interface EvalExecutionDeps {
   // Queue operations
   enqueueScoreIngestion: (params: EnqueueScoreIngestionParams) => Promise<void>;
 
+  persistScoreBatch?: (params: {
+    projectId: string;
+    jobExecutionId: string;
+    scoreWritePayloads: readonly EvalScoreWritePayload[];
+  }) => Promise<void>;
+
   // LLM operations
   callLLM: (params: LLMCallParams) => Promise<unknown>;
   fetchModelConfig: (
@@ -147,28 +158,20 @@ function serializeSchemaForEgress(schema: unknown): string {
  * This is the default implementation used in production code.
  */
 export function createProductionEvalExecutionDeps(): EvalExecutionDeps {
-  return {
-    updateJobExecution: async ({ id, projectId, data }) => {
-      await prisma.jobExecution.update({
-        where: { id, projectId },
-        data,
-      });
-    },
+  const uploadScore: EvalExecutionDeps["uploadScore"] = async (params) => {
+    const bucketPrefix = buildEventBucketPrefix({
+      projectId: params.projectId,
+      entityType: "score",
+      entityId: params.scoreId,
+    });
+    const bucketPath = `${bucketPrefix}${params.eventId}.json`;
 
-    uploadScore: async (params) => {
-      const bucketPrefix = buildEventBucketPrefix({
-        projectId: params.projectId,
-        entityType: "score",
-        entityId: params.scoreId,
-      });
-      const bucketPath = `${bucketPrefix}${params.eventId}.json`;
-
-      await getEvalS3StorageClient().uploadJson(bucketPath, [
-        params.event as unknown as Record<string, unknown>,
-      ]);
-    },
-
-    enqueueScoreIngestion: async (params) => {
+    await getEvalS3StorageClient().uploadJson(bucketPath, [
+      params.event as unknown as Record<string, unknown>,
+    ]);
+  };
+  const enqueueScoreIngestion: EvalExecutionDeps["enqueueScoreIngestion"] =
+    async (params) => {
       const shardingKey = `${params.projectId}-${params.scoreId}`;
       const queue = IngestionQueue.getInstance({ shardingKey });
       if (!queue) {
@@ -203,6 +206,40 @@ export function createProductionEvalExecutionDeps(): EvalExecutionDeps {
           },
         },
       });
+    };
+
+  return {
+    updateJobExecution: async ({ id, projectId, data }) => {
+      await prisma.jobExecution.update({
+        where: { id, projectId },
+        data,
+      });
+    },
+
+    uploadScore,
+
+    enqueueScoreIngestion,
+
+    persistScoreBatch: async (params) => {
+      if (resolveAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND) === "doris") {
+        await persistDorisEvalScoreBatch(params);
+        return;
+      }
+      await Promise.all(
+        params.scoreWritePayloads.map(async ({ scoreId, eventId, event }) => {
+          await uploadScore({
+            projectId: params.projectId,
+            scoreId,
+            eventId,
+            event,
+          });
+          await enqueueScoreIngestion({
+            projectId: params.projectId,
+            scoreId,
+            eventId,
+          });
+        }),
+      );
     },
 
     callLLM: async (params) => {
@@ -248,7 +285,9 @@ export function createProductionEvalExecutionDeps(): EvalExecutionDeps {
           traceName: params.traceSinkParams.traceName,
           environment: params.traceSinkParams.environment,
           metadata: params.traceSinkParams.metadata,
-          eventsWriter: createInternalEventsWriter(),
+          eventsWriter: createInternalEventsWriter({
+            analyticsAdmissionContext: getWorkerAnalyticsAdmissionContext(),
+          }),
         },
       });
 

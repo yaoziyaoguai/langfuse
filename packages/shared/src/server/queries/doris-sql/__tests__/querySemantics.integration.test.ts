@@ -10,10 +10,15 @@
 
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { DorisPoCMysqlClient } from "../../../doris-poc/mysqlClient";
+import {
+  parseDorisTestNamespace,
+  truncateOwnedDorisTestTables,
+} from "../../../doris/testDatabase";
 import { compileDorisVisibleEventsQuery } from "../eventQueryCompiler";
 
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
-const DB = "langfuse_poc";
+const TEST_NAMESPACE = ENABLED ? parseDorisTestNamespace() : null;
+const DB = TEST_NAMESPACE?.database ?? "doris_test_disabled";
 
 async function insertEvent(
   db: DorisPoCMysqlClient,
@@ -34,33 +39,20 @@ async function insertEvent(
        (project_id, partition_date, trace_id, span_id, version_token, type, environment,
         name, start_time, created_at, updated_at, source, ingestion_sdk_name,
         ingestion_sdk_version, tags, user_id)
-     VALUES (?, ?, ?, ?, ?, 'span', 'default', ?, ?, ?, ?, 'api', 'js', '5.0.0', ?${opts.user_id === undefined ? "" : ", ?"})`,
-    opts.user_id === undefined
-      ? [
-          opts.project_id,
-          opts.partition_date,
-          opts.trace_id,
-          opts.span_id,
-          opts.version_token,
-          opts.name,
-          opts.start_time,
-          opts.start_time,
-          opts.start_time,
-          opts.tags ?? "[]",
-        ]
-      : [
-          opts.project_id,
-          opts.partition_date,
-          opts.trace_id,
-          opts.span_id,
-          opts.version_token,
-          opts.name,
-          opts.start_time,
-          opts.start_time,
-          opts.start_time,
-          opts.tags ?? "[]",
-          opts.user_id,
-        ],
+     VALUES (?, ?, ?, ?, ?, 'span', 'default', ?, ?, ?, ?, 'api', 'js', '5.0.0', ?, ?)`,
+    [
+      opts.project_id,
+      opts.partition_date,
+      opts.trace_id,
+      opts.span_id,
+      opts.version_token,
+      opts.name,
+      opts.start_time,
+      opts.start_time,
+      opts.start_time,
+      opts.tags ?? "[]",
+      opts.user_id ?? null,
+    ],
   );
 }
 
@@ -68,6 +60,7 @@ describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
   let db: DorisPoCMysqlClient;
 
   beforeAll(async () => {
+    if (!TEST_NAMESPACE) throw new Error("Doris test namespace is required");
     db = new DorisPoCMysqlClient({
       host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
       port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
@@ -75,9 +68,16 @@ describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
       password: process.env.DORIS_POC_PASSWORD ?? "",
       database: DB,
     });
-    await db.execute(`TRUNCATE TABLE events_current`);
-    await db.execute(`TRUNCATE TABLE trace_tombstones`);
-    await db.execute(`TRUNCATE TABLE project_tombstones`);
+    await truncateOwnedDorisTestTables({
+      executor: db,
+      namespace: TEST_NAMESPACE,
+      tables: [
+        "events_current",
+        "scores_current",
+        "trace_tombstones",
+        "project_tombstones",
+      ],
+    });
     // Two projects, both with a trace "shared-id" to prove project isolation.
     await insertEvent(db, {
       project_id: "p1",
@@ -187,6 +187,113 @@ describe.skipIf(!ENABLED)("Doris PoC — query semantics invariants", () => {
     );
     expect(nullCount[0].c).toBeGreaterThanOrEqual(1);
   });
+
+  it.each([
+    [
+      {
+        type: "numberObject",
+        column: "scores_avg",
+        key: "quality",
+        operator: ">",
+        value: 0.5,
+      },
+      ["score-filter-1"],
+    ],
+    [
+      {
+        type: "categoryOptions",
+        column: "score_categories",
+        key: "topic",
+        operator: "none of",
+        value: ["safe"] as string[],
+      },
+      ["score-filter-2"],
+    ],
+    [
+      {
+        type: "booleanObject",
+        column: "score_booleans",
+        key: "approved",
+        operator: "<>",
+        value: true,
+      },
+      ["score-filter-2"],
+    ],
+  ] as const)(
+    "executes score-map filter %# with SQL semantics",
+    async (filter, expected) => {
+      const projectId = "score-filter-project";
+      for (const spanId of ["score-filter-1", "score-filter-2"]) {
+        await insertEvent(db, {
+          project_id: projectId,
+          partition_date: "2026-07-17",
+          trace_id: "score-filter-trace",
+          span_id: spanId,
+          version_token: "1000",
+          name: spanId,
+          start_time:
+            spanId === "score-filter-1"
+              ? "2026-07-17 12:00:00.000000"
+              : "2026-07-17 12:01:00.000000",
+        });
+      }
+      if (filter.type === "numberObject") {
+        await db.execute(
+          `INSERT INTO scores_current
+          (project_id, score_date, score_id, version_token, trace_id,
+           observation_id, name, source, data_type, value, environment,
+           timestamp, created_at, updated_at)
+         VALUES (?, '2026-07-17', 'score-filter-number', 1000,
+           'score-filter-trace', 'score-filter-1', 'quality', 'API',
+           'NUMERIC', 0.8, 'default', '2026-07-17 12:00:30.000000',
+           '2026-07-17 12:00:30.000000', '2026-07-17 12:00:30.000000')`,
+          [projectId],
+        );
+      } else if (filter.type === "categoryOptions") {
+        await db.execute(
+          `INSERT INTO scores_current
+          (project_id, score_date, score_id, version_token, trace_id,
+           observation_id, name, source, data_type, value, string_value,
+           environment, timestamp, created_at, updated_at)
+         VALUES (?, '2026-07-17', 'score-filter-category', 1000,
+           'score-filter-trace', 'score-filter-1', 'topic', 'API',
+           'CATEGORICAL', 0, 'safe', 'default',
+           '2026-07-17 12:00:30.000000', '2026-07-17 12:00:30.000000',
+           '2026-07-17 12:00:30.000000')`,
+          [projectId],
+        );
+      } else {
+        await db.execute(
+          `INSERT INTO scores_current
+          (project_id, score_date, score_id, version_token, trace_id,
+           observation_id, name, source, data_type, value, boolean_value,
+           environment, timestamp, created_at, updated_at)
+         VALUES (?, '2026-07-17', 'score-filter-boolean', 1000,
+           'score-filter-trace', 'score-filter-1', 'approved', 'API',
+           'BOOLEAN', 1, TRUE, 'default',
+           '2026-07-17 12:00:30.000000', '2026-07-17 12:00:30.000000',
+           '2026-07-17 12:00:30.000000')`,
+          [projectId],
+        );
+      }
+
+      const compiled = compileDorisVisibleEventsQuery({
+        projectId,
+        range: {
+          from: new Date("2026-07-17T00:00:00.000Z"),
+          to: new Date("2026-07-18T00:00:00.000Z"),
+        },
+        projection: "list",
+        filters: [filter],
+        limit: 10,
+      });
+      const rows = await db.query<{ span_id: string }>(
+        compiled.sql,
+        compiled.params,
+      );
+      expect(rows.map(({ span_id }) => span_id)).toEqual(expected);
+    },
+  );
 
   it("executes compiled filters/search with bound values and deletion barriers", async () => {
     await db.execute(

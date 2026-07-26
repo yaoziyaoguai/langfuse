@@ -78,4 +78,38 @@ describe("createObservationEvalSchedulerDeps", () => {
     );
     expect(getLLMQueueInstance).not.toHaveBeenCalled();
   });
+
+  it("uses a deterministic BullMQ job id for managed Doris retries", async () => {
+    const { createObservationEvalSchedulerDeps } =
+      await import("../createSchedulerDeps");
+
+    await createObservationEvalSchedulerDeps({
+      analyticsEvaluationDispatch: {
+        dispatchId: "dispatch-1",
+        dispatchGeneration: 1,
+        projectId: "project-1",
+        operationId: "operation-1",
+        targetType: "OBSERVATION_UPSERT",
+        targetId: "observation-1",
+        analyticsBackend: "DORIS",
+        deploymentGeneration: "1",
+        workloadEpochFingerprint: "e".repeat(64),
+        runtimeContractVersion: 1,
+        capabilityActivationGeneration: "1",
+        capabilityContractVersion: 1,
+      },
+    }).enqueueEvalJob({
+      projectId: "project-1",
+      jobExecutionId: "job-managed",
+      observationS3Path: "evals/project-1/observations/obs-1.json",
+      delay: 10,
+      evalTemplateType: EvalTemplateType.LLM_AS_JUDGE,
+    });
+
+    expect(addToLLMQueue).toHaveBeenCalledWith(
+      "llm-as-a-judge-execution-queue",
+      expect.any(Object),
+      { delay: 10, jobId: "job-managed-managed" },
+    );
+  });
 });

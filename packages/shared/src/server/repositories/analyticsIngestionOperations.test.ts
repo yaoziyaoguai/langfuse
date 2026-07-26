@@ -1,10 +1,56 @@
-import type { PrismaClient } from "@prisma/client";
+import type { AnalyticsIngestionOperation, PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   calculateAnalyticsIngestionRetryDelayMs,
+  createAnalyticsIngestionReceipt,
+  expireUnreadyAnalyticsIngestionReceipts,
   handoffLegacyAnalyticsIngestionOutbox,
 } from "./analyticsIngestionOperations";
+
+const ACCEPTED_AT = new Date("2026-07-18T12:00:00.000Z");
+
+function pendingReceipt(
+  overrides: Partial<AnalyticsIngestionOperation> = {},
+): AnalyticsIngestionOperation {
+  return {
+    id: "operation-1",
+    projectId: "project-1",
+    sourceOperationId: "source-1",
+    sourceChecksum: "a".repeat(64),
+    rawObjectKey: "analytics-ingestion/raw/project-1/operation-1.json",
+    acceptedAt: ACCEPTED_AT,
+    acceptedAtNanos: 1_784_376_000_000_000_000n,
+    canonicalizerVersion: "1",
+    schemaVersion: 3,
+    analyticsBackend: null,
+    deploymentGeneration: null,
+    workloadEpochFingerprint: null,
+    runtimeContractVersion: null,
+    producerRuntimeLeaseId: null,
+    checkpointGeneration: 0n,
+    canonicalizationFence: 0n,
+    canonicalizationLeaseOwner: null,
+    canonicalizationLeaseUntil: null,
+    canonicalizationAttempts: 0,
+    reservedCanonicalObjectKey: null,
+    canonicalObjectKey: null,
+    canonicalArtifactChecksum: null,
+    manifestState: "PENDING",
+    candidateManifest: null,
+    frozenManifest: null,
+    status: "ACCEPTED",
+    cancellationReasonCode: null,
+    lastErrorCode: null,
+    recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
+    statusExpiresAt: new Date("2026-08-24T12:00:00.000Z"),
+    visibleAt: null,
+    terminalAt: null,
+    createdAt: ACCEPTED_AT,
+    updatedAt: ACCEPTED_AT,
+    ...overrides,
+  } as AnalyticsIngestionOperation;
+}
 
 describe("calculateAnalyticsIngestionRetryDelayMs", () => {
   it("applies deterministic jitter to capped exponential backoff", () => {
@@ -41,6 +87,192 @@ describe("calculateAnalyticsIngestionRetryDelayMs", () => {
         generation: 0,
       }),
     ).toThrow("Invalid analytics ingestion retry generation");
+  });
+});
+
+describe("ledger-first raw readiness", () => {
+  it("does not expire an old pending receipt while its raw artifact exists", async () => {
+    const operation = pendingReceipt({
+      createdAt: new Date("2026-07-18T11:29:00.000Z"),
+    });
+    const updateMany = vi.fn();
+    const rawArtifactExists = vi.fn(async () => true);
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: operation.id }]),
+      analyticsIngestionOperation: {
+        findFirst: vi.fn().mockResolvedValue(operation),
+        updateMany,
+      },
+      analyticsIngestionOutboxV2: {
+        count: vi.fn().mockResolvedValue(0),
+      },
+    };
+    const client = {
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValue([{ now: new Date("2026-07-18T12:00:00.000Z") }]),
+      analyticsIngestionOperation: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: operation.id,
+            projectId: operation.projectId,
+            rawObjectKey: operation.rawObjectKey,
+          },
+        ]),
+      },
+      $transaction: vi.fn((callback) => callback(transaction)),
+    } as unknown as PrismaClient;
+
+    await expect(
+      expireUnreadyAnalyticsIngestionReceipts({
+        client,
+        graceMs: 30 * 60_000,
+        rawArtifactExists,
+      }),
+    ).resolves.toBe(0);
+
+    expect(rawArtifactExists).toHaveBeenCalledWith(operation.rawObjectKey);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rechecks terminal state under the operation lock before publishing outbox", async () => {
+    const snapshot = pendingReceipt();
+    const terminal = pendingReceipt({
+      status: "UNRECOVERABLE",
+      terminalAt: new Date("2026-07-18T12:31:00.000Z"),
+    });
+    const upsert = vi.fn();
+    const transaction = {
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ now: ACCEPTED_AT }])
+        .mockResolvedValueOnce([{ id: snapshot.projectId }])
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ id: "global" }])
+        .mockResolvedValueOnce([{ id: snapshot.id }]),
+      analyticsCheckpointGeneration: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      analyticsBackendDeploymentState: {
+        findUnique: vi.fn().mockResolvedValue(null),
+      },
+      analyticsIngestionOperation: {
+        findFirst: vi.fn().mockResolvedValue(terminal),
+      },
+      analyticsIngestionOutboxV2: { upsert },
+    };
+    const client = {
+      analyticsIngestionOperation: {
+        findFirst: vi.fn().mockResolvedValue(snapshot),
+      },
+      $transaction: vi.fn((callback) => callback(transaction)),
+    } as unknown as PrismaClient;
+
+    await expect(
+      createAnalyticsIngestionReceipt({
+        client,
+        operationId: snapshot.id,
+        projectId: snapshot.projectId,
+        sourceOperationId: snapshot.sourceOperationId,
+        sourceChecksum: snapshot.sourceChecksum,
+        rawObjectKey: snapshot.rawObjectKey,
+        acceptedAt: snapshot.acceptedAt,
+        acceptedAtNanos: snapshot.acceptedAtNanos,
+        canonicalizerVersion: snapshot.canonicalizerVersion,
+        schemaVersion: snapshot.schemaVersion,
+        recoverableUntil: snapshot.recoverableUntil,
+        statusExpiresAt: snapshot.statusExpiresAt,
+        publishReady: true,
+        rawArtifactVerified: true,
+      }),
+    ).rejects.toThrow("Ingestion source operation conflicts with its receipt");
+
+    expect(
+      transaction.analyticsIngestionOperation.findFirst,
+    ).toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("revives a matching raw receipt when expiry wins before upload promotion", async () => {
+    const snapshot = pendingReceipt();
+    const expired = pendingReceipt({
+      status: "UNRECOVERABLE",
+      lastErrorCode: "RAW_ARTIFACT_UNAVAILABLE",
+      terminalAt: new Date("2026-07-18T12:31:00.000Z"),
+    });
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const upsert = vi.fn();
+    const transaction = {
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ now: ACCEPTED_AT }])
+        .mockResolvedValueOnce([{ id: snapshot.projectId }])
+        .mockResolvedValueOnce([{ locked: "" }])
+        .mockResolvedValueOnce([{ id: "global" }])
+        .mockResolvedValueOnce([{ id: snapshot.id }])
+        .mockResolvedValueOnce([{ now: new Date("2026-07-18T12:32:00.000Z") }]),
+      analyticsCheckpointGeneration: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      analyticsBackendDeploymentState: {
+        findUnique: vi.fn().mockResolvedValue(null),
+      },
+      analyticsIngestionOperation: {
+        findFirst: vi.fn().mockResolvedValue(expired),
+        updateMany,
+      },
+      analyticsIngestionOutboxV2: { upsert },
+    };
+    const client = {
+      analyticsIngestionOperation: {
+        findFirst: vi.fn().mockResolvedValue(snapshot),
+      },
+      $transaction: vi.fn((callback) => callback(transaction)),
+    } as unknown as PrismaClient;
+
+    await expect(
+      createAnalyticsIngestionReceipt({
+        client,
+        operationId: snapshot.id,
+        projectId: snapshot.projectId,
+        sourceOperationId: snapshot.sourceOperationId,
+        sourceChecksum: snapshot.sourceChecksum,
+        rawObjectKey: snapshot.rawObjectKey,
+        acceptedAt: snapshot.acceptedAt,
+        acceptedAtNanos: snapshot.acceptedAtNanos,
+        canonicalizerVersion: snapshot.canonicalizerVersion,
+        schemaVersion: snapshot.schemaVersion,
+        recoverableUntil: snapshot.recoverableUntil,
+        statusExpiresAt: snapshot.statusExpiresAt,
+        publishReady: true,
+        rawArtifactVerified: true,
+      } as never),
+    ).resolves.toMatchObject({ created: false });
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: snapshot.id,
+        projectId: snapshot.projectId,
+        status: "UNRECOVERABLE",
+        lastErrorCode: "RAW_ARTIFACT_UNAVAILABLE",
+        terminalAt: expired.terminalAt,
+        recoverableUntil: {
+          gte: new Date("2026-07-18T12:32:00.000Z"),
+        },
+        outbox: null,
+        outboxV2: null,
+      }),
+      data: {
+        status: "ACCEPTED",
+        lastErrorCode: null,
+        terminalAt: null,
+      },
+    });
+    expect(upsert).toHaveBeenCalledOnce();
   });
 });
 

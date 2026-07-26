@@ -25,6 +25,7 @@ export async function completeEvalExecution({
   traceId,
   observationId,
   environment,
+  scoreTimestamp,
   deps,
 }: {
   projectId: string;
@@ -33,6 +34,7 @@ export async function completeEvalExecution({
   traceId: string | null;
   observationId: string | null;
   environment: string;
+  scoreTimestamp: Date;
   deps: EvalExecutionDeps;
 }): Promise<{ scoreCount: number }> {
   const scoreWritePayloads = buildEvalScoreWritePayloads({
@@ -43,6 +45,7 @@ export async function completeEvalExecution({
     environment,
     executionTraceId: result.executionTraceId,
     executionMetadata: result.metadata,
+    timestamp: scoreTimestamp,
   });
   const [firstScorePayload] = scoreWritePayloads;
 
@@ -52,27 +55,44 @@ export async function completeEvalExecution({
   const jobOutputScoreId = firstScorePayload.scoreId;
 
   try {
-    await Promise.all(
-      scoreWritePayloads.map(async ({ scoreId, eventId, event }) => {
-        await deps.uploadScore({
-          projectId,
-          scoreId,
-          eventId,
-          event,
-        });
+    if (deps.persistScoreBatch) {
+      await deps.persistScoreBatch({
+        projectId,
+        jobExecutionId,
+        scoreWritePayloads,
+      });
+    } else {
+      await Promise.all(
+        scoreWritePayloads.map(async ({ scoreId, eventId, event }) => {
+          await deps.uploadScore({
+            projectId,
+            scoreId,
+            eventId,
+            event,
+          });
 
-        await deps.enqueueScoreIngestion({
-          projectId,
-          scoreId,
-          eventId,
-        });
-      }),
-    );
+          await deps.enqueueScoreIngestion({
+            projectId,
+            scoreId,
+            eventId,
+          });
+        }),
+      );
+    }
   } catch (e) {
-    logger.error(`Failed to persist score: ${e}`, e);
-    traceException(e);
+    logger.error("Failed to persist evaluator score", {
+      projectId,
+      jobExecutionId,
+      scoreId: jobOutputScoreId,
+      errorType: e instanceof Error ? e.name : "UnknownError",
+    });
+    traceException(
+      new Error("Evaluator score persistence failed"),
+      undefined,
+      "EVALUATION_SCORE_PERSISTENCE_FAILED",
+    );
     throw new Error(
-      `Failed to write score ${jobOutputScoreId} into IngestionQueue`,
+      `Failed to make score ${jobOutputScoreId} visible in analytics storage`,
     );
   }
 

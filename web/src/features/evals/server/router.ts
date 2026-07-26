@@ -33,13 +33,12 @@ import {
   type EvalTemplateSourceCodeLanguage,
 } from "@langfuse/shared";
 import {
-  getQueue,
+  BatchActionQueue,
   getAvgCostByEvaluatorIds,
   getCostByEvaluatorIds,
   getEvaluatorExecutionStatusCountsByEvaluatorId,
   getScoresByIds,
   logger,
-  QueueName,
   QueueJobs,
   tableColumnsToSqlFilterAndPrefix,
   orderByToPrismaSql,
@@ -94,6 +93,8 @@ import {
   prepareConfigsForTemplateUpgrade,
   prepareVariableMappingForEvaluatorUpgrade,
 } from "@/src/features/evals/server/evaluatorUpgrade";
+import { runHistoricalEvaluationMutation } from "@/src/features/evals/server/historicalEvaluationAdmission";
+import { withAnalyticsEvaluationMutationAdmission } from "@/src/features/evals/server/evaluationMutationAdmission";
 export { CreateEvalTemplateInputSchema } from "@/src/features/evals/server/evalTemplateCreation";
 
 // Filter columns that used to be backed by the Postgres `traces` and
@@ -1085,77 +1086,93 @@ export const evalRouter = createTRPCRouter({
         });
       }
 
-      const jobId = uuidv4();
-      await auditLog({
-        session: ctx.session,
-        resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
-        resourceId: jobId,
-        action: "create",
-      });
-
-      const job = await ctx.prisma.jobConfiguration.create({
-        data: {
-          id: jobId,
-          projectId: input.projectId,
-          jobType: "EVAL",
-          evalTemplateId: resolvedEvalTemplate.id,
-          scoreName: input.scoreName,
-          targetObject: input.target,
-          filter: validatedFilter ?? [],
-          variableMapping: variableMappingForResolvedTemplate,
-          sampling: input.sampling,
-          delay: input.delay,
-          status: input.status,
-          timeScope: input.timeScope,
-        },
-      });
-
-      // Clear the "no job configs" caches only if the new config is ACTIVE
-      if (input.status === JobConfigState.ACTIVE) {
-        await invalidateProjectEvalConfigCaches(input.projectId);
-      }
-
-      // EVENT targets handle historical evaluation via the dedicated batch
-      // "Run Evaluation" action (runEvaluationRouter), so we only schedule
-      // historical backfills here for TRACE and DATASET targets.
-      if (
+      const scheduleHistoricalEvaluation =
         input.timeScope.includes("EXISTING") &&
         (input.target === EvalTargetObject.TRACE ||
-          input.target === EvalTargetObject.DATASET)
-      ) {
-        logger.info(
-          `Applying to historical traces for job ${job.id} and project ${input.projectId}`,
-        );
-        const batchJobQueue = getQueue(QueueName.BatchActionQueue);
-        if (!batchJobQueue) {
-          throw new Error("Batch job queue not found");
-        }
-        await batchJobQueue.add(
-          QueueJobs.BatchActionProcessingJob,
-          {
-            name: QueueJobs.BatchActionProcessingJob,
-            timestamp: new Date(),
-            id: uuidv4(),
-            payload: {
-              projectId: input.projectId,
-              actionId: "eval-create",
-              configId: job.id,
-              cutoffCreatedAt: new Date(),
-              targetObject: input.target,
-              query: {
-                filter: validatedFilter,
-                orderBy: {
-                  column: "timestamp",
-                  order: "DESC",
-                },
-              },
-            },
-          },
-          { delay: input.delay },
-        );
-      }
+          input.target === EvalTargetObject.DATASET);
 
-      return { id: job.id };
+      const jobId = uuidv4();
+      return runHistoricalEvaluationMutation({
+        scheduleHistoricalEvaluation,
+        resourceIdentity: jobId,
+        mutate: async (guard) => {
+          const createJob = async (tx: Prisma.TransactionClient) => {
+            await auditLog(
+              {
+                session: ctx.session,
+                resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
+                resourceId: jobId,
+                action: "create",
+              },
+              tx,
+            );
+            return tx.jobConfiguration.create({
+              data: {
+                id: jobId,
+                projectId: input.projectId,
+                jobType: "EVAL",
+                evalTemplateId: resolvedEvalTemplate.id,
+                scoreName: input.scoreName,
+                targetObject: input.target,
+                filter: validatedFilter ?? [],
+                variableMapping: variableMappingForResolvedTemplate,
+                sampling: input.sampling,
+                delay: input.delay,
+                status: input.status,
+                timeScope: input.timeScope,
+              },
+            });
+          };
+          const job = await guard.withIoFence(createJob);
+
+          // Clear the "no job configs" caches only if the new config is ACTIVE
+          if (input.status === JobConfigState.ACTIVE) {
+            await invalidateProjectEvalConfigCaches(input.projectId);
+          }
+
+          // EVENT targets handle historical evaluation via the dedicated batch
+          // "Run Evaluation" action (runEvaluationRouter), so we only schedule
+          // historical backfills here for TRACE and DATASET targets.
+          if (scheduleHistoricalEvaluation) {
+            logger.info(
+              `Applying to historical traces for job ${job.id} and project ${input.projectId}`,
+            );
+            const batchJobQueue = BatchActionQueue.getInstance();
+            if (!batchJobQueue) {
+              throw new Error("Batch job queue not found");
+            }
+            const batchEventId = uuidv4();
+            const cutoffCreatedAt = new Date();
+            await guard.withIoFence(() =>
+              batchJobQueue.add(
+                QueueJobs.BatchActionProcessingJob,
+                {
+                  name: QueueJobs.BatchActionProcessingJob,
+                  timestamp: cutoffCreatedAt,
+                  id: batchEventId,
+                  payload: {
+                    projectId: input.projectId,
+                    actionId: "eval-create",
+                    configId: job.id,
+                    cutoffCreatedAt,
+                    targetObject: input.target,
+                    query: {
+                      filter: validatedFilter,
+                      orderBy: {
+                        column: "timestamp",
+                        order: "DESC",
+                      },
+                    },
+                  },
+                },
+                { delay: input.delay, jobId: batchEventId },
+              ),
+            );
+          }
+
+          return { id: job.id };
+        },
+      });
     }),
   testRunCodeEval: protectedProjectProcedure
     .input(CodeEvalTestRunSchema)
@@ -1207,205 +1224,215 @@ export const evalRouter = createTRPCRouter({
 
       await validateEvalTemplateCreation(input);
 
-      const result = await ctx.prisma.$transaction(async (tx) => {
-        const nextVariables = getEvalTemplateVariables(input);
-        const existingProjectTemplatesByName = await tx.evalTemplate.findMany({
-          where: {
-            projectId: input.projectId,
-            name: input.name,
-          },
-          orderBy: [{ version: "desc" }, { createdAt: "desc" }, { id: "desc" }],
-          select: {
-            id: true,
-            name: true,
-            type: true,
-            version: true,
-          },
-        });
-        const existingProjectTemplates = existingProjectTemplatesByName.filter(
-          (template) => template.type === input.type,
-        );
-        // "open it to create a new version" is a dead end when the name is
-        // taken by a template of a different type (type cannot change)
-        const throwTemplateNameConflict = () => {
-          throw new LangfuseConflictError(
-            existingProjectTemplates.length > 0
-              ? `An evaluator named "${input.name}" already exists in this project. Open it to create a new version.`
-              : `An evaluator named "${input.name}" already exists in this project with a different type. Use a different name.`,
-          );
-        };
+      const mutationId = uuidv4();
+      const result = await withAnalyticsEvaluationMutationAdmission({
+        resourceIdentity: `template-create:${mutationId}`,
+        mutate: (guard) =>
+          guard.withIoFence(async (tx) => {
+            const nextVariables = getEvalTemplateVariables(input);
+            const existingProjectTemplatesByName =
+              await tx.evalTemplate.findMany({
+                where: {
+                  projectId: input.projectId,
+                  name: input.name,
+                },
+                orderBy: [
+                  { version: "desc" },
+                  { createdAt: "desc" },
+                  { id: "desc" },
+                ],
+                select: {
+                  id: true,
+                  name: true,
+                  type: true,
+                  version: true,
+                },
+              });
+            const existingProjectTemplates =
+              existingProjectTemplatesByName.filter(
+                (template) => template.type === input.type,
+              );
+            // "open it to create a new version" is a dead end when the name is
+            // taken by a template of a different type (type cannot change)
+            const throwTemplateNameConflict = () => {
+              throw new LangfuseConflictError(
+                existingProjectTemplates.length > 0
+                  ? `An evaluator named "${input.name}" already exists in this project. Open it to create a new version.`
+                  : `An evaluator named "${input.name}" already exists in this project with a different type. Use a different name.`,
+              );
+            };
 
-        let templateIdsWhoseConfigsShouldMove: string[] = [];
+            let templateIdsWhoseConfigsShouldMove: string[] = [];
 
-        switch (input.intent) {
-          case "new": {
-            if (existingProjectTemplatesByName.length > 0) {
-              throwTemplateNameConflict();
+            switch (input.intent) {
+              case "new": {
+                if (existingProjectTemplatesByName.length > 0) {
+                  throwTemplateNameConflict();
+                }
+                break;
+              }
+              case "new-version": {
+                const sourceTemplate = existingProjectTemplates.find(
+                  (template) => template.id === input.sourceTemplateId,
+                );
+
+                if (!sourceTemplate) {
+                  throw new LangfuseNotFoundError("Evaluator not found");
+                }
+
+                templateIdsWhoseConfigsShouldMove =
+                  existingProjectTemplates.map((template) => template.id);
+                break;
+              }
+              case "clone": {
+                const cloneSourceTemplate = await tx.evalTemplate.findFirst({
+                  where: {
+                    id: input.cloneSourceId,
+                    projectId: null,
+                  },
+                });
+
+                if (!cloneSourceTemplate) {
+                  throw new LangfuseNotFoundError(
+                    "Langfuse managed template not found",
+                  );
+                }
+                if (cloneSourceTemplate.type !== input.type) {
+                  throw new InvalidRequestError(
+                    "Evaluator type cannot be changed.",
+                  );
+                }
+                if (existingProjectTemplatesByName.length > 0) {
+                  throwTemplateNameConflict();
+                }
+
+                if (input.retargetUsingJobConfigs) {
+                  // Clone retargeting is opt-in from the dialog: move this project's
+                  // configs that currently point at the managed source family to the
+                  // newly cloned project template.
+                  const cloneSourceTemplateList =
+                    await tx.evalTemplate.findMany({
+                      where: {
+                        projectId: null,
+                        name: cloneSourceTemplate.name,
+                        type: cloneSourceTemplate.type,
+                      },
+                      select: {
+                        id: true,
+                      },
+                    });
+                  templateIdsWhoseConfigsShouldMove =
+                    cloneSourceTemplateList.map((template) => template.id);
+                }
+                break;
+              }
+              default:
+                assertUnreachable(input);
             }
-            break;
-          }
-          case "new-version": {
-            const sourceTemplate = existingProjectTemplates.find(
-              (template) => template.id === input.sourceTemplateId,
-            );
 
-            if (!sourceTemplate) {
-              throw new LangfuseNotFoundError("Evaluator not found");
-            }
-
-            templateIdsWhoseConfigsShouldMove = existingProjectTemplates.map(
-              (template) => template.id,
-            );
-            break;
-          }
-          case "clone": {
-            const cloneSourceTemplate = await tx.evalTemplate.findFirst({
-              where: {
-                id: input.cloneSourceId,
-                projectId: null,
-              },
+            const configsToUpgrade =
+              templateIdsWhoseConfigsShouldMove.length > 0
+                ? await tx.jobConfiguration.findMany({
+                    where: {
+                      projectId: input.projectId,
+                      evalTemplateId: {
+                        in: templateIdsWhoseConfigsShouldMove,
+                      },
+                      evalTemplate: {
+                        is: {
+                          type: input.type,
+                        },
+                      },
+                    },
+                    select: {
+                      id: true,
+                      scoreName: true,
+                      targetObject: true,
+                      variableMapping: true,
+                    },
+                  })
+                : [];
+            const upgradedConfigs = prepareConfigsForTemplateUpgrade({
+              templateType: input.type,
+              configs: configsToUpgrade,
+              nextVariables,
             });
 
-            if (!cloneSourceTemplate) {
-              throw new LangfuseNotFoundError(
-                "Langfuse managed template not found",
-              );
-            }
-            if (cloneSourceTemplate.type !== input.type) {
-              throw new InvalidRequestError(
-                "Evaluator type cannot be changed.",
-              );
-            }
-            if (existingProjectTemplatesByName.length > 0) {
-              throwTemplateNameConflict();
-            }
+            const latestTemplate = existingProjectTemplatesByName[0];
+            const baseTemplateData = {
+              version: (latestTemplate?.version ?? 0) + 1,
+              name: input.name,
+              projectId: input.projectId,
+            };
 
-            if (input.retargetUsingJobConfigs) {
-              // Clone retargeting is opt-in from the dialog: move this project's
-              // configs that currently point at the managed source family to the
-              // newly cloned project template.
-              const cloneSourceTemplateList = await tx.evalTemplate.findMany({
-                where: {
-                  projectId: null,
-                  name: cloneSourceTemplate.name,
-                  type: cloneSourceTemplate.type,
-                },
-                select: {
-                  id: true,
-                },
-              });
-              templateIdsWhoseConfigsShouldMove = cloneSourceTemplateList.map(
-                (template) => template.id,
-              );
-            }
-            break;
-          }
-          default:
-            assertUnreachable(input);
-        }
-
-        const configsToUpgrade =
-          templateIdsWhoseConfigsShouldMove.length > 0
-            ? await tx.jobConfiguration.findMany({
-                where: {
-                  projectId: input.projectId,
-                  evalTemplateId: {
-                    in: templateIdsWhoseConfigsShouldMove,
-                  },
-                  evalTemplate: {
-                    is: {
-                      type: input.type,
+            const evalTemplate = await (async () => {
+              switch (input.type) {
+                case EvalTemplateType.CODE:
+                  return tx.evalTemplate.create({
+                    data: {
+                      ...baseTemplateData,
+                      type: EvalTemplateType.CODE,
+                      prompt: null,
+                      provider: null,
+                      model: null,
+                      modelParams: undefined,
+                      vars: [...CODE_EVAL_TEMPLATE_VARIABLES],
+                      outputDefinition: undefined,
+                      sourceCode: input.sourceCode,
+                      sourceCodeLanguage: input.sourceCodeLanguage,
                     },
-                  },
-                },
-                select: {
-                  id: true,
-                  scoreName: true,
-                  targetObject: true,
-                  variableMapping: true,
-                },
-              })
-            : [];
-        const upgradedConfigs = prepareConfigsForTemplateUpgrade({
-          templateType: input.type,
-          configs: configsToUpgrade,
-          nextVariables,
-        });
+                  });
+                case EvalTemplateType.LLM_AS_JUDGE:
+                  return tx.evalTemplate.create({
+                    data: {
+                      ...baseTemplateData,
+                      type: EvalTemplateType.LLM_AS_JUDGE,
+                      prompt: input.prompt,
+                      // if using default model, leave model, provider and modelParams empty
+                      // otherwise we will not pull the most recent default evaluation model
+                      provider: input.provider,
+                      model: input.model,
+                      modelParams: input.modelParams ?? undefined,
+                      vars: input.vars,
+                      outputDefinition: input.outputDefinition,
+                      sourceCode: null,
+                      sourceCodeLanguage: null,
+                    },
+                  });
+                default:
+                  return assertUnreachable(input);
+              }
+            })();
 
-        const latestTemplate = existingProjectTemplatesByName[0];
-        const baseTemplateData = {
-          version: (latestTemplate?.version ?? 0) + 1,
-          name: input.name,
-          projectId: input.projectId,
-        };
+            if (upgradedConfigs.length > 0) {
+              await Promise.all(
+                upgradedConfigs.map((config) =>
+                  tx.jobConfiguration.update({
+                    where: {
+                      id: config.id,
+                      projectId: input.projectId,
+                    },
+                    data: {
+                      evalTemplateId: evalTemplate.id,
+                      variableMapping: config.variableMapping,
+                    },
+                  }),
+                ),
+              );
+            }
 
-        const evalTemplate = await (async () => {
-          switch (input.type) {
-            case EvalTemplateType.CODE:
-              return tx.evalTemplate.create({
-                data: {
-                  ...baseTemplateData,
-                  type: EvalTemplateType.CODE,
-                  prompt: null,
-                  provider: null,
-                  model: null,
-                  modelParams: undefined,
-                  vars: [...CODE_EVAL_TEMPLATE_VARIABLES],
-                  outputDefinition: undefined,
-                  sourceCode: input.sourceCode,
-                  sourceCodeLanguage: input.sourceCodeLanguage,
-                },
-              });
-            case EvalTemplateType.LLM_AS_JUDGE:
-              return tx.evalTemplate.create({
-                data: {
-                  ...baseTemplateData,
-                  type: EvalTemplateType.LLM_AS_JUDGE,
-                  prompt: input.prompt,
-                  // if using default model, leave model, provider and modelParams empty
-                  // otherwise we will not pull the most recent default evaluation model
-                  provider: input.provider,
-                  model: input.model,
-                  modelParams: input.modelParams ?? undefined,
-                  vars: input.vars,
-                  outputDefinition: input.outputDefinition,
-                  sourceCode: null,
-                  sourceCodeLanguage: null,
-                },
-              });
-            default:
-              return assertUnreachable(input);
-          }
-        })();
+            await auditLog({
+              session: ctx.session,
+              resourceType: EVAL_TEMPLATE_AUDIT_LOG_RESOURCE_TYPE,
+              resourceId: evalTemplate.id,
+              action: "create",
+            });
 
-        if (upgradedConfigs.length > 0) {
-          await Promise.all(
-            upgradedConfigs.map((config) =>
-              tx.jobConfiguration.update({
-                where: {
-                  id: config.id,
-                  projectId: input.projectId,
-                },
-                data: {
-                  evalTemplateId: evalTemplate.id,
-                  variableMapping: config.variableMapping,
-                },
-              }),
-            ),
-          );
-        }
-
-        await auditLog({
-          session: ctx.session,
-          resourceType: EVAL_TEMPLATE_AUDIT_LOG_RESOURCE_TYPE,
-          resourceId: evalTemplate.id,
-          action: "create",
-        });
-
-        return {
-          template: evalTemplate,
-          updatedConfigCount: upgradedConfigs.length,
-        };
+            return {
+              template: evalTemplate,
+              updatedConfigCount: upgradedConfigs.length,
+            };
+          }),
       });
 
       if (result.updatedConfigCount > 0) {
@@ -1481,16 +1508,20 @@ export const evalRouter = createTRPCRouter({
           (evaluator) => evaluator.id,
         );
 
-        await ctx.prisma.$transaction(async (tx) => {
-          await tx.jobConfiguration.updateMany({
-            where: {
-              id: { in: filteredEvaluatorIds },
-            },
-            data: {
-              status: newStatus,
-              ...resetEvalConfigBlockFields,
-            },
-          });
+        await withAnalyticsEvaluationMutationAdmission({
+          resourceIdentity: `dataset-status:${evalTemplateId}:${datasetId}`,
+          mutate: (guard) =>
+            guard.withIoFence(async (tx) => {
+              await tx.jobConfiguration.updateMany({
+                where: {
+                  id: { in: filteredEvaluatorIds },
+                },
+                data: {
+                  status: newStatus,
+                  ...resetEvalConfigBlockFields,
+                },
+              });
+            }),
         });
 
         if (
@@ -1602,6 +1633,11 @@ export const evalRouter = createTRPCRouter({
       }
       const validatedFilter = filterValidation.validatedFilters;
 
+      const scheduleHistoricalEvaluation =
+        config.timeScope?.includes("EXISTING") === true &&
+        (existingJob.targetObject === EvalTargetObject.TRACE ||
+          existingJob.targetObject === EvalTargetObject.DATASET);
+
       if (existingJob.evalTemplate?.type === EvalTemplateType.CODE) {
         assertCodeEvalTemplateCanRun({
           sourceCodeLanguage: existingJob.evalTemplate.sourceCodeLanguage,
@@ -1620,100 +1656,111 @@ export const evalRouter = createTRPCRouter({
         });
       }
 
-      await auditLog({
-        session: ctx.session,
-        resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
-        resourceId: evalConfigId,
-        action: "update",
-      });
-
-      if (
-        shouldValidateBeforeActivation({
-          currentStatus: existingJob.status,
-          blockedAt: existingJob.blockedAt,
-          nextStatus: config.status,
-        })
-      ) {
-        if (!existingJob.evalTemplateId) {
-          throw new TRPCError({
-            code: "NOT_FOUND",
-            message: "Evaluator template not found",
-          });
-        }
-
-        await validateEvalTemplateCanRun({
-          prisma: ctx.prisma,
-          projectId,
-          evalTemplateId: existingJob.evalTemplateId,
-        });
-      }
-
-      const updatedConfig = {
-        ...validatedConfig,
-        ...(config.filter !== undefined
-          ? {
-              filter: validatedFilter ?? [],
+      return runHistoricalEvaluationMutation({
+        scheduleHistoricalEvaluation,
+        resourceIdentity: evalConfigId,
+        mutate: async (guard) => {
+          if (
+            shouldValidateBeforeActivation({
+              currentStatus: existingJob.status,
+              blockedAt: existingJob.blockedAt,
+              nextStatus: config.status,
+            })
+          ) {
+            if (!existingJob.evalTemplateId) {
+              throw new TRPCError({
+                code: "NOT_FOUND",
+                message: "Evaluator template not found",
+              });
             }
-          : {}),
-        ...(validatedConfig.status !== undefined
-          ? resetEvalConfigBlockFields
-          : {}),
-      };
 
-      const updatedJob = await ctx.prisma.jobConfiguration.update({
-        where: {
-          id: evalConfigId,
-          projectId: projectId,
-        },
-        data: updatedConfig,
-      });
+            await validateEvalTemplateCanRun({
+              prisma: ctx.prisma,
+              projectId,
+              evalTemplateId: existingJob.evalTemplateId,
+            });
+          }
 
-      // Clear the "no job configs" caches if we're activating a job configuration
-      if (config.status === "ACTIVE") {
-        await invalidateProjectEvalConfigCaches(projectId);
-      }
+          const updatedConfig = {
+            ...validatedConfig,
+            ...(config.filter !== undefined
+              ? {
+                  filter: validatedFilter ?? [],
+                }
+              : {}),
+            ...(validatedConfig.status !== undefined
+              ? resetEvalConfigBlockFields
+              : {}),
+          };
 
-      // EVENT targets handle historical evaluation via the dedicated batch
-      // "Run Evaluation" action (runEvaluationRouter), so we only schedule
-      // historical backfills here for TRACE and DATASET targets.
-      if (
-        config.timeScope?.includes("EXISTING") &&
-        (existingJob?.targetObject === EvalTargetObject.TRACE ||
-          existingJob?.targetObject === EvalTargetObject.DATASET)
-      ) {
-        logger.info(
-          `Applying to historical traces for job ${evalConfigId} and project ${projectId}`,
-        );
-        const batchJobQueue = getQueue(QueueName.BatchActionQueue);
-        if (!batchJobQueue) {
-          throw new Error("Batch job queue not found");
-        }
-        await batchJobQueue.add(
-          QueueJobs.BatchActionProcessingJob,
-          {
-            name: QueueJobs.BatchActionProcessingJob,
-            timestamp: new Date(),
-            id: uuidv4(),
-            payload: {
-              projectId: projectId,
-              actionId: "eval-create",
-              configId: evalConfigId,
-              cutoffCreatedAt: new Date(),
-              targetObject: existingJob?.targetObject,
-              query: {
-                where: config.filter ?? [],
-                orderBy: {
-                  column: "timestamp",
-                  order: "DESC",
-                },
+          const updateJob = async (tx: Prisma.TransactionClient) => {
+            await auditLog(
+              {
+                session: ctx.session,
+                resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
+                resourceId: evalConfigId,
+                action: "update",
               },
-            },
-          },
-          { delay: config.delay },
-        );
-      }
+              tx,
+            );
+            return tx.jobConfiguration.update({
+              where: {
+                id: evalConfigId,
+                projectId: projectId,
+              },
+              data: updatedConfig,
+            });
+          };
+          const updatedJob = await guard.withIoFence(updateJob);
 
-      return updatedJob;
+          // Clear the "no job configs" caches if we're activating a job configuration
+          if (config.status === "ACTIVE") {
+            await invalidateProjectEvalConfigCaches(projectId);
+          }
+
+          // EVENT targets handle historical evaluation via the dedicated batch
+          // "Run Evaluation" action (runEvaluationRouter), so we only schedule
+          // historical backfills here for TRACE and DATASET targets.
+          if (scheduleHistoricalEvaluation) {
+            logger.info(
+              `Applying to historical traces for job ${evalConfigId} and project ${projectId}`,
+            );
+            const batchJobQueue = BatchActionQueue.getInstance();
+            if (!batchJobQueue) {
+              throw new Error("Batch job queue not found");
+            }
+            const batchEventId = uuidv4();
+            const cutoffCreatedAt = new Date();
+            await guard.withIoFence(() =>
+              batchJobQueue.add(
+                QueueJobs.BatchActionProcessingJob,
+                {
+                  name: QueueJobs.BatchActionProcessingJob,
+                  timestamp: cutoffCreatedAt,
+                  id: batchEventId,
+                  payload: {
+                    projectId: projectId,
+                    actionId: "eval-create",
+                    configId: evalConfigId,
+                    cutoffCreatedAt,
+                    targetObject: existingJob.targetObject as EvalTargetObject,
+                    query: {
+                      filter: validatedFilter ?? [],
+                      orderBy: {
+                        column: "timestamp",
+                        order: "DESC",
+                      },
+                    },
+                  },
+                },
+                { delay: config.delay, jobId: batchEventId },
+              ),
+            );
+          }
+
+          return updatedJob;
+        },
+      });
     }),
 
   deleteEvalJob: protectedProjectProcedure
@@ -1742,18 +1789,26 @@ export const evalRouter = createTRPCRouter({
         });
       }
 
-      await auditLog({
-        session: ctx.session,
-        resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
-        resourceId: evalConfigId,
-        action: "delete",
-      });
-
-      await ctx.prisma.jobConfiguration.delete({
-        where: {
-          id: evalConfigId,
-          projectId: projectId,
-        },
+      await withAnalyticsEvaluationMutationAdmission({
+        resourceIdentity: `job-delete:${evalConfigId}`,
+        mutate: (guard) =>
+          guard.withIoFence(async (tx) => {
+            await auditLog(
+              {
+                session: ctx.session,
+                resourceType: JOB_CONFIGURATION_AUDIT_LOG_RESOURCE_TYPE,
+                resourceId: evalConfigId,
+                action: "delete",
+              },
+              tx,
+            );
+            await tx.jobConfiguration.delete({
+              where: {
+                id: evalConfigId,
+                projectId: projectId,
+              },
+            });
+          }),
       });
 
       // Clear the "no job configs" caches to ensure they are re-evaluated
@@ -1786,10 +1841,16 @@ export const evalRouter = createTRPCRouter({
         scope: "evalTemplate:CUD",
       });
 
-      const deletedVersions = await deleteEvalTemplateFamily({
-        prisma: ctx.prisma,
-        projectId,
-        evalTemplateId,
+      const deletedVersions = await withAnalyticsEvaluationMutationAdmission({
+        resourceIdentity: `template-delete:${evalTemplateId}`,
+        mutate: (guard) =>
+          guard.withIoFence((tx) =>
+            deleteEvalTemplateFamily({
+              prisma: tx,
+              projectId,
+              evalTemplateId,
+            }),
+          ),
       });
 
       await Promise.all(

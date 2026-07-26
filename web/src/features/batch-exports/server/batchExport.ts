@@ -13,6 +13,7 @@ import {
 } from "@langfuse/shared";
 import {
   BatchExportQueue,
+  cancelBatchExport,
   logger,
   QueueJobs,
 } from "@langfuse/shared/src/server";
@@ -24,6 +25,23 @@ import {
   CommunityCapabilityUnavailableError,
   isCommunityBatchExportTableAvailable,
 } from "@/src/features/capabilities/communityAvailability";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
+import { isInternalDorisCapabilityActive } from "@/src/server/communityCapabilityRuntime";
+import {
+  createAdmittedDorisBatchExport,
+  dispatchDorisBatchExport,
+} from "./dorisBatchExport";
+
+function unsupportedBatchExport(
+  capability: "batchExports" | "experiments",
+): TRPCError {
+  const unavailable = new CommunityCapabilityUnavailableError(capability);
+  return new TRPCError({
+    code: "NOT_IMPLEMENTED",
+    message: unavailable.body.message,
+    cause: unavailable,
+  });
+}
 
 export const batchExportRouter = createTRPCRouter({
   create: protectedProjectProcedure
@@ -51,16 +69,13 @@ export const batchExportRouter = createTRPCRouter({
           !isCommunityBatchExportTableAvailable(
             query.tableName,
             env.LANGFUSE_ANALYTICS_BACKEND,
+            query.tableName === BatchExportTableName.DatasetRunItems &&
+              env.LANGFUSE_ANALYTICS_BACKEND === "doris"
+              ? await isInternalDorisCapabilityActive("datasetRunExports")
+              : false,
           )
         ) {
-          const unavailable = new CommunityCapabilityUnavailableError(
-            "experiments",
-          );
-          throw new TRPCError({
-            code: "NOT_IMPLEMENTED",
-            message: unavailable.body.message,
-            cause: unavailable,
-          });
+          throw unsupportedBatchExport("experiments");
         }
 
         if (query.tableName === BatchExportTableName.AuditLogs) {
@@ -85,17 +100,34 @@ export const batchExportRouter = createTRPCRouter({
         logger.info("[BATCH EXPORT] Creating export job", { job: input });
         const userId = ctx.session.user.id;
 
-        // Create export job
-        const exportJob = await ctx.prisma.batchExport.create({
-          data: {
+        const admissionContext = getWebAnalyticsAdmissionContext();
+        const isDoris = env.LANGFUSE_ANALYTICS_BACKEND === "doris";
+        let managedExportJob:
+          | Awaited<ReturnType<typeof createAdmittedDorisBatchExport>>
+          | undefined;
+        if (isDoris) {
+          managedExportJob = await createAdmittedDorisBatchExport({
+            client: ctx.prisma,
+            admissionContext,
             projectId,
             userId,
-            status: BatchExportStatus.QUEUED,
             name,
             format,
             query,
-          },
-        });
+          });
+        }
+        const exportJob =
+          managedExportJob ??
+          (await ctx.prisma.batchExport.create({
+            data: {
+              projectId,
+              userId,
+              status: BatchExportStatus.QUEUED,
+              name,
+              format,
+              query,
+            },
+          }));
 
         // Create audit log
         await auditLog({
@@ -107,18 +139,28 @@ export const batchExportRouter = createTRPCRouter({
           after: exportJob,
         });
 
-        // Notify worker
-        await BatchExportQueue.getInstance()?.add(QueueJobs.BatchExportJob, {
-          id: exportJob.id, // Use the batchExportId to deduplicate when the same job is sent multiple times
-          name: QueueJobs.BatchExportJob,
-          timestamp: new Date(),
-          payload: {
-            batchExportId: exportJob.id,
-            projectId,
-          },
-        });
+        if (managedExportJob) {
+          await dispatchDorisBatchExport({
+            client: ctx.prisma,
+            admissionContext: admissionContext!,
+            batchExport: managedExportJob,
+          });
+        } else {
+          await BatchExportQueue.getInstance()?.add(QueueJobs.BatchExportJob, {
+            id: exportJob.id,
+            name: QueueJobs.BatchExportJob,
+            timestamp: new Date(),
+            payload: {
+              batchExportId: exportJob.id,
+              projectId,
+            },
+          });
+        }
       } catch (e) {
         logger.error("[BATCH EXPORT] Failed to create export job", e);
+        if (e instanceof CommunityCapabilityUnavailableError) {
+          throw unsupportedBatchExport("batchExports");
+        }
         if (e instanceof TRPCError) {
           throw e;
         }
@@ -142,9 +184,10 @@ export const batchExportRouter = createTRPCRouter({
         scope: "batchExports:create",
       });
 
-      await ctx.prisma.batchExport.update({
-        where: { id: input.batchExportId, projectId: input.projectId },
-        data: { status: BatchExportStatus.CANCELLED },
+      await cancelBatchExport({
+        client: ctx.prisma,
+        projectId: input.projectId,
+        batchExportId: input.batchExportId,
       });
     }),
   all: protectedProjectProcedure

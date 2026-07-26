@@ -291,6 +291,7 @@ export async function processObservationEval(
     traceId: executionParams.job.jobInputTraceId,
     observationId: executionParams.job.jobInputObservationId,
     environment: executionParams.environment,
+    scoreTimestamp: executionParams.job.createdAt,
     deps: executionParams.deps,
     result: executionResult,
   });

@@ -1,25 +1,78 @@
+import type * as AnalyticsRuntime from "@/src/server/analyticsRuntime";
+import type * as SharedServer from "@langfuse/shared/src/server";
+
 const {
   mockAddScoreDelete,
+  mockGetScoreDeleteQueue,
   mockAddBatchAction,
   mockGetEventsGroupedByTraceTags,
   mockGetEventsGroupedByTraceName,
   mockGetEventsGroupedByUserId,
+  mockIsDorisAnalyticsBackend,
+  mockGetWebAnalyticsDurableWorkState,
+  mockGetWebAnalyticsAdmissionContext,
+  mockDorisScoreGet,
+  mockClickhouseScoreGet,
+  mockDeleteScores,
+  mockAuditLog,
+  mockCreateClaim,
+  mockLockClaimForIo,
+  mockLockLegacyAdmission,
+  mockRenewClaim,
+  mockReleaseClaim,
 } = vi.hoisted(() => ({
   mockAddScoreDelete: vi.fn(),
+  mockGetScoreDeleteQueue: vi.fn(),
   mockAddBatchAction: vi.fn(),
   mockGetEventsGroupedByTraceTags: vi.fn(async () => []),
   mockGetEventsGroupedByTraceName: vi.fn(async () => []),
   mockGetEventsGroupedByUserId: vi.fn(async () => []),
+  mockIsDorisAnalyticsBackend: vi.fn(() => false),
+  mockGetWebAnalyticsAdmissionContext: vi.fn(() => ({
+    runtimeLeaseId: "runtime-producer",
+    backend: "doris" as const,
+    deploymentGeneration: 7n,
+  })),
+  mockDorisScoreGet: vi.fn(),
+  mockClickhouseScoreGet: vi.fn(),
+  mockDeleteScores: vi.fn(),
+  mockAuditLog: vi.fn(),
+  mockCreateClaim: vi.fn(),
+  mockLockClaimForIo: vi.fn(),
+  mockLockLegacyAdmission: vi.fn(),
+  mockRenewClaim: vi.fn(),
+  mockReleaseClaim: vi.fn(),
+  mockGetWebAnalyticsDurableWorkState: vi.fn(() => ({
+    mode: "MANAGED" as const,
+    provenance: {
+      analyticsBackend: "DORIS" as const,
+      deploymentGeneration: 7n,
+      workloadEpochFingerprint: "a".repeat(64),
+      runtimeContractVersion: 3,
+      producerRuntimeLeaseId: "runtime-producer",
+    },
+  })),
+}));
+
+vi.mock("@/src/server/analyticsRuntime", async (importOriginal) => ({
+  ...(await importOriginal<typeof AnalyticsRuntime>()),
+  getWebAnalyticsAdmissionContext: mockGetWebAnalyticsAdmissionContext,
+  getWebAnalyticsDurableWorkState: mockGetWebAnalyticsDurableWorkState,
+}));
+
+vi.mock("@/src/features/audit-logs/auditLog", () => ({
+  auditLog: mockAuditLog,
 }));
 
 vi.mock("@langfuse/shared/src/server", async () => {
-  const originalModule = await vi.importActual("@langfuse/shared/src/server");
+  const originalModule = await vi.importActual<typeof SharedServer>(
+    "@langfuse/shared/src/server",
+  );
+  mockClickhouseScoreGet.mockImplementation(originalModule.getScoreById);
   return {
     ...originalModule,
     ScoreDeleteQueue: {
-      getInstance: vi.fn(() => ({
-        add: mockAddScoreDelete,
-      })),
+      getInstance: mockGetScoreDeleteQueue,
     },
     BatchActionQueue: {
       getInstance: vi.fn(() => ({
@@ -29,6 +82,17 @@ vi.mock("@langfuse/shared/src/server", async () => {
     getEventsGroupedByTraceTags: mockGetEventsGroupedByTraceTags,
     getEventsGroupedByTraceName: mockGetEventsGroupedByTraceName,
     getEventsGroupedByUserId: mockGetEventsGroupedByUserId,
+    isDorisAnalyticsBackend: mockIsDorisAnalyticsBackend,
+    createAnalyticsBackendClaimLease: mockCreateClaim,
+    lockAnalyticsBackendClaimLeaseForIo: mockLockClaimForIo,
+    getScoreById: mockClickhouseScoreGet,
+    deleteScores: mockDeleteScores,
+    getDorisTelemetryRepositories: () => ({
+      scores: { get: mockDorisScoreGet },
+    }),
+    lockLegacyAnalyticsAdmission: mockLockLegacyAdmission,
+    renewAnalyticsBackendClaimLease: mockRenewClaim,
+    releaseAnalyticsBackendClaimLease: mockReleaseClaim,
   };
 });
 
@@ -44,8 +108,6 @@ import {
   createTraceScore,
   createTracesCh,
   createScoresCh,
-  ScoreDeleteQueue,
-  BatchActionQueue,
   QueueJobs,
   createOrgProjectAndApiKey,
 } from "@langfuse/shared/src/server";
@@ -61,10 +123,26 @@ describe("scores trpc", () => {
     projectId = setup.projectId;
     orgId = setup.orgId;
     mockAddScoreDelete.mockClear();
+    mockGetScoreDeleteQueue.mockReset();
+    mockGetScoreDeleteQueue.mockReturnValue({ add: mockAddScoreDelete });
     mockAddBatchAction.mockClear();
     mockGetEventsGroupedByTraceTags.mockClear();
     mockGetEventsGroupedByTraceName.mockClear();
     mockGetEventsGroupedByUserId.mockClear();
+    mockIsDorisAnalyticsBackend.mockReset();
+    mockIsDorisAnalyticsBackend.mockReturnValue(false);
+    mockDorisScoreGet.mockReset();
+    mockClickhouseScoreGet.mockClear();
+    mockDeleteScores.mockReset();
+    mockAuditLog.mockReset();
+    mockCreateClaim.mockReset();
+    mockCreateClaim.mockResolvedValue({ id: "score-delete-claim" });
+    mockLockClaimForIo.mockReset();
+    mockLockLegacyAdmission.mockReset();
+    mockRenewClaim.mockReset();
+    mockRenewClaim.mockResolvedValue({ id: "score-delete-claim" });
+    mockReleaseClaim.mockReset();
+    mockReleaseClaim.mockResolvedValue(true);
 
     const session: Session = {
       expires: "1",
@@ -237,75 +315,97 @@ describe("scores trpc", () => {
   });
 
   describe("scores.deleteMany", () => {
-    it("should delete scores by ids", async () => {
-      // Setup
-      const createdScore = createTraceScore({
-        project_id: projectId,
-      });
-      await createScoresCh([createdScore]);
-      const scoreDeleteQueue = ScoreDeleteQueue.getInstance();
-
-      // When
+    it("queues managed Doris direct deletion with immutable provenance", async () => {
+      const scoreId = randomUUID();
       await caller.scores.deleteMany({
         projectId,
-        scoreIds: [createdScore.id],
+        scoreIds: [scoreId],
       });
 
-      expect(scoreDeleteQueue).not.toBeNull();
-
-      // Then
-      expect(scoreDeleteQueue!.add).toHaveBeenCalledWith(
-        QueueJobs.ScoreDelete,
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            projectId,
-            scoreIds: [createdScore.id],
-          }),
+      const event = mockAddScoreDelete.mock.calls[0]?.[1];
+      expect(event.payload).toMatchObject({
+        projectId,
+        scoreIds: [scoreId],
+        deletionOperationId: event.id,
+        deletionGeneration: "7",
+        analyticsProvenance: expect.objectContaining({
+          analyticsBackend: "DORIS",
+          deploymentGeneration: "7",
         }),
-      );
+      });
     });
 
-    it("should delete scores via batch query", async () => {
-      // Setup
-      const scoreName = randomUUID();
-      const createdScore = createTraceScore({
-        project_id: projectId,
-        name: scoreName,
-      });
-      await createScoresCh([createdScore]);
-      const batchActionQueue = BatchActionQueue.getInstance();
-
-      // When
+    it("queues managed Doris batch deletion with immutable provenance", async () => {
       await caller.scores.deleteMany({
         projectId,
         scoreIds: null,
         isBatchAction: true,
-        query: {
-          orderBy: { column: "timestamp", order: "ASC" },
-          filter: [
-            {
-              column: "name",
-              operator: "=",
-              value: scoreName,
-              type: "string",
-            },
-          ],
-        },
+        query: { orderBy: null, filter: [] },
       });
 
-      expect(batchActionQueue).not.toBeNull();
+      expect(mockAddBatchAction.mock.calls[0]?.[1].payload).toMatchObject({
+        actionId: "score-delete",
+        deletionGeneration: "7",
+        analyticsProvenance: expect.objectContaining({
+          analyticsBackend: "DORIS",
+          deploymentGeneration: "7",
+        }),
+      });
+    });
 
-      // Then
-      expect(batchActionQueue!.add).toHaveBeenCalledWith(
-        QueueJobs.BatchActionProcessingJob,
+    it("stamps managed ClickHouse direct deletion", async () => {
+      mockGetWebAnalyticsDurableWorkState.mockImplementationOnce(
+        () =>
+          ({
+            mode: "MANAGED",
+            provenance: {
+              analyticsBackend: "CLICKHOUSE",
+              deploymentGeneration: 7n,
+              workloadEpochFingerprint: "a".repeat(64),
+              runtimeContractVersion: 3,
+              producerRuntimeLeaseId: "runtime-producer",
+            },
+          }) as never,
+      );
+      const scoreId = randomUUID();
+
+      await caller.scores.deleteMany({ projectId, scoreIds: [scoreId] });
+
+      expect(mockAddScoreDelete).toHaveBeenCalledWith(
+        QueueJobs.ScoreDelete,
         expect.objectContaining({
           payload: expect.objectContaining({
             projectId,
-            actionId: "score-delete",
+            scoreIds: [scoreId],
+            deletionGeneration: "7",
+            analyticsProvenance: expect.objectContaining({
+              analyticsBackend: "CLICKHOUSE",
+            }),
           }),
         }),
-        expect.objectContaining({}),
+        { jobId: expect.any(String) },
       );
+      const publishedEvent = mockAddScoreDelete.mock.calls[0]?.[1];
+      const publishedOptions = mockAddScoreDelete.mock.calls[0]?.[2];
+      expect(publishedOptions).toEqual({ jobId: publishedEvent?.id });
+      expect(mockCreateClaim).toHaveBeenCalledOnce();
+      expect(mockReleaseClaim).toHaveBeenCalledOnce();
+    });
+
+    it("does not enqueue while a managed ClickHouse runtime is unavailable", async () => {
+      mockGetWebAnalyticsDurableWorkState.mockImplementationOnce(
+        () => ({ mode: "UNAVAILABLE" }) as never,
+      );
+
+      await expect(
+        caller.scores.deleteMany({
+          projectId,
+          scoreIds: [randomUUID()],
+        }),
+      ).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+      expect(mockAuditLog).not.toHaveBeenCalled();
+      expect(mockGetScoreDeleteQueue).not.toHaveBeenCalled();
+      expect(mockAddScoreDelete).not.toHaveBeenCalled();
     });
 
     it("should throw an error if batchAction and scoreIds are missing", async () => {
@@ -322,6 +422,116 @@ describe("scores trpc", () => {
         message:
           "Either batchAction or scoreIds must be provided to delete scores.",
       });
+    });
+  });
+
+  describe("scores.deleteAnnotationScore", () => {
+    it("queues a managed Doris annotation deletion", async () => {
+      mockIsDorisAnalyticsBackend.mockReturnValue(true);
+      const score = {
+        id: "annotation-score-1",
+        projectId,
+        environment: "default",
+        name: "quality",
+        value: 1,
+        source: "ANNOTATION" as const,
+        authorUserId: "user-1",
+        comment: null,
+        metadata: {},
+        configId: null,
+        queueId: null,
+        executionTraceId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        timestamp: new Date(),
+        traceId: randomUUID(),
+        sessionId: null,
+        datasetRunId: null,
+        observationId: null,
+        longStringValue: "",
+        dataType: "NUMERIC" as const,
+        stringValue: null,
+      };
+      mockDorisScoreGet.mockResolvedValueOnce(score);
+
+      await expect(
+        caller.scores.deleteAnnotationScore({
+          projectId,
+          id: score.id,
+        }),
+      ).resolves.toEqual(score);
+      expect(mockAuditLog).toHaveBeenCalledOnce();
+      expect(mockDorisScoreGet).toHaveBeenCalledOnce();
+      expect(mockClickhouseScoreGet).not.toHaveBeenCalled();
+      expect(mockAddScoreDelete.mock.calls[0]?.[1].payload).toMatchObject({
+        projectId,
+        scoreIds: [score.id],
+        deletionGeneration: "7",
+        analyticsProvenance: expect.objectContaining({
+          analyticsBackend: "DORIS",
+        }),
+      });
+    });
+
+    it("deletes a managed ClickHouse annotation under a live claim", async () => {
+      mockGetWebAnalyticsDurableWorkState.mockImplementationOnce(
+        () =>
+          ({
+            mode: "MANAGED",
+            provenance: {
+              analyticsBackend: "CLICKHOUSE",
+              deploymentGeneration: 7n,
+              workloadEpochFingerprint: "a".repeat(64),
+              runtimeContractVersion: 3,
+              producerRuntimeLeaseId: "runtime-producer",
+            },
+          }) as never,
+      );
+      const score = {
+        id: "annotation-score-1",
+        projectId,
+        environment: "default",
+        name: "quality",
+        value: 1,
+        source: "ANNOTATION" as const,
+        authorUserId: "user-1",
+        comment: null,
+        metadata: {},
+        configId: null,
+        queueId: null,
+        executionTraceId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        timestamp: new Date(),
+        traceId: randomUUID(),
+        sessionId: null,
+        datasetRunId: null,
+        observationId: null,
+        longStringValue: "",
+        dataType: "NUMERIC" as const,
+        stringValue: null,
+      };
+      mockClickhouseScoreGet.mockResolvedValueOnce(score);
+
+      await expect(
+        caller.scores.deleteAnnotationScore({
+          projectId,
+          id: score.id,
+        }),
+      ).resolves.toEqual(score);
+
+      expect(mockAuditLog).toHaveBeenCalledOnce();
+      expect(mockDeleteScores).not.toHaveBeenCalled();
+      expect(mockAddScoreDelete.mock.calls[0]?.[1].payload).toMatchObject({
+        projectId,
+        scoreIds: [score.id],
+        deletionGeneration: "7",
+        analyticsProvenance: expect.objectContaining({
+          analyticsBackend: "CLICKHOUSE",
+        }),
+      });
+      expect(mockCreateClaim).toHaveBeenCalledOnce();
+      expect(mockReleaseClaim).toHaveBeenCalledOnce();
     });
   });
 

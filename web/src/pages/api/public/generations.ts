@@ -13,6 +13,7 @@ import {
   processEventBatch,
 } from "@langfuse/shared/src/server";
 import { v4 } from "uuid";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export default withMiddlewares({
   POST: createAuthedProjectAPIRoute({
@@ -40,6 +41,7 @@ export default withMiddlewares({
         event.body.id = v4();
       }
       const result = await processEventBatch([event], auth, {
+        analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
         attribution: createIngestionAttribution({
           headers: req.headers,
           authCheck: auth,
@@ -80,6 +82,7 @@ export default withMiddlewares({
         },
       };
       const result = await processEventBatch([event], auth, {
+        analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
         attribution: createIngestionAttribution({
           headers: req.headers,
           authCheck: auth,

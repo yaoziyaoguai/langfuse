@@ -8,8 +8,11 @@ In Doris mode, OTLP/v4, scores, and supported legacy trace/observation events
 all publish raw envelopes through this delivery protocol. “Legacy” here names
 the SDK/API contract only: the worker canonicalizes those events into the same
 `events_current` model and never starts the ClickHouse legacy ingestion queue.
-Experiment dataset-run children remain explicitly unsupported and are rejected
-before publication.
+Experiment dataset-run children are accepted only while the durable
+`datasetRunIngestion` capability is active for the selected Doris generation.
+An inactive child is rejected before its Postgres, queue, or analytics mutation;
+other supported children in the same legacy batch continue through canonical
+ingestion.
 
 ## Rollout
 

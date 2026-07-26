@@ -46,6 +46,42 @@ class TestRunner extends PeriodicRunner {
   }
 }
 
+class BlockingRunner extends PeriodicRunner {
+  public callCount = 0;
+  public readonly started: Promise<void>;
+  private markStarted!: () => void;
+  private readonly blocked: Promise<void>;
+  private releaseExecution!: () => void;
+
+  constructor() {
+    super();
+    this.started = new Promise((resolve) => {
+      this.markStarted = resolve;
+    });
+    this.blocked = new Promise((resolve) => {
+      this.releaseExecution = resolve;
+    });
+  }
+
+  protected get name(): string {
+    return "blocking-runner";
+  }
+
+  protected get defaultIntervalMs(): number {
+    return 1000;
+  }
+
+  protected async execute(): Promise<void> {
+    this.callCount++;
+    this.markStarted();
+    await this.blocked;
+  }
+
+  public release(): void {
+    this.releaseExecution();
+  }
+}
+
 describe("PeriodicRunner", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -135,5 +171,24 @@ describe("PeriodicRunner", () => {
 
     expect(runner.callCount).toBe(1);
     runner.stop();
+  });
+
+  it("waits for the current execution to drain without scheduling another", async () => {
+    const runner = new BlockingRunner();
+    runner.start();
+    await runner.started;
+
+    let drained = false;
+    const drain = runner.stopAndDrain().then(() => {
+      drained = true;
+    });
+    await flushMicrotasks();
+    expect(drained).toBe(false);
+
+    runner.release();
+    await drain;
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(runner.callCount).toBe(1);
   });
 });

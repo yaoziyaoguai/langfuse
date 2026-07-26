@@ -1,11 +1,14 @@
 import type { Mock } from "vitest";
 import type { Session } from "next-auth";
+import type * as EnvModule from "@/src/env.mjs";
 
 import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import { encrypt } from "@langfuse/shared/encryption";
 import { prisma } from "@langfuse/shared/src/db";
 import {
+  type AnalyticsRuntimeAdmissionContext,
+  BlobStorageIntegrationQueue,
   BlobStorageIntegrationProcessingQueue,
   createOrgProjectAndApiKey,
   QueueJobs,
@@ -18,6 +21,12 @@ import {
 } from "@langfuse/shared";
 import { env } from "@/src/env.mjs";
 import { env as sharedEnv } from "@langfuse/shared/src/env";
+
+const lifecycleMocks = vi.hoisted(() => ({
+  backend: "clickhouse" as "clickhouse" | "doris",
+  admission: vi.fn<() => AnalyticsRuntimeAdmissionContext | null>(() => null),
+  sync: vi.fn(),
+}));
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const PRE_CUTOFF = new Date(LEGACY_BLOB_EXPORT_CUTOFF.getTime() - MS_PER_DAY);
@@ -37,8 +46,30 @@ vi.mock("@langfuse/shared/src/server", async () => {
     BlobStorageIntegrationProcessingQueue: {
       getInstance: vi.fn(),
     },
+    BlobStorageIntegrationQueue: {
+      getInstance: vi.fn(),
+    },
     StorageServiceFactory: {
       getInstance: vi.fn(),
+    },
+  };
+});
+vi.mock(
+  "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle",
+  () => ({
+    getDorisIntegrationMutationAdmission: lifecycleMocks.admission,
+    syncDorisIntegrationMutation: lifecycleMocks.sync,
+  }),
+);
+vi.mock("@/src/env.mjs", async (importOriginal) => {
+  const actual = await importOriginal<typeof EnvModule>();
+  return {
+    ...actual,
+    env: {
+      ...actual.env,
+      get LANGFUSE_ANALYTICS_BACKEND() {
+        return lifecycleMocks.backend;
+      },
     },
   };
 });
@@ -191,6 +222,8 @@ describe("Blob Storage Integration tRPC Router", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    lifecycleMocks.admission.mockReturnValue(null);
+    lifecycleMocks.backend = "clickhouse";
   });
 
   describe("runNow", () => {
@@ -230,6 +263,36 @@ describe("Blob Storage Integration tRPC Router", () => {
         outcome: "success",
         jobId: result.jobId,
       });
+    });
+
+    it("queues the exact Doris project and preserves the runNow response contract", async () => {
+      const add = vi.fn().mockResolvedValue(undefined);
+      (BlobStorageIntegrationQueue.getInstance as Mock).mockReturnValue({
+        add,
+      });
+      lifecycleMocks.admission.mockReturnValue({
+        runtimeLeaseId: "web-lease-1",
+        backend: "doris",
+        deploymentGeneration: 1n,
+      });
+      lifecycleMocks.backend = "doris";
+
+      const { caller, project } = await prepare();
+      await createIntegration({ projectId: project.id });
+
+      const result = await caller.blobStorageIntegration.runNow({
+        projectId: project.id,
+      });
+
+      expect(result.success).toBe(true);
+      expect(add).toHaveBeenCalledWith(
+        QueueJobs.BlobStorageIntegrationJob,
+        { projectId: project.id },
+        { jobId: result.jobId },
+      );
+      expect(
+        BlobStorageIntegrationProcessingQueue.getInstance,
+      ).not.toHaveBeenCalled();
     });
 
     it("creates a failure audit log when a manual run cannot be queued", async () => {

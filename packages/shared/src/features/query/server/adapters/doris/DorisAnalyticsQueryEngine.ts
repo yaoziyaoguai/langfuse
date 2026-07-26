@@ -1,11 +1,20 @@
 import { InvalidRequestError } from "../../../../../errors";
 import type { DorisQueryExecutor } from "../../../../../server/doris/client";
 import { compileDorisEventFilters } from "../../../../../server/queries/doris-sql/filterCompiler";
-import type { LogicalEventFilter } from "../../../../../server/queries/logical/filterPlan";
+import {
+  assertDorisFilterBudget,
+  type LogicalEventFilter,
+} from "../../../../../server/queries/logical/filterPlan";
+import {
+  getCompatibleFilterTypes,
+  isFilterColumnType,
+  type CompatibleFilterType,
+} from "../../../../../server/queries/logical/filterTypeCompatibility";
 import { getViewDeclaration } from "../../../dataModel";
 import {
   getValidAggregationsForMeasureType,
   type QueryType,
+  type ViewDeclarationType,
   type ViewVersion,
 } from "../../../types";
 import { validateQuery } from "../../../validateQuery";
@@ -26,14 +35,11 @@ type BoundParameters = {
   bind(value: unknown): string;
 };
 
-const DEFERRED_DIMENSIONS = new Set([
-  "datasetRunId",
-  "experimentName",
-  "experimentDatasetId",
-  "experimentId",
-]);
-
 const MAX_FILLED_ROWS = 10_000;
+const MAX_ANALYTICS_DIMENSIONS = 20;
+const MAX_ANALYTICS_METRICS = 20;
+const MAX_ANALYTICS_ORDER_FIELDS = 20;
+const MAX_ANALYTICS_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
 
 type QueryChartConfig = QueryType["chartConfig"];
 
@@ -70,6 +76,9 @@ const OBSERVATION_DIMENSIONS: ExpressionCatalog = {
   calledToolNames: "b.tool_call_names",
   costType: "cost_type",
   usageType: "usage_type",
+  experimentName: "NULLIF(b.experiment_name, '')",
+  experimentDatasetId: "NULLIF(b.experiment_dataset_id, '')",
+  experimentId: "NULLIF(b.experiment_id, '')",
 };
 
 const OBSERVATION_MEASURES: ExpressionCatalog = {
@@ -156,6 +165,9 @@ const SCORE_DIMENSIONS: ExpressionCatalog = {
   observationModelName: "b.observation_model_name",
   observationPromptName: "b.observation_prompt_name",
   observationPromptVersion: "b.observation_prompt_version",
+  datasetRunId: "NULLIF(b.dataset_run_id, '')",
+  experimentName: "NULLIF(b.experiment_name, '')",
+  experimentId: "NULLIF(b.experiment_id, '')",
 };
 
 const SCORE_MEASURES: ExpressionCatalog = {
@@ -334,7 +346,9 @@ observation_context AS (
     MAX(NULLIF(\`name\`, '')) AS observation_name,
     MAX(NULLIF(provided_model_name, '')) AS observation_model_name,
     MAX(NULLIF(prompt_name, '')) AS observation_prompt_name,
-    MAX(prompt_version) AS observation_prompt_version
+    MAX(prompt_version) AS observation_prompt_version,
+    MAX(NULLIF(experiment_name, '')) AS experiment_name,
+    MAX(NULLIF(experiment_id, '')) AS experiment_id
   FROM visible_events
   GROUP BY project_id, trace_id, span_id
 ),
@@ -351,7 +365,9 @@ score_rows AS (
     o.observation_name,
     o.observation_model_name,
     o.observation_prompt_name,
-    o.observation_prompt_version
+    o.observation_prompt_version,
+    o.experiment_name,
+    o.experiment_id
   FROM visible_scores s
   LEFT JOIN trace_context t
     ON t.project_id = s.project_id
@@ -601,34 +617,29 @@ function expressionForFilter(
   filter: QueryType["filters"][number],
   catalog: DorisAnalyticsCatalog,
 ): LogicalEventFilter {
-  if (DEFERRED_DIMENSIONS.has(filter.column)) {
-    throw new InvalidRequestError(
-      `Analytics dimension ${filter.column} is not available on the Doris R1A backend`,
-    );
-  }
   if (filter.type === "positionInTrace") {
-    throw new InvalidRequestError(
-      "Position-in-trace metrics filters are not available on the Doris backend",
-    );
+    throw new InvalidRequestError("Invalid Doris position filter plan");
   }
   if (
+    filter.type === "stringObject" ||
     filter.type === "numberObject" ||
     filter.type === "booleanObject" ||
     filter.type === "categoryOptions"
   ) {
-    throw new InvalidRequestError(
-      `Unsupported Doris analytics object filter: ${filter.column}`,
-    );
-  }
-  if (filter.type === "stringObject") {
     if (filter.column !== "metadata") {
       throw new InvalidRequestError(
         `Unsupported Doris analytics object filter: ${filter.column}`,
       );
     }
+    const castType =
+      filter.type === "numberObject"
+        ? "DOUBLE"
+        : filter.type === "booleanObject"
+          ? "BOOLEAN"
+          : "STRING";
     return {
       filter,
-      expression: `JSON_UNQUOTE(CAST(ELEMENT_AT(${catalog.metadataExpression}, ?) AS STRING))`,
+      expression: `${castType === "STRING" ? "JSON_UNQUOTE(" : ""}CAST(ELEMENT_AT(${catalog.metadataExpression}, ?) AS ${castType})${castType === "STRING" ? ")" : ""}`,
       objectKey: filter.key,
     };
   }
@@ -637,7 +648,9 @@ function expressionForFilter(
     : undefined;
   const expression =
     catalog.dimensions[filter.column] ??
-    (filter.column === "startTime" || filter.column === "timestamp"
+    (filter.column === "startTime" ||
+    filter.column === "start_time" ||
+    filter.column === "timestamp"
       ? catalog.timeExpression
       : fallback);
   if (!expression) {
@@ -646,6 +659,104 @@ function expressionForFilter(
     );
   }
   return { filter, expression };
+}
+
+function resolveFilterDimension(
+  column: string,
+  declaration: ViewDeclarationType,
+): ViewDeclarationType["dimensions"][string] | undefined {
+  if (column in declaration.dimensions) return declaration.dimensions[column];
+  if (column.endsWith("Name") && "name" in declaration.dimensions) {
+    return declaration.dimensions.name;
+  }
+  return undefined;
+}
+
+function compatibleFilterTypesForDimension(
+  dimensionType: string | undefined,
+): readonly CompatibleFilterType[] | null {
+  if (dimensionType === "string[]" || dimensionType === "arrayString") {
+    return ["arrayOptions"];
+  }
+  if (!isFilterColumnType(dimensionType)) return null;
+  return getCompatibleFilterTypes(dimensionType);
+}
+
+function assertDorisAnalyticsFilterCompatibility(
+  query: QueryType,
+  declaration: ViewDeclarationType,
+): void {
+  for (const filter of query.filters) {
+    if (filter.type === "positionInTrace") continue;
+    if (filter.column === "metadata") {
+      if (
+        filter.type === "stringObject" ||
+        filter.type === "numberObject" ||
+        filter.type === "booleanObject" ||
+        filter.type === "categoryOptions"
+      ) {
+        continue;
+      }
+      throw new InvalidRequestError(
+        `Invalid Doris analytics filter for metadata: ${filter.type}`,
+      );
+    }
+
+    const dimension = resolveFilterDimension(filter.column, declaration);
+    if (dimension) {
+      if (filter.type === "null") continue;
+      const compatible = compatibleFilterTypesForDimension(dimension.type);
+      if (!compatible?.includes(filter.type)) {
+        throw new InvalidRequestError(
+          `Invalid Doris analytics filter for ${filter.column}: ${filter.type}`,
+        );
+      }
+      continue;
+    }
+
+    if (filter.column === declaration.timeDimension) {
+      if (filter.type !== "datetime" && filter.type !== "null") {
+        throw new InvalidRequestError(
+          `Invalid Doris analytics filter for ${filter.column}: ${filter.type}`,
+        );
+      }
+    }
+  }
+}
+
+function assertDorisAnalyticsQueryBudget(query: QueryType): void {
+  assertDorisFilterBudget(query.filters);
+  if (query.dimensions.length > MAX_ANALYTICS_DIMENSIONS) {
+    throw new InvalidRequestError(
+      "Doris analytics query has too many dimensions",
+    );
+  }
+  if (query.metrics.length > MAX_ANALYTICS_METRICS) {
+    throw new InvalidRequestError("Doris analytics query has too many metrics");
+  }
+  if ((query.orderBy?.length ?? 0) > MAX_ANALYTICS_ORDER_FIELDS) {
+    throw new InvalidRequestError(
+      "Doris analytics query has too many order fields",
+    );
+  }
+  const from = new Date(query.fromTimestamp);
+  const to = new Date(query.toTimestamp);
+  if (
+    Number.isFinite(from.getTime()) &&
+    Number.isFinite(to.getTime()) &&
+    to.getTime() - from.getTime() > MAX_ANALYTICS_RANGE_MS
+  ) {
+    throw new InvalidRequestError(
+      "Doris analytics query time range exceeds 366 days",
+    );
+  }
+  const rowLimit = queryChartConfig(query)?.row_limit;
+  if (
+    rowLimit !== undefined &&
+    (!Number.isSafeInteger(rowLimit) || rowLimit < 1 || rowLimit > 1_000)
+  ) {
+    throw new InvalidRequestError("Invalid Doris analytics row limit");
+  }
 }
 
 function metricExpression(
@@ -774,15 +885,7 @@ export async function executeDorisAnalyticsQuery(input: {
   readonly version: ViewVersion;
   readonly signal?: AbortSignal;
 }): Promise<Array<Record<string, unknown>>> {
-  const deferredDimension = [
-    ...input.query.dimensions.map(({ field }) => field),
-    ...(input.query.entityDimension ? [input.query.entityDimension.field] : []),
-  ].find((field) => DEFERRED_DIMENSIONS.has(field));
-  if (deferredDimension) {
-    throw new InvalidRequestError(
-      `Analytics dimension ${deferredDimension} is not available on the Doris R1A backend`,
-    );
-  }
+  assertDorisAnalyticsQueryBudget(input.query);
   const validation = validateQuery(input.query, input.version);
   if (!validation.valid) throw new InvalidRequestError(validation.reason);
   const from = new Date(input.query.fromTimestamp);
@@ -796,12 +899,8 @@ export async function executeDorisAnalyticsQuery(input: {
     throw new InvalidRequestError("Invalid Doris analytics query scope");
   }
   const declaration = getViewDeclaration(input.query.view, input.version);
+  assertDorisAnalyticsFilterCompatibility(input.query, declaration);
   for (const dimension of input.query.dimensions) {
-    if (DEFERRED_DIMENSIONS.has(dimension.field)) {
-      throw new InvalidRequestError(
-        `Analytics dimension ${dimension.field} is not available on the Doris R1A backend`,
-      );
-    }
     if (!declaration.dimensions[dimension.field]) {
       throw new InvalidRequestError(
         `Invalid analytics dimension: ${dimension.field}`,
@@ -857,11 +956,6 @@ export async function executeDorisAnalyticsQuery(input: {
   }
   const joins: string[] = [];
   const dimensions = dimensionFields.map((field) => {
-    if (DEFERRED_DIMENSIONS.has(field)) {
-      throw new InvalidRequestError(
-        `Analytics dimension ${field} is not available on the Doris R1A backend`,
-      );
-    }
     const expression = catalog.dimensions[field];
     if (!expression) {
       throw new InvalidRequestError(
@@ -871,8 +965,23 @@ export async function executeDorisAnalyticsQuery(input: {
     const exploded = explodedDimension({ field, expression });
     if (exploded.join && !joins.includes(exploded.join))
       joins.push(exploded.join);
-    return { field, expression: exploded.expression };
+    return {
+      field,
+      expression: exploded.expression,
+      positionProjection: exploded.join ? exploded.expression : undefined,
+    };
   });
+  for (const filter of input.query.filters) {
+    if (filter.column !== "costType" && filter.column !== "usageType") {
+      continue;
+    }
+    const expression = catalog.dimensions[filter.column];
+    if (!expression) continue;
+    const exploded = explodedDimension({ field: filter.column, expression });
+    if (exploded.join && !joins.includes(exploded.join)) {
+      joins.push(exploded.join);
+    }
+  }
   let bucket: { alias: string; expression: string } | undefined;
   if (input.query.timeDimension) {
     bucket = {
@@ -881,11 +990,6 @@ export async function executeDorisAnalyticsQuery(input: {
     };
   } else if (input.query.entityDimension) {
     const field = input.query.entityDimension.field;
-    if (DEFERRED_DIMENSIONS.has(field)) {
-      throw new InvalidRequestError(
-        `Analytics dimension ${field} is not available on the Doris R1A backend`,
-      );
-    }
     const expression = catalog.dimensions[field];
     if (!expression) {
       throw new InvalidRequestError(`Invalid Doris entity dimension: ${field}`);
@@ -906,9 +1010,22 @@ export async function executeDorisAnalyticsQuery(input: {
       queryChartConfig(input.query)?.bins ?? 10,
     )} AS ${metric.aggregation}_${metric.measure}`;
   });
-  const filterPlans = input.query.filters.map((filter) =>
-    expressionForFilter(filter, catalog),
+  const positionFilters = input.query.filters.filter(
+    (filter) => filter.type === "positionInTrace",
   );
+  if (positionFilters.length > 1) {
+    throw new InvalidRequestError(
+      "Doris analytics query accepts only one position filter",
+    );
+  }
+  if (positionFilters.length > 0 && input.query.view !== "observations") {
+    throw new InvalidRequestError(
+      "Position-in-trace filters require the observations view",
+    );
+  }
+  const filterPlans = input.query.filters
+    .filter((filter) => filter.type !== "positionInTrace")
+    .map((filter) => expressionForFilter(filter, catalog));
   if (input.query.view === "scores-numeric") {
     filterPlans.push({
       filter: {
@@ -953,32 +1070,85 @@ export async function executeDorisAnalyticsQuery(input: {
         ] as const,
     ),
   ]);
-  const orderBy = input.query.orderBy?.length
-    ? input.query.orderBy.map((order) => {
+  const orderedAliases = new Set<string>();
+  const explicitOrder = input.query.orderBy?.length
+    ? input.query.orderBy.flatMap((order) => {
         const expression = selectableAliases.get(order.field);
         if (!expression) {
           throw new InvalidRequestError(
             `Invalid Doris analytics order field: ${order.field}`,
           );
         }
-        return `${expression} ${order.direction.toUpperCase()}`;
+        orderedAliases.add(order.field);
+        return [
+          `${expression} IS NULL ASC`,
+          `${expression} ${order.direction.toUpperCase()}`,
+        ];
       })
-    : bucket
-      ? [`${bucket.alias} ASC`]
-      : input.query.metrics[0]
-        ? [
-            `${input.query.metrics[0].aggregation}_${input.query.metrics[0].measure} DESC`,
-          ]
-        : dimensions[0]
-          ? [`\`${dimensions[0].field}\` ASC`]
-          : [];
+    : [];
+  const defaultOrder: string[] = [];
+  if (!input.query.orderBy?.length) {
+    if (bucket) {
+      orderedAliases.add(bucket.alias);
+      defaultOrder.push(`${bucket.alias} ASC`);
+    } else if (input.query.metrics[0]) {
+      const alias = `${input.query.metrics[0].aggregation}_${input.query.metrics[0].measure}`;
+      orderedAliases.add(alias);
+      defaultOrder.push(`${alias} DESC`);
+    } else if (dimensions[0]) {
+      orderedAliases.add(dimensions[0].field);
+      defaultOrder.push(`\`${dimensions[0].field}\` ASC`);
+    }
+  }
+  const stableOrder = dimensions.flatMap(({ field }) =>
+    orderedAliases.has(field)
+      ? []
+      : [`\`${field}\` IS NULL ASC`, `\`${field}\` ASC`],
+  );
+  const orderBy = [...explicitOrder, ...defaultOrder, ...stableOrder];
   const limit = queryChartConfig(input.query)?.row_limit;
+  let fromSql = `${catalog.baseTable}\n${joins.join("\n")}`;
+  let whereSql = predicates.length
+    ? `WHERE ${predicates.join("\n  AND ")}`
+    : "";
+  const positionFilter = positionFilters[0];
+  if (positionFilter?.type === "positionInTrace") {
+    const isFromEnd =
+      positionFilter.key === "last" || positionFilter.key === "nthFromEnd";
+    const direction = isFromEnd ? "DESC" : "ASC";
+    const position =
+      positionFilter.key === "nthFromStart" ||
+      positionFilter.key === "nthFromEnd"
+        ? (positionFilter.value ?? 1)
+        : 1;
+    const positionProjections = [
+      ...new Set(
+        dimensions.flatMap(({ positionProjection }) =>
+          positionProjection ? [positionProjection] : [],
+        ),
+      ),
+    ];
+    params.push(Math.max(1, position));
+    fromSql = `(SELECT *
+FROM (
+  SELECT
+    b.*${positionProjections.map((expression) => `,\n    ${expression}`).join("")},
+    DENSE_RANK() OVER (
+      PARTITION BY b.project_id, b.trace_id
+      ORDER BY b.event_time ${direction}, b.version_token ${direction}, b.span_id ${direction}
+    ) AS _position_rank
+  FROM ${catalog.baseTable}
+  ${joins.join("\n  ")}
+  ${whereSql}
+) ranked_position_rows
+WHERE _position_rank = ?) b`;
+    whereSql = "";
+  }
   const sql = `WITH ${catalog.ctes}
 SELECT
   ${selects.join(",\n  ")}
-FROM ${catalog.baseTable}
-${joins.join("\n")}
-${predicates.length ? `WHERE ${predicates.join("\n  AND ")}` : ""}
+FROM ${fromSql}
+${whereSql}
 ${groups.length ? `GROUP BY ${groups.join(", ")}` : ""}
 ${orderBy.length ? `ORDER BY ${orderBy.join(", ")}` : ""}
 ${limit ? "LIMIT ?" : ""}`;

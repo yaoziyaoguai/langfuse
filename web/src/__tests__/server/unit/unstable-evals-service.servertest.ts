@@ -9,7 +9,6 @@ const mockEvalTemplateCreate = vi.fn();
 const mockEvalTemplateFindFirst = vi.fn();
 const mockEvalTemplateFindMany = vi.fn();
 const mockJobConfigurationFindMany = vi.fn();
-const mockJobConfigurationUpdate = vi.fn();
 
 vi.mock(
   "../../../features/evals/server/unstable-public-api/validation",
@@ -107,6 +106,23 @@ vi.mock("@langfuse/shared/src/db", async () => {
     },
   };
 });
+
+vi.mock("../../../features/evals/server/evaluationMutationAdmission", () => ({
+  withAnalyticsEvaluationMutationAdmission: async <T>(input: {
+    mutate: (guard: {
+      assertActive: () => Promise<void>;
+      withIoFence: <R>(
+        execute: (transaction: unknown) => Promise<R>,
+      ) => Promise<R>;
+    }) => Promise<T>;
+  }) => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    return input.mutate({
+      assertActive: async () => undefined,
+      withIoFence: (execute) => prisma.$transaction(execute),
+    });
+  },
+}));
 
 import {
   createNumericEvalOutputDefinition,
@@ -270,7 +286,8 @@ describe("unstable public eval services", () => {
         },
         jobConfiguration: {
           findMany: mockJobConfigurationFindMany,
-          update: mockJobConfigurationUpdate,
+          create: mockedPrisma.jobConfiguration.create,
+          update: mockedPrisma.jobConfiguration.update,
         },
       }),
     );
@@ -351,7 +368,7 @@ describe("unstable public eval services", () => {
       }),
     });
     expect(mockJobConfigurationFindMany).not.toHaveBeenCalled();
-    expect(mockJobConfigurationUpdate).not.toHaveBeenCalled();
+    expect(mockedPrisma.jobConfiguration.update).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       id: "tmpl_project_v1",
       version: 1,
@@ -471,7 +488,7 @@ describe("unstable public eval services", () => {
         variableMapping: true,
       },
     });
-    expect(mockJobConfigurationUpdate).toHaveBeenCalledWith({
+    expect(mockedPrisma.jobConfiguration.update).toHaveBeenCalledWith({
       where: {
         id: "ceval_123",
         projectId: "project_123",
@@ -534,7 +551,7 @@ describe("unstable public eval services", () => {
       },
     });
 
-    expect(mockJobConfigurationUpdate).toHaveBeenCalledWith({
+    expect(mockedPrisma.jobConfiguration.update).toHaveBeenCalledWith({
       where: {
         id: "ceval_legacy_trace",
         projectId: "project_123",
@@ -598,7 +615,7 @@ describe("unstable public eval services", () => {
       },
     });
 
-    expect(mockJobConfigurationUpdate).toHaveBeenCalledWith({
+    expect(mockedPrisma.jobConfiguration.update).toHaveBeenCalledWith({
       where: {
         id: "ceval_123",
         projectId: "project_123",
@@ -653,7 +670,7 @@ describe("unstable public eval services", () => {
     );
 
     expect(mockEvalTemplateCreate).not.toHaveBeenCalled();
-    expect(mockJobConfigurationUpdate).not.toHaveBeenCalled();
+    expect(mockedPrisma.jobConfiguration.update).not.toHaveBeenCalled();
   });
 
   it("adopts the canonical mapping when upgrading rules linked to a code evaluator", async () => {
@@ -699,7 +716,7 @@ describe("unstable public eval services", () => {
       },
     });
 
-    expect(mockJobConfigurationUpdate).toHaveBeenCalledWith({
+    expect(mockedPrisma.jobConfiguration.update).toHaveBeenCalledWith({
       where: {
         id: "ceval_code_stale",
         projectId: "project_123",

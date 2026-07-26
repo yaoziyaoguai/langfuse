@@ -382,3 +382,198 @@ describe("S3StorageService DeleteObjects checksum", () => {
     expect(findHeader(request, "x-amz-checksum-crc32")).toBeUndefined();
   });
 });
+
+describe("StorageService paginated listing", () => {
+  const baseParams = {
+    accessKeyId: "test-access-key",
+    secretAccessKey: "test-secret-key",
+    bucketName: "test-bucket",
+    endpoint: "https://storage.example.com",
+    region: "eu-west-1",
+    forcePathStyle: false,
+    awsSse: undefined,
+    awsSseKmsKeyId: undefined,
+  };
+  const createdAt = new Date("2026-07-22T00:00:00.000Z");
+
+  it("passes an opaque continuation token through S3", async () => {
+    const service = StorageServiceFactory.getInstance(baseParams);
+    const send = vi.fn(async (_command: unknown) => ({
+      Contents: [
+        {
+          Key: "prefix/s3.json",
+          LastModified: createdAt,
+        },
+      ],
+      NextContinuationToken: "s3-next",
+    }));
+    (service as unknown as { client: { send: typeof send } }).client = {
+      send,
+    };
+
+    await expect(
+      service.listFilesPage("prefix/", { cursor: "s3-current", limit: 17 }),
+    ).resolves.toEqual({
+      files: [{ file: "prefix/s3.json", createdAt }],
+      nextCursor: "s3-next",
+    });
+    const command = send.mock.calls[0]?.[0] as
+      | { input: Record<string, unknown> }
+      | undefined;
+    expect(command?.input).toMatchObject({
+      Bucket: "test-bucket",
+      Prefix: "prefix/",
+      MaxKeys: 17,
+      ContinuationToken: "s3-current",
+    });
+  });
+
+  it("uses Azure's page iterator continuation token", async () => {
+    const service = StorageServiceFactory.getInstance({
+      ...baseParams,
+      accessKeyId: "test-account",
+      secretAccessKey: Buffer.from("test-key").toString("base64"),
+      useAzureBlob: true,
+    });
+    const byPage = vi.fn(() =>
+      (async function* () {
+        yield {
+          segment: {
+            blobItems: [
+              {
+                name: "prefix/azure.json",
+                properties: { createdOn: createdAt },
+              },
+            ],
+          },
+          continuationToken: "azure-next",
+        };
+      })(),
+    );
+    const listBlobsFlat = vi.fn(() => ({ byPage }));
+    (
+      service as unknown as {
+        client: {
+          createIfNotExists: () => Promise<void>;
+          listBlobsFlat: typeof listBlobsFlat;
+        };
+      }
+    ).client = {
+      createIfNotExists: vi.fn(async () => undefined),
+      listBlobsFlat,
+    };
+
+    await expect(
+      service.listFilesPage("prefix/", {
+        cursor: "azure-current",
+        limit: 18,
+      }),
+    ).resolves.toEqual({
+      files: [{ file: "prefix/azure.json", createdAt }],
+      nextCursor: "azure-next",
+    });
+    expect(listBlobsFlat).toHaveBeenCalledWith({ prefix: "prefix/" });
+    expect(byPage).toHaveBeenCalledWith({
+      continuationToken: "azure-current",
+      maxPageSize: 18,
+    });
+  });
+
+  it("disables GCS auto-pagination and returns its next page token", async () => {
+    const service = StorageServiceFactory.getInstance({
+      ...baseParams,
+      useGoogleCloudStorage: true,
+    });
+    const getFiles = vi.fn(async () => [
+      [
+        {
+          name: "prefix/gcs.json",
+          metadata: { timeCreated: createdAt.toISOString() },
+        },
+      ],
+      { pageToken: "gcs-next" },
+    ]);
+    (service as unknown as { bucket: { getFiles: typeof getFiles } }).bucket = {
+      getFiles,
+    };
+
+    await expect(
+      service.listFilesPage("prefix/", { cursor: "gcs-current", limit: 19 }),
+    ).resolves.toEqual({
+      files: [{ file: "prefix/gcs.json", createdAt }],
+      nextCursor: "gcs-next",
+    });
+    expect(getFiles).toHaveBeenCalledWith({
+      autoPaginate: false,
+      maxResults: 19,
+      pageToken: "gcs-current",
+      prefix: "prefix/",
+    });
+  });
+
+  it("handles a GCS final page without a next query", async () => {
+    const service = StorageServiceFactory.getInstance({
+      ...baseParams,
+      useGoogleCloudStorage: true,
+    });
+    const getFiles = vi.fn(async () => [
+      [
+        {
+          name: "prefix/final.json",
+          metadata: { timeCreated: createdAt.toISOString() },
+        },
+      ],
+      null,
+    ]);
+    (service as unknown as { bucket: { getFiles: typeof getFiles } }).bucket = {
+      getFiles,
+    };
+
+    await expect(
+      service.listFilesPage("prefix/", { limit: 19 }),
+    ).resolves.toEqual({
+      files: [{ file: "prefix/final.json", createdAt }],
+    });
+  });
+
+  it("passes OCI's nextStartWith value back as an opaque cursor", async () => {
+    const service = StorageServiceFactory.getInstance({
+      ...baseParams,
+      useOCIObjectStorage: true,
+    });
+    const internals = service as unknown as {
+      clientInit: Promise<void>;
+      client: { listObjects: ReturnType<typeof vi.fn> };
+      namespaceName: string;
+    };
+    await internals.clientInit.catch(() => undefined);
+    internals.clientInit = Promise.resolve();
+    const listObjects = vi.fn(async () => ({
+      listObjects: {
+        objects: [
+          {
+            name: "prefix/oci.json",
+            timeCreated: createdAt,
+          },
+        ],
+        nextStartWith: "oci-next",
+      },
+    }));
+    internals.client = { listObjects };
+    internals.namespaceName = "test-namespace";
+
+    await expect(
+      service.listFilesPage("prefix/", { cursor: "oci-current", limit: 20 }),
+    ).resolves.toEqual({
+      files: [{ file: "prefix/oci.json", createdAt }],
+      nextCursor: "oci-next",
+    });
+    expect(listObjects).toHaveBeenCalledWith({
+      namespaceName: "test-namespace",
+      bucketName: "test-bucket",
+      prefix: "prefix/",
+      start: "oci-current",
+      limit: 20,
+    });
+  });
+});

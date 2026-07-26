@@ -1,6 +1,9 @@
 import { QueueName, TQueueJobTypes } from "../queues";
 import { Queue } from "bullmq";
-import { createBullMQQueueOptionsWithRedis } from "./redis";
+import {
+  createAnalyticsQueuePublisherOptionsWithRedis,
+  redisErrorForLogging,
+} from "./redis";
 import { logger } from "../logger";
 
 export class ScoreDeleteQueue {
@@ -12,10 +15,10 @@ export class ScoreDeleteQueue {
   > | null {
     if (ScoreDeleteQueue.instance) return ScoreDeleteQueue.instance;
 
-    const queueOptionsWithRedis = createBullMQQueueOptionsWithRedis(
+    const queueOptionsWithRedis = createAnalyticsQueuePublisherOptionsWithRedis(
       QueueName.ScoreDelete,
     );
-    ScoreDeleteQueue.instance = queueOptionsWithRedis
+    const queue = queueOptionsWithRedis
       ? new Queue<TQueueJobTypes[QueueName.ScoreDelete]>(
           QueueName.ScoreDelete,
           {
@@ -32,11 +35,20 @@ export class ScoreDeleteQueue {
           },
         )
       : null;
+    ScoreDeleteQueue.instance = queue;
 
-    ScoreDeleteQueue.instance?.on("error", (err) => {
-      logger.error("ScoreDeleteQueue error", err);
+    queue?.on("error", (err) => {
+      logger.error("ScoreDeleteQueue error", redisErrorForLogging(err));
     });
 
-    return ScoreDeleteQueue.instance;
+    if (queue && queueOptionsWithRedis) {
+      queueOptionsWithRedis.connection.on("end", () => {
+        if (ScoreDeleteQueue.instance === queue) {
+          ScoreDeleteQueue.instance = null;
+        }
+      });
+    }
+
+    return queue;
   }
 }

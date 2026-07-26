@@ -11,6 +11,7 @@ import {
 } from "@langfuse/shared/src/server";
 import { UnrecoverableError } from "../../../errors/UnrecoverableError";
 import { createW3CTraceId } from "../../utils";
+import { getWorkerAnalyticsAdmissionContext } from "../../../analyticsRuntime";
 import { type EvalExecutionResult } from "../evalCompletion";
 import { type EvalExecutionDeps } from "../evalExecutionDeps";
 
@@ -27,7 +28,7 @@ export async function executeCodeBasedEvaluation(params: {
   deps?: EvalExecutionDeps;
 }): Promise<EvalExecutionResult> {
   return instrumentAsync(
-    { name: "eval.execute-code-based-eval" },
+    { name: "eval.execute-code-based-eval", recordException: false },
     async (span) => {
       const dispatcher = resolveConfiguredCodeEvalDispatcher();
       const jobExecutionId = params.job.id;
@@ -71,7 +72,11 @@ export async function executeCodeBasedEvaluation(params: {
         // Publish via the OTel ingestion pipeline (like LLM-as-a-judge) so the
         // trace reaches the legacy tables too in dual write mode — a direct
         // events-table write alone 404s in the trace detail view.
-        writeTrace: (trace) => writeInternalTraceViaOtelIngestion(trace),
+        writeTrace: (trace) =>
+          writeInternalTraceViaOtelIngestion({
+            ...trace,
+            analyticsAdmissionContext: getWorkerAnalyticsAdmissionContext(),
+          }),
       });
 
       if (!dispatchOutcome.success) {

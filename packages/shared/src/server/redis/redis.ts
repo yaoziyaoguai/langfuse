@@ -42,10 +42,70 @@ export const redisQueueRetryOptions: Partial<RedisOptions> = {
   },
 };
 
+const ANALYTICS_QUEUE_PUBLISH_COMMAND_TIMEOUT_MS = 30_000;
+const ANALYTICS_QUEUE_PUBLISH_CONNECT_TIMEOUT_MS = 10_000;
+const ANALYTICS_QUEUE_PUBLISH_RECONNECT_ATTEMPTS = 3;
+
+const redactRedisCredentials = (value: string): string =>
+  value
+    .replace(/(rediss?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/giu, "$1[redacted]@")
+    .replace(/\bAUTH\b[^\r\n]*/giu, "AUTH [redacted]");
+
+/**
+ * ioredis attaches the complete command arguments to many Error instances.
+ * AUTH arguments contain credentials, so never pass the original object to a
+ * structured logger.
+ */
+export const redisErrorForLogging = (error: unknown): Error => {
+  const safe = new Error(
+    error instanceof Error
+      ? redactRedisCredentials(error.message)
+      : "Unknown Redis error",
+  );
+  safe.name = error instanceof Error ? error.name : "RedisError";
+  if (error instanceof Error && error.stack) {
+    safe.stack = redactRedisCredentials(error.stack);
+  }
+  return safe;
+};
+
+const analyticsQueuePublisherRetryStrategy = (times: number): number | null =>
+  times <= ANALYTICS_QUEUE_PUBLISH_RECONNECT_ATTEMPTS
+    ? Math.min(times * 1_000, 3_000)
+    : null;
+
+export const createAnalyticsQueuePublisherRedisOptions =
+  (): Partial<RedisOptions> => ({
+    enableOfflineQueue: false,
+    autoResendUnfulfilledCommands: false,
+    maxRetriesPerRequest: 1,
+    commandTimeout: ANALYTICS_QUEUE_PUBLISH_COMMAND_TIMEOUT_MS,
+    connectTimeout: ANALYTICS_QUEUE_PUBLISH_CONNECT_TIMEOUT_MS,
+    retryStrategy: analyticsQueuePublisherRetryStrategy,
+    sentinelRetryStrategy: analyticsQueuePublisherRetryStrategy,
+    // 返回 1 只重连，不重发失败命令；返回 2 会让旧 Queue.add 跨越
+    // deployment claim expiry 后再次落入新 backend generation。
+    reconnectOnError: (error: Error) =>
+      error.message.includes("READONLY") ? 1 : false,
+  });
+
+type AnalyticsQueuePublisherClusterOptions = Pick<
+  ClusterOptions,
+  "clusterRetryStrategy" | "enableOfflineQueue"
+>;
+
+export const createAnalyticsQueuePublisherClusterOptions =
+  (): AnalyticsQueuePublisherClusterOptions => ({
+    enableOfflineQueue: false,
+    clusterRetryStrategy: analyticsQueuePublisherRetryStrategy,
+  });
+
 type BullMQOptionsWithRedis = Pick<
   QueueBaseOptions,
-  "connection" | "prefix" | "skipVersionCheck"
->;
+  "prefix" | "skipVersionCheck"
+> & {
+  connection: Redis | Cluster;
+};
 
 /**
  * Parse Redis node definitions from environment variable
@@ -116,6 +176,7 @@ const buildTlsOptions = (): Record<string, unknown> => {
 
 const createRedisClusterInstance = (
   additionalOptions: Partial<RedisOptions> = {},
+  additionalClusterOptions: Partial<AnalyticsQueuePublisherClusterOptions> = {},
 ): Cluster | null => {
   if (!env.REDIS_CLUSTER_NODES) {
     logger.error(
@@ -142,12 +203,13 @@ const createRedisClusterInstance = (
     },
     // Retry configuration for cluster
     retryDelayOnFailover: 100,
+    ...additionalClusterOptions,
   };
 
   const cluster = new Cluster(nodes, clusterOptions);
 
   cluster.on("error", (error) => {
-    logger.error("Redis cluster error", error);
+    logger.error("Redis cluster error", redisErrorForLogging(error));
   });
 
   return cluster;
@@ -200,7 +262,7 @@ const createRedisSentinelInstance = (
   });
 
   instance.on("error", (error) => {
-    logger.error("Redis sentinel error", error);
+    logger.error("Redis sentinel error", redisErrorForLogging(error));
   });
 
   return instance;
@@ -208,6 +270,7 @@ const createRedisSentinelInstance = (
 
 export const createNewRedisInstance = (
   additionalOptions: Partial<RedisOptions> = {},
+  additionalClusterOptions: Partial<AnalyticsQueuePublisherClusterOptions> = {},
 ): Redis | Cluster | null => {
   if (
     env.REDIS_CLUSTER_ENABLED === "true" &&
@@ -220,7 +283,10 @@ export const createNewRedisInstance = (
   }
 
   if (env.REDIS_CLUSTER_ENABLED === "true") {
-    return createRedisClusterInstance(additionalOptions);
+    return createRedisClusterInstance(
+      additionalOptions,
+      additionalClusterOptions,
+    );
   }
 
   if (env.REDIS_SENTINEL_ENABLED === "true") {
@@ -248,7 +314,7 @@ export const createNewRedisInstance = (
       : null;
 
   instance?.on("error", (error) => {
-    logger.error("Redis error", error);
+    logger.error("Redis error", redisErrorForLogging(error));
   });
 
   return instance;
@@ -277,7 +343,7 @@ export const getQueuePrefix = (queueName: string): string | undefined => {
 
 const getBullMQOptionsForRedisConnection = (
   queueName: string,
-  connection: BullMQOptionsWithRedis["connection"],
+  connection: Redis | Cluster,
 ): BullMQOptionsWithRedis => ({
   connection,
   prefix: getQueuePrefix(queueName),
@@ -297,6 +363,23 @@ export const createBullMQQueueOptionsWithRedis = (
     enableOfflineQueue: false,
     ...redisQueueRetryOptions,
   });
+
+  return connection
+    ? getBullMQOptionsForRedisConnection(queueName, connection)
+    : null;
+};
+
+/**
+ * Queue publishers guarded by analytics deployment claims must settle in a
+ * bounded window and must never replay an unfulfilled command after reconnect.
+ */
+export const createAnalyticsQueuePublisherOptionsWithRedis = (
+  queueName: string,
+): BullMQOptionsWithRedis | null => {
+  const connection = createNewRedisInstance(
+    createAnalyticsQueuePublisherRedisOptions(),
+    createAnalyticsQueuePublisherClusterOptions(),
+  );
 
   return connection
     ? getBullMQOptionsForRedisConnection(queueName, connection)

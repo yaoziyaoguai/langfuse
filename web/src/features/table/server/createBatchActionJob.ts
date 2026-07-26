@@ -13,10 +13,15 @@ import {
   BatchActionQueue,
   logger,
   QueueJobs,
+  type BatchActionProcessingEventType,
 } from "@langfuse/shared/src/server";
 import { TRPCError } from "@trpc/server";
 import { assertLegacyTracingIoSearchCanCreateBatchJob } from "@/src/features/traces/server/legacyIoSearch";
-import { prisma } from "@langfuse/shared/src/db";
+import {
+  withAnalyticsBatchActionPublicationAdmission,
+  type AnalyticsQueuePublicationGuard,
+} from "@/src/server/analyticsQueuePublicationAdmission";
+import { managedScoreDeletionReference } from "@/src/features/scores/server/scoreDeletionAdmission";
 
 type CreateBatchActionJob = {
   projectId: string;
@@ -113,87 +118,104 @@ export const createBatchActionJob = async ({
         "A trace deletion batch action is already in progress for this project.",
     });
 
-    await prisma.$transaction(async (tx) => {
-      const created = await tx.batchAction.createMany({
-        data: {
-          id: batchActionId,
-          projectId,
-          ...batchActionData,
-        },
-        skipDuplicates: true,
-      });
+    await withAnalyticsBatchActionPublicationAdmission({
+      actionId,
+      resourceIdentity: batchActionId,
+      publish: async (guard) => {
+        await guard.withIoFence(async (tx) => {
+          const created = await tx.batchAction.createMany({
+            data: {
+              id: batchActionId,
+              projectId,
+              ...batchActionData,
+            },
+            skipDuplicates: true,
+          });
 
-      if (created.count > 0) {
-        return;
-      }
+          if (created.count === 0) {
+            const reset = await tx.batchAction.updateMany({
+              where: {
+                id: batchActionId,
+                status: { notIn: ACTIVE_BATCH_ACTION_STATUSES },
+              },
+              data: {
+                finishedAt: null,
+                log: null,
+                ...batchActionData,
+              },
+            });
 
-      const reset = await tx.batchAction.updateMany({
-        where: {
-          id: batchActionId,
-          status: { notIn: ACTIVE_BATCH_ACTION_STATUSES },
-        },
-        data: {
-          finishedAt: null,
-          log: null,
-          ...batchActionData,
-        },
-      });
+            if (reset.count === 0) {
+              throw activeTraceDeleteConflict;
+            }
+          }
 
-      if (reset.count === 0) {
-        throw activeTraceDeleteConflict;
-      }
-    });
-
-    await auditLog({
-      session,
-      resourceType: "batchAction",
-      resourceId: batchActionId,
-      projectId: projectId,
-      action: actionType as string,
+          await auditLog(
+            {
+              session,
+              resourceType: "batchAction",
+              resourceId: batchActionId,
+              projectId: projectId,
+              action: actionType as string,
+            },
+            tx,
+          );
+        });
+      },
     });
 
     return;
   }
 
-  const batchActionQueue = BatchActionQueue.getInstance();
-  if (!batchActionQueue) {
-    logger.warn(`BatchActionQueue not initialized`);
-    throw new TRPCError({
-      code: "INTERNAL_SERVER_ERROR",
-      message: "Select All action failed to process.",
+  const publish = async (guard: AnalyticsQueuePublicationGuard) => {
+    const batchActionQueue = BatchActionQueue.getInstance();
+    if (!batchActionQueue) {
+      logger.warn(`BatchActionQueue not initialized`);
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Select All action failed to process.",
+      });
+    }
+
+    await auditLog({
+      session,
+      resourceType: "batchAction",
+      resourceId: batchActionId,
+      projectId,
+      action: actionType as string,
     });
-  }
 
-  // Create audit log >> generate based on actionId
-  await auditLog({
-    session,
-    resourceType: "batchAction",
-    resourceId: batchActionId,
-    projectId: projectId,
-    action: actionType as string,
+    const cutoffCreatedAt = new Date();
+    await guard.withIoFence(() =>
+      batchActionQueue.add(
+        QueueJobs.BatchActionProcessingJob,
+        {
+          id: batchActionId,
+          name: QueueJobs.BatchActionProcessingJob,
+          timestamp: new Date(),
+          payload: {
+            projectId,
+            actionId,
+            tableName,
+            cutoffCreatedAt,
+            query: queryWithSnapshot,
+            targetId,
+            type: actionType,
+            ...(actionId === ActionId.ScoreDelete
+              ? managedScoreDeletionReference(guard, batchActionId)
+              : {}),
+          } as BatchActionProcessingEventType,
+        },
+        { jobId: batchActionId },
+      ),
+    );
+  };
+
+  await withAnalyticsBatchActionPublicationAdmission({
+    actionId,
+    resourceIdentity: batchActionId,
+    publish,
   });
-
-  // Notify worker
-  await batchActionQueue.add(
-    QueueJobs.BatchActionProcessingJob,
-    {
-      id: batchActionId, // Use the selectAllId to deduplicate when the same job is sent multiple times
-      name: QueueJobs.BatchActionProcessingJob,
-      timestamp: new Date(),
-      payload: {
-        projectId,
-        actionId,
-        tableName,
-        cutoffCreatedAt: new Date(),
-        query: queryWithSnapshot,
-        targetId: targetId,
-        type: actionType,
-      },
-    },
-    {
-      jobId: batchActionId,
-    },
-  );
 
   return;
 };

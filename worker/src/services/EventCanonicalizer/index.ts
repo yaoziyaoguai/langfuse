@@ -1,7 +1,7 @@
 import type { InternalTraceEventInput } from "@langfuse/shared/src/server";
 import {
   AnalyticsPersistenceError,
-  canonicalPayloadHash,
+  canonicalEntityPayloadHash,
   normalizeVersionToken,
   partitionDateFromVersionToken,
   type CanonicalAnalyticsEvent,
@@ -177,6 +177,72 @@ function parseModelParameters(
 
 function validationError(): AnalyticsPersistenceError {
   return new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
+}
+
+function metadataFromParallelArrays(
+  names: readonly string[] | undefined,
+  values: readonly (string | null | undefined)[] | undefined,
+): Readonly<Record<string, CanonicalJsonValue>> {
+  if (!names && !values) return {};
+  if (!names || !values || names.length !== values.length) {
+    throw validationError();
+  }
+  const metadata: Record<string, CanonicalJsonValue> = {};
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index];
+    if (!name) throw validationError();
+    metadata[name] = values[index] ?? null;
+  }
+  return metadata;
+}
+
+function experimentItemVersion(value: unknown): bigint | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") throw validationError();
+  const asRfc3339 = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  try {
+    return normalizeVersionToken(asRfc3339);
+  } catch {
+    throw validationError();
+  }
+}
+
+function experimentContext(
+  eventData: CanonicalizationEventInput,
+): Pick<
+  CanonicalAnalyticsEvent,
+  | "experimentId"
+  | "experimentName"
+  | "experimentMetadata"
+  | "experimentDescription"
+  | "experimentDatasetId"
+  | "experimentItemId"
+  | "experimentItemVersion"
+  | "experimentItemExpectedOutput"
+  | "experimentItemMetadata"
+  | "experimentItemRootSpanId"
+> {
+  return {
+    experimentId: eventData.experimentId ?? null,
+    experimentName: eventData.experimentName ?? null,
+    experimentMetadata: metadataFromParallelArrays(
+      eventData.experimentMetadataNames,
+      eventData.experimentMetadataValues,
+    ),
+    experimentDescription: eventData.experimentDescription ?? null,
+    experimentDatasetId: eventData.experimentDatasetId ?? null,
+    experimentItemId: eventData.experimentItemId ?? null,
+    experimentItemVersion: experimentItemVersion(
+      eventData.experimentItemVersion,
+    ),
+    experimentItemExpectedOutput:
+      eventData.experimentItemExpectedOutput ?? null,
+    experimentItemMetadata: metadataFromParallelArrays(
+      eventData.experimentItemMetadataNames,
+      eventData.experimentItemMetadataValues,
+    ),
+    experimentItemRootSpanId: eventData.experimentItemRootSpanId ?? null,
+  };
 }
 
 function validateSourceTime(sourceTime: CanonicalSourceTime): void {
@@ -360,6 +426,7 @@ export class EventCanonicalizer {
     const hashInput = {
       kind: "event" as const,
       ...canonicalContent,
+      ...(input.schemaVersion >= 2 ? experimentContext(input.eventData) : {}),
       sourceContract: input.sourceTime.sourceContract,
       sourceVersion: input.sourceTime.sourceVersion,
       partitionDate: input.sourceTime.partitionDate,
@@ -380,7 +447,7 @@ export class EventCanonicalizer {
     try {
       return {
         ...hashInput,
-        canonicalPayloadHash: canonicalPayloadHash(hashInput),
+        canonicalPayloadHash: canonicalEntityPayloadHash(hashInput),
       };
     } catch (error) {
       if (error instanceof AnalyticsPersistenceError) throw error;

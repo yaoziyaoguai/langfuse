@@ -139,7 +139,10 @@ import {
   toDorisTraceDomain,
 } from "./telemetry/doris/adapters";
 import type { DorisTrace } from "./telemetry/doris/traces";
-import type { DorisObservation } from "./telemetry/doris/observations";
+import {
+  encodeDorisObservationCursor,
+  type DorisObservation,
+} from "./telemetry/doris/observations";
 import type { DorisSession } from "./telemetry/doris/sessions";
 import type { DorisUser } from "./telemetry/doris/users";
 import type { DorisEventOrderBy } from "../queries/doris-sql/eventQueryCompiler";
@@ -217,7 +220,7 @@ export type ObservationIOSizeFields = {
   metadataLength: number;
 };
 
-function buildDorisObservationReadQuery(filter: FilterState): {
+export function buildDorisObservationReadQuery(filter: FilterState): {
   readonly range: { readonly from: Date; readonly to: Date } | null;
   readonly filters: EventsTableFilterState;
 } {
@@ -969,6 +972,39 @@ export const getTraceDeleteCursorPageFromEvents = async (props: {
   limit: number;
   clickhouseConfigs?: ClickHouseClientConfigOptions | undefined;
 }): Promise<TraceDeleteBatchActionCursor[]> => {
+  if (isDorisAnalyticsBackend()) {
+    const query = buildDorisObservationReadQuery([
+      ...props.filter,
+      {
+        column: "startTime",
+        operator: "<",
+        value: props.cutoffCreatedAt,
+        type: "datetime",
+      },
+    ]);
+    const page = await getDorisTelemetryRepositories().observations.scan({
+      projectId: props.projectId,
+      range: query.range,
+      filters: query.filters,
+      search: props.searchQuery
+        ? { query: props.searchQuery, searchType: props.searchType }
+        : undefined,
+      cursor: props.cursor?.id
+        ? encodeDorisObservationCursor({
+            id: props.cursor.id,
+            traceId: props.cursor.traceId,
+            startTime: new Date(props.cursor.timestamp),
+          })
+        : undefined,
+      limit: props.limit,
+    });
+    return page.items.map((observation) => ({
+      id: observation.id,
+      traceId: observation.traceId,
+      timestamp: observation.startTime.toISOString(),
+    }));
+  }
+
   // Trace-delete cursoring intentionally reuses observation pagination where
   // span_id is the final tuple element, while this scanner deduplicates by
   // trace_id. If a deleted multi-span trace is still visible on a lagging
@@ -2550,29 +2586,18 @@ export const getEventsFilterOptionsForColumns = async (params: {
   scope?: EventFilterOptionScope;
 }) => {
   if (isDorisAnalyticsBackend()) {
-    if (params.scope) {
-      throw new InvalidRequestError(
-        "Score-scoped Doris event facets are unavailable until the score query plan is active",
-      );
-    }
     const query = buildDorisObservationReadQuery(params.filter);
-    const inactiveR1BColumns = new Set<EventFilterOptionColumn>([
-      "experimentDatasetId",
-      "experimentId",
-      "experimentName",
-    ]);
     const rows = await Promise.all(
-      params.columns
-        .filter((column) => !inactiveR1BColumns.has(column))
-        .map((column) =>
-          getDorisTelemetryRepositories().observations.filterOptionValues({
-            projectId: params.projectId,
-            range: query.range,
-            filters: query.filters,
-            column,
-            limit: params.topN ?? EVENTS_FILTER_OPTION_TOP_N,
-          }),
-        ),
+      params.columns.map((column) =>
+        getDorisTelemetryRepositories().observations.filterOptionValues({
+          projectId: params.projectId,
+          range: query.range,
+          filters: query.filters,
+          column,
+          limit: params.topN ?? EVENTS_FILTER_OPTION_TOP_N,
+          ...(params.scope ? { requireScore: {} } : {}),
+        }),
+      ),
     );
     return rows.flat() as EventFilterOptionRow[];
   }
@@ -2616,11 +2641,6 @@ const getSingleEventsFilterOptionColumn = async (
   opts?: GroupedEventsFilterOptions,
 ) => {
   if (isDorisAnalyticsBackend()) {
-    if (opts?.scope) {
-      throw new InvalidRequestError(
-        "Score-scoped Doris event facets are unavailable until the score query plan is active",
-      );
-    }
     const query = buildDorisObservationReadQuery(filter);
     return getDorisTelemetryRepositories().observations.filterOptionValues({
       projectId,
@@ -2628,6 +2648,7 @@ const getSingleEventsFilterOptionColumn = async (
       filters: query.filters,
       column,
       limit: opts?.limit ?? EVENTS_FILTER_OPTION_TOP_N,
+      ...(opts?.scope ? { requireScore: {} } : {}),
     }) as Promise<EventFilterOptionRow[]>;
   }
 
@@ -3067,11 +3088,6 @@ export const getObservationsBatchIOFromEventsTable = async <
   }
 
   if (isDorisAnalyticsBackend()) {
-    if (opts.includeExperimentFields) {
-      throw new InvalidRequestError(
-        "Experiment observation fields are unavailable in Doris R1A",
-      );
-    }
     const observationIds = opts.observations.map(({ id }) => id);
     const traceIds = [
       ...new Set(opts.observations.map(({ traceId }) => traceId)),
@@ -3126,6 +3142,15 @@ export const getObservationsBatchIOFromEventsTable = async <
           input: render(observation.input),
           output: render(observation.output),
           metadata: { ...(observation.metadata ?? {}) } as MetadataDomain,
+          ...(opts.includeExperimentFields
+            ? {
+                experimentItemExpectedOutput:
+                  observation.experimentItemExpectedOutput ?? null,
+                experimentItemMetadata: {
+                  ...(observation.experimentItemMetadata ?? {}),
+                } as MetadataDomain,
+              }
+            : {}),
           ...(opts.includeToolCallFields
             ? {
                 toolCalls: [...(observation.toolCalls ?? [])],
@@ -3985,6 +4010,18 @@ export const getAvgCostByEvaluatorIds = async (
   Array<{ evaluatorId: string; avgCost: number; executionCount: number }>
 > => {
   if (evaluatorIds.length === 0) return [];
+  if (isDorisAnalyticsBackend()) {
+    const rows =
+      await getDorisTelemetryRepositories().observations.evaluatorCostMetrics({
+        projectId,
+        evaluatorIds,
+      });
+    return rows.map(({ evaluatorId, avgCost, executionCount }) => ({
+      evaluatorId,
+      avgCost,
+      executionCount,
+    }));
+  }
 
   const builder = new EventsAggQueryBuilder({
     projectId,

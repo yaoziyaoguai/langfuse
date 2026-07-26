@@ -287,7 +287,7 @@ function compileSessionAggregation(input: SessionQueryInput): {
     COLLECT_SET(e.user_id) AS user_ids,
     MAX_BY(e.environment, ${latestOrder}) AS environment,
     ARRAY_DISTINCT(ARRAY_FLATTEN(COLLECT_LIST(e.tags))) AS trace_tags,
-    MAX_BY(CAST(e.metadata AS STRING), ${latestOrder}) AS metadata_json,
+    MAX_BY(COALESCE(e.metadata_json, CAST(e.metadata AS STRING)), ${latestOrder}) AS metadata_json,
     COUNT(DISTINCT e.trace_id) AS trace_count,
     COUNT(*) AS observation_count,
     SUM(COALESCE(e.total_input_tokens, 0)) AS total_input_tokens,
@@ -355,6 +355,7 @@ export class DorisSessionsRepository {
   constructor(
     private readonly dependencies: {
       readonly query: DorisQueryExecutor["query"];
+      readonly streamQuery?: NonNullable<DorisQueryExecutor["streamQuery"]>;
     },
   ) {}
 
@@ -385,6 +386,39 @@ export class DorisSessionsRepository {
           ? encodeCursor(items[items.length - 1]!, input.order ?? "DESC")
           : null,
     };
+  }
+
+  async *scanIdentities(
+    input: SessionQueryInput & {
+      readonly limit: number;
+      readonly signal?: AbortSignal;
+    },
+  ): AsyncIterable<{ readonly id: string }> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Doris session identity limit is invalid");
+    }
+    const aggregation = compileSessionAggregation(input);
+    const params = aggregation.params.concat();
+    const predicates = compileSessionFilterPredicates(
+      input.sessionFilters ?? [],
+      params,
+    );
+    const whereSql =
+      predicates.length > 0 ? `\nWHERE ${predicates.join("\n  AND ")}` : "";
+    const sql = `${aggregation.sql}\nSELECT session_id\nFROM aggregated_sessions${whereSql}\nORDER BY session_id ASC\nLIMIT ?`;
+    params.push(input.limit);
+    const rows = this.dependencies.streamQuery
+      ? this.dependencies.streamQuery<{ readonly session_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        )
+      : await this.dependencies.query<{ readonly session_id: string }>(
+          sql,
+          params,
+          { signal: input.signal },
+        );
+    for await (const row of rows) yield { id: String(row.session_id) };
   }
 
   async count(input: {

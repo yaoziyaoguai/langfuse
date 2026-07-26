@@ -7,7 +7,7 @@ import {
   type ScoreQueryType,
 } from "@/src/features/public-api/server/scores";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { env } from "@/src/env.mjs";
+import { env as sharedEnv } from "@langfuse/shared/src/env";
 import {
   ForbiddenError,
   InternalServerError,
@@ -37,9 +37,17 @@ import {
   acceptAnalyticsIngestion,
   CURRENT_ANALYTICS_CANONICALIZER_VERSION,
   CURRENT_ANALYTICS_SCHEMA_VERSION,
+  NEXT_ANALYTICS_SCHEMA_VERSION,
+  DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
   getS3EventStorageClient,
 } from "@langfuse/shared/src/server";
 import type { z } from "zod";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
+import {
+  managedScoreDeletionReference,
+  withScoreDeletionAdmission,
+} from "@/src/features/scores/server/scoreDeletionAdmission";
+import { isInternalDorisCapabilityActive } from "@/src/server/communityCapabilityRuntime";
 
 const secureScoreFilterOptions = [
   {
@@ -277,6 +285,26 @@ export class ScoresApiService {
       timestamp: new Date().toISOString(),
       body: { ...body, id: scoreId },
     };
+    const requiresDatasetRunContract = body.datasetRunId != null;
+    if (
+      isDorisAnalyticsBackend() &&
+      requiresDatasetRunContract &&
+      !(await isInternalDorisCapabilityActive("datasetRunIngestion"))
+    ) {
+      return {
+        id: scoreId,
+        result: {
+          successes: [],
+          errors: [
+            {
+              id: event.id,
+              status: 501,
+              ...DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
+            },
+          ],
+        },
+      };
+    }
     const result = isDorisAnalyticsBackend()
       ? await acceptAnalyticsIngestion({
           projectId: auth.scope.projectId,
@@ -287,11 +315,17 @@ export class ScoresApiService {
             attribution,
           },
           canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
-          schemaVersion: CURRENT_ANALYTICS_SCHEMA_VERSION,
+          schemaVersion: requiresDatasetRunContract
+            ? NEXT_ANALYTICS_SCHEMA_VERSION
+            : CURRENT_ANALYTICS_SCHEMA_VERSION,
           storageService: getS3EventStorageClient(
-            env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+            sharedEnv.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
           ),
-          rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+          rawPrefix: sharedEnv.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+          admissionContext: getWebAnalyticsAdmissionContext(),
+          ...(requiresDatasetRunContract
+            ? { capability: "datasetRunIngestion" as const }
+            : {}),
         }).then(() => ({
           successes: [{ id: event.id, status: 201 }],
           errors: [],
@@ -331,31 +365,46 @@ export class ScoresApiService {
     apiKeyId: string;
     scoreId: string;
   }) {
-    const scoreDeleteQueue = ScoreDeleteQueue.getInstance();
-    if (!scoreDeleteQueue) {
-      throw new InternalServerError("ScoreDeleteQueue not initialized");
-    }
-
-    await auditLog({
-      action: "delete",
-      resourceType: "score",
-      resourceId: scoreId,
-      projectId,
-      orgId,
-      apiKeyId,
-    });
-
-    await scoreDeleteQueue.add(QueueJobs.ScoreDelete, {
+    const event = {
       timestamp: new Date(),
       id: randomUUID(),
-      payload: {
-        projectId,
-        scoreIds: [scoreId],
-      },
-      name: QueueJobs.ScoreDelete,
-    });
+      payload: { projectId, scoreIds: [scoreId] },
+      name: QueueJobs.ScoreDelete as const,
+    };
 
-    return { message: "Score deletion queued successfully" };
+    return withScoreDeletionAdmission({
+      resourceIdentity: event.id,
+      publish: async (guard) => {
+        const scoreDeleteQueue = ScoreDeleteQueue.getInstance();
+        if (!scoreDeleteQueue) {
+          throw new InternalServerError("ScoreDeleteQueue not initialized");
+        }
+
+        await auditLog({
+          action: "delete",
+          resourceType: "score",
+          resourceId: scoreId,
+          projectId,
+          orgId,
+          apiKeyId,
+        });
+
+        const queuedEvent = {
+          ...event,
+          payload: {
+            ...event.payload,
+            ...managedScoreDeletionReference(guard, event.id),
+          },
+        };
+        await guard.withIoFence(() =>
+          scoreDeleteQueue.add(QueueJobs.ScoreDelete, queuedEvent, {
+            jobId: event.id,
+          }),
+        );
+
+        return { message: "Score deletion queued successfully" };
+      },
+    });
   }
 
   /**

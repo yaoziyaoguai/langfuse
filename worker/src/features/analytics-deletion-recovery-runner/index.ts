@@ -65,7 +65,7 @@ export class AnalyticsDeletionRecoveryRunner extends PeriodicRunner {
         await this.dependencies.processOperation(operation);
       } catch (error) {
         failures += 1;
-        logger.warn("Doris analytics deletion recovery will retry", {
+        logger.warn("Analytics deletion recovery will retry", {
           deletionOperationId: operation.id,
           projectId: operation.projectId,
           scope: operation.scope,
@@ -74,7 +74,7 @@ export class AnalyticsDeletionRecoveryRunner extends PeriodicRunner {
       }
     }
     if (operations.length > 0) {
-      logger.info("Processed Doris analytics deletion recovery batch", {
+      logger.info("Processed analytics deletion recovery batch", {
         operations: operations.length,
         failures,
       });

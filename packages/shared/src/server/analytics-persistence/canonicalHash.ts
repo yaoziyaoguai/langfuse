@@ -108,6 +108,11 @@ export interface FileReferenceIdentity {
   readonly fileId: string;
 }
 
+export interface DatasetRunItemIdentity {
+  readonly projectId: string;
+  readonly runItemId: string;
+}
+
 function encodeField(value: string): Buffer {
   const bytes = Buffer.from(value, "utf8");
   return Buffer.concat([Buffer.from(`${bytes.byteLength}:`, "ascii"), bytes]);
@@ -133,6 +138,19 @@ export function encodeScoreIdentity(identity: ScoreIdentity): string {
     Buffer.from("score\0", "ascii"),
     encodeField(identity.projectId),
     encodeField(identity.scoreId),
+  ]).toString("base64url");
+}
+
+export function encodeDatasetRunItemIdentity(
+  identity: DatasetRunItemIdentity,
+): string {
+  if (!identity.projectId || !identity.runItemId) {
+    throw new Error("Dataset-run-item identity is invalid");
+  }
+  return Buffer.concat([
+    Buffer.from("dataset-run-item\0", "ascii"),
+    encodeField(identity.projectId),
+    encodeField(identity.runItemId),
   ]).toString("base64url");
 }
 
@@ -192,6 +210,18 @@ export function toScoreIdentity(encoded: string): ScoreIdentity {
   return identity;
 }
 
+export function toDatasetRunItemIdentity(
+  encoded: string,
+): DatasetRunItemIdentity {
+  const fields = decodeIdentityFields(encoded, "dataset-run-item", 2);
+  const identity = {
+    projectId: fields[0] ?? "",
+    runItemId: fields[1] ?? "",
+  };
+  encodeDatasetRunItemIdentity(identity);
+  return identity;
+}
+
 export function toFileReferenceIdentity(
   encoded: string,
 ): FileReferenceIdentity {
@@ -211,7 +241,7 @@ export function toFileReferenceIdentity(
 
 function decodeIdentityFields(
   encoded: string,
-  domain: "event" | "score" | "file-reference",
+  domain: "event" | "score" | "dataset-run-item" | "file-reference",
   fieldCount: number,
 ): string[] {
   if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
@@ -275,4 +305,18 @@ export function canonicalPayloadHash(payload: unknown): string {
     .update("langfuse-analytics-canonical-v1\0", "utf8")
     .update(canonicalize(payload), "utf8")
     .digest("hex");
+}
+
+export function canonicalEntityPayloadHash<
+  T extends {
+    readonly rawObjectKey: unknown;
+    readonly systemTimestamp: unknown;
+  },
+>(payload: T): string {
+  const {
+    rawObjectKey: _rawObjectKey,
+    systemTimestamp: _systemTimestamp,
+    ...semanticPayload
+  } = payload;
+  return canonicalPayloadHash(semanticPayload);
 }

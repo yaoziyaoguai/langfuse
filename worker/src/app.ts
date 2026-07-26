@@ -48,6 +48,7 @@ import {
   BatchActionQueue,
   findRecoverableDeletionOperations,
   handoffLegacyAnalyticsIngestionOutbox,
+  StorageServiceFactory,
 } from "@langfuse/shared/src/server";
 import type { AnalyticsDeletionScope } from "@prisma/client";
 import { monitorProcessorTtl } from "@langfuse/shared/monitors/server";
@@ -104,11 +105,30 @@ import { DeletedMaskCleaner } from "./features/deleted-mask-cleaner";
 import { TraceDeleteBatchActionRunner } from "./features/trace-delete-batch-action-runner";
 import { createDorisAnalyticsPersistence } from "./services/dorisAnalyticsPersistence";
 import { AnalyticsIngestionOutboxRunner } from "./features/analytics-ingestion-outbox-runner";
+import { AnalyticsIngestionRawReconciler } from "./features/analytics-ingestion-raw-reconciler";
 import { resolveAnalyticsWorkerTopology } from "./analyticsBackendTopology";
 import { assertDorisAnalyticsReady } from "./services/dorisAnalyticsReadiness";
 import { AnalyticsDeletionRecoveryRunner } from "./features/analytics-deletion-recovery-runner";
+import { AnalyticsDatasetDeletionOutboxRunner } from "./features/analytics-dataset-deletion-outbox-runner";
 import { processAnalyticsDeletionRecoveryOperation } from "./features/analytics-deletion-recovery-runner/processOperation";
 import { DorisGlobalRetentionRunner } from "./features/doris-global-retention";
+import { BatchActionPublicationRecoveryRunner } from "./features/batch-action-publication-recovery";
+import { BatchExportDispatchRunner } from "./features/batch-export-dispatch-runner";
+import { BatchExportManifestOrphanCleaner } from "./features/batch-export-manifest-orphan-cleaner";
+import { AnalyticsEvaluationDispatchRunner } from "./features/analytics-evaluation-dispatch-runner";
+import { ExperimentExecutionDispatchRunner } from "./features/experiment-execution-dispatch-runner";
+import { AnalyticsIntegrationDispatchRunner } from "./features/analytics-integration-dispatch-runner";
+import { AnalyticsIntegrationScratchCleaner } from "./features/analytics-integration-scratch-cleaner";
+import { AnalyticsControlStateCleaner } from "./features/analytics-control-state-cleaner";
+import { ParquetScratchManager } from "./features/blobstorage/ParquetScratchManager";
+import { analyticsEvaluationDispatchQueueProcessor } from "./queues/analyticsEvaluationDispatchQueue";
+import {
+  assertWorkerAnalyticsRuntimeNotFenced,
+  getWorkerAnalyticsAdmissionContext,
+  registerAnalyticsRuntimeStopHandler,
+} from "./analyticsRuntime";
+
+assertWorkerAnalyticsRuntimeNotFenced();
 
 const app = express();
 
@@ -126,8 +146,12 @@ app.use("/api", api);
 app.use(middlewares.notFound);
 app.use(middlewares.errorHandler);
 
-const { clickhouseAnalyticsEnabled, dorisAnalyticsEnabled } =
-  resolveAnalyticsWorkerTopology(env.LANGFUSE_ANALYTICS_BACKEND);
+const {
+  clickhouseAnalyticsEnabled,
+  dorisAnalyticsEnabled,
+  coreBatchExportsEnabled,
+  legacyTraceDeletionCleanerEnabled,
+} = resolveAnalyticsWorkerTopology(env.LANGFUSE_ANALYTICS_BACKEND);
 const analyticsBackendEnabled =
   clickhouseAnalyticsEnabled || dorisAnalyticsEnabled;
 
@@ -277,7 +301,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true"
 ) {
   const shardNames = EvalExecutionQueue.getShardNames();
@@ -314,7 +338,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_CODE_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true"
 ) {
   const codeEvalShardNames = CodeEvalExecutionQueue.getShardNames();
@@ -333,7 +357,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_EVAL_EXECUTION_SECONDARY_QUEUE_IS_ENABLED === "true"
 ) {
   const shardNames = SecondaryEvalExecutionQueue.getShardNames();
@@ -353,7 +377,7 @@ if (
 }
 
 if (
-  analyticsBackendEnabled &&
+  coreBatchExportsEnabled &&
   env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true"
 ) {
   WorkerManager.register(QueueName.BatchExport, batchExportQueueProcessor, {
@@ -365,6 +389,74 @@ if (
     },
   });
 }
+
+export let batchExportDispatchRunner: BatchExportDispatchRunner | null = null;
+
+if (
+  dorisAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true"
+) {
+  batchExportDispatchRunner = new BatchExportDispatchRunner({
+    intervalMs: 10_000,
+    batchSize: 50,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
+  });
+  batchExportDispatchRunner.start();
+}
+
+export let batchExportManifestOrphanCleaner: BatchExportManifestOrphanCleaner | null =
+  null;
+
+if (
+  dorisAnalyticsEnabled &&
+  env.LANGFUSE_S3_BATCH_EXPORT_ENABLED === "true" &&
+  env.LANGFUSE_S3_BATCH_EXPORT_BUCKET
+) {
+  batchExportManifestOrphanCleaner = new BatchExportManifestOrphanCleaner({
+    storage: StorageServiceFactory.getInstance({
+      bucketName: env.LANGFUSE_S3_BATCH_EXPORT_BUCKET,
+      accessKeyId: env.LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID,
+      secretAccessKey: env.LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY,
+      endpoint: env.LANGFUSE_S3_BATCH_EXPORT_ENDPOINT,
+      externalEndpoint: env.LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT,
+      region: env.LANGFUSE_S3_BATCH_EXPORT_REGION,
+      forcePathStyle: env.LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE === "true",
+      awsSse: env.LANGFUSE_S3_BATCH_EXPORT_SSE,
+      awsSseKmsKeyId: env.LANGFUSE_S3_BATCH_EXPORT_SSE_KMS_KEY_ID,
+    }),
+    prefix: `${
+      env.LANGFUSE_S3_BATCH_EXPORT_PREFIX
+        ? `${env.LANGFUSE_S3_BATCH_EXPORT_PREFIX.replace(/\/+$/, "")}/`
+        : ""
+    }batch-export-manifests/`,
+    intervalMs: 60 * 60_000,
+    minAgeMs: 24 * 60 * 60_000,
+    batchSize: 500,
+  });
+  batchExportManifestOrphanCleaner.start();
+}
+
+export let analyticsEvaluationDispatchRunner: AnalyticsEvaluationDispatchRunner | null =
+  null;
+
+if (dorisAnalyticsEnabled) {
+  WorkerManager.register(
+    QueueName.AnalyticsEvaluationDispatch,
+    analyticsEvaluationDispatchQueueProcessor,
+    {
+      concurrency: env.LANGFUSE_EVAL_CREATOR_WORKER_CONCURRENCY,
+    },
+  );
+  analyticsEvaluationDispatchRunner = new AnalyticsEvaluationDispatchRunner({
+    intervalMs: 10_000,
+    batchSize: 50,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
+  });
+  analyticsEvaluationDispatchRunner.start();
+}
+
+export let batchActionPublicationRecoveryRunner: BatchActionPublicationRecoveryRunner | null =
+  null;
 
 if (
   dorisAnalyticsEnabled ||
@@ -382,6 +474,12 @@ if (
       },
     },
   );
+  batchActionPublicationRecoveryRunner =
+    new BatchActionPublicationRecoveryRunner({
+      backend: clickhouseAnalyticsEnabled ? "clickhouse" : "doris",
+      getAdmissionContext: getWorkerAnalyticsAdmissionContext,
+    });
+  batchActionPublicationRecoveryRunner.start();
 }
 
 if (
@@ -460,6 +558,8 @@ const legacyIngestionHandoffEnabled =
 
 export let analyticsIngestionOutboxRunner: AnalyticsIngestionOutboxRunner | null =
   null;
+export let analyticsIngestionRawReconciler: AnalyticsIngestionRawReconciler | null =
+  null;
 
 if (dorisAnalyticsPersistence) {
   AnalyticsIngestionQueue.getInstance();
@@ -479,14 +579,36 @@ if (dorisAnalyticsPersistence) {
       ? handoffLegacyAnalyticsIngestionOutbox
       : undefined,
     assertReady: assertDorisAnalyticsReady,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
   });
   analyticsIngestionOutboxRunner.start();
+  analyticsIngestionRawReconciler = new AnalyticsIngestionRawReconciler({
+    intervalMs: 60_000,
+    batchSize: env.LANGFUSE_ANALYTICS_INGESTION_OUTBOX_BATCH_SIZE,
+    assertReady: assertDorisAnalyticsReady,
+    reconcile: dorisAnalyticsPersistence.reconcileRaw,
+  });
+  analyticsIngestionRawReconciler.start();
 }
 
 export let analyticsDeletionRecoveryRunner: AnalyticsDeletionRecoveryRunner | null =
   null;
+export let analyticsDatasetDeletionOutboxRunner: AnalyticsDatasetDeletionOutboxRunner | null =
+  null;
 
-if (dorisAnalyticsEnabled) {
+if (
+  analyticsBackendEnabled &&
+  env.QUEUE_CONSUMER_DATASET_DELETE_QUEUE_IS_ENABLED === "true"
+) {
+  analyticsDatasetDeletionOutboxRunner =
+    new AnalyticsDatasetDeletionOutboxRunner({
+      intervalMs: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_INTERVAL_MS,
+      batchSize: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_BATCH_SIZE,
+    });
+  analyticsDatasetDeletionOutboxRunner.start();
+}
+
+if (analyticsBackendEnabled) {
   const deletionRecoveryScopes: AnalyticsDeletionScope[] = [];
   if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
     deletionRecoveryScopes.push("TRACE");
@@ -498,7 +620,9 @@ if (dorisAnalyticsEnabled) {
     analyticsDeletionRecoveryRunner = new AnalyticsDeletionRecoveryRunner({
       intervalMs: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_INTERVAL_MS,
       batchSize: env.LANGFUSE_ANALYTICS_DELETION_RECOVERY_BATCH_SIZE,
-      assertReady: assertDorisAnalyticsReady,
+      assertReady: dorisAnalyticsEnabled
+        ? assertDorisAnalyticsReady
+        : undefined,
       findRecoverableOperations: (input) =>
         findRecoverableDeletionOperations({
           ...input,
@@ -511,6 +635,8 @@ if (dorisAnalyticsEnabled) {
 }
 
 export let dorisGlobalRetentionRunner: DorisGlobalRetentionRunner | null = null;
+export let analyticsControlStateCleaner: AnalyticsControlStateCleaner | null =
+  null;
 
 if (
   dorisAnalyticsEnabled &&
@@ -522,8 +648,19 @@ if (
     drainMs: env.LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS,
     batchSize: env.LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE,
     assertReady: assertDorisAnalyticsReady,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
   });
   dorisGlobalRetentionRunner.start();
+}
+
+if (
+  dorisAnalyticsEnabled &&
+  env.LANGFUSE_ANALYTICS_CONTROL_STATE_CLEANER_ENABLED === "true"
+) {
+  analyticsControlStateCleaner = new AnalyticsControlStateCleaner({
+    intervalMs: env.LANGFUSE_ANALYTICS_CONTROL_STATE_CLEANER_INTERVAL_MS,
+  });
+  analyticsControlStateCleaner.start();
 }
 
 if (
@@ -607,7 +744,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true"
 ) {
   WorkerManager.register(
@@ -619,8 +756,51 @@ if (
   );
 }
 
+export let experimentExecutionDispatchRunner: ExperimentExecutionDispatchRunner | null =
+  null;
+
 if (
-  clickhouseAnalyticsEnabled &&
+  dorisAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true"
+) {
+  experimentExecutionDispatchRunner = new ExperimentExecutionDispatchRunner({
+    intervalMs: 10_000,
+    batchSize: 50,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
+  });
+  experimentExecutionDispatchRunner.start();
+}
+
+const dorisAnalyticsIntegrationsEnabled =
+  dorisAnalyticsEnabled &&
+  env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true" &&
+  env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true" &&
+  env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true";
+
+export let analyticsIntegrationDispatchRunner: AnalyticsIntegrationDispatchRunner | null =
+  null;
+export let analyticsIntegrationScratchCleaner: AnalyticsIntegrationScratchCleaner | null =
+  null;
+
+if (dorisAnalyticsIntegrationsEnabled) {
+  analyticsIntegrationDispatchRunner = new AnalyticsIntegrationDispatchRunner({
+    intervalMs: 10_000,
+    batchSize: 50,
+    getAdmissionContext: getWorkerAnalyticsAdmissionContext,
+  });
+  analyticsIntegrationDispatchRunner.start();
+  analyticsIntegrationScratchCleaner = new AnalyticsIntegrationScratchCleaner(
+    env.LANGFUSE_DORIS_PARQUET_SCRATCH_CLEANUP_INTERVAL_MS,
+    new ParquetScratchManager({
+      root: env.LANGFUSE_DORIS_PARQUET_SCRATCH_ROOT,
+      maxBytes: env.LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES,
+    }),
+  );
+  analyticsIntegrationScratchCleaner.start();
+}
+
+if (
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true"
 ) {
   // Instantiate the queue to trigger scheduled jobs
@@ -656,7 +836,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true"
 ) {
   // Instantiate the queue to trigger scheduled jobs
@@ -692,7 +872,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true"
 ) {
   // Instantiate the queue to trigger scheduled jobs
@@ -883,7 +1063,10 @@ if (
 // Batch trace deletion cleaner for supplementary trace deletion
 export let batchTraceDeletionCleaner: BatchTraceDeletionCleaner | null = null;
 
-if (env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_ENABLED === "true") {
+if (
+  legacyTraceDeletionCleanerEnabled &&
+  env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_ENABLED === "true"
+) {
   batchTraceDeletionCleaner = new BatchTraceDeletionCleaner();
   batchTraceDeletionCleaner.start();
 }
@@ -929,6 +1112,46 @@ if (
     runner.start();
   }
 }
+
+let stopWorkerWorkloadsOperation: Promise<void> | null = null;
+
+export const stopWorkerWorkloads = (): Promise<void> => {
+  if (stopWorkerWorkloadsOperation) return stopWorkerWorkloadsOperation;
+
+  stopWorkerWorkloadsOperation = (async () => {
+    const periodicWorkloads = [
+      ...batchProjectCleaners,
+      ...batchDataRetentionCleaners,
+      mediaRetentionCleaner,
+      batchProjectMediaCleaner,
+      batchProjectBlobCleaner,
+      batchTraceDeletionCleaner,
+      traceDeleteBatchActionRunner,
+      deletedMaskCleaner,
+      queueMetricsRunner,
+      ...monitorRunners,
+      analyticsIngestionOutboxRunner,
+      analyticsIngestionRawReconciler,
+      analyticsDeletionRecoveryRunner,
+      dorisGlobalRetentionRunner,
+      analyticsControlStateCleaner,
+      batchActionPublicationRecoveryRunner,
+      batchExportDispatchRunner,
+      batchExportManifestOrphanCleaner,
+      analyticsEvaluationDispatchRunner,
+      experimentExecutionDispatchRunner,
+      analyticsIntegrationDispatchRunner,
+      analyticsIntegrationScratchCleaner,
+    ].filter((workload) => workload !== null);
+    await Promise.all([
+      ...periodicWorkloads.map((workload) => workload.stopAndDrain()),
+      BackgroundMigrationManager.close(),
+    ]);
+  })();
+  return stopWorkerWorkloadsOperation;
+};
+
+registerAnalyticsRuntimeStopHandler(stopWorkerWorkloads);
 
 process.on("SIGINT", () => onShutdown("SIGINT"));
 process.on("SIGTERM", () => onShutdown("SIGTERM"));

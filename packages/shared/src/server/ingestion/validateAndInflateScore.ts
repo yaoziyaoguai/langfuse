@@ -9,7 +9,7 @@ import {
   ScoreDataTypeEnum,
   CORRECTION_NAME,
 } from "../../../src";
-import { prisma } from "../../db";
+import { prisma, type PrismaClient } from "../../db";
 import { InvalidRequestError, LangfuseNotFoundError } from "../../errors";
 import { validateDbScoreConfigSafe } from "../../features/scoreConfigs/validation";
 import { ScoreEventType } from "./types";
@@ -22,6 +22,7 @@ type ValidateAndInflateScoreParams = {
 
 export async function validateAndInflateScore(
   params: ValidateAndInflateScoreParams,
+  client: PrismaClient = prisma,
 ) {
   const { body, projectId, scoreId } = params;
 
@@ -33,7 +34,7 @@ export async function validateAndInflateScore(
   }
 
   if (body.configId) {
-    const config = await prisma.scoreConfig.findFirst({
+    const config = await client.scoreConfig.findFirst({
       where: {
         projectId,
         id: body.configId,

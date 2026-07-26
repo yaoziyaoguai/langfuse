@@ -20,6 +20,7 @@ import { logger } from "../logger";
 import { env } from "../../env";
 import { LangfuseOtelSpanAttributes } from "./attributes";
 import { OtelIngestionProcessor } from "./OtelIngestionProcessor";
+import type { AnalyticsRuntimeAdmissionContext } from "../analytics-persistence/analyticsBackendAdmission";
 
 const INTERNAL_TRACE_WRITER_SDK_NAME = "langfuse-internal-otel-writer";
 const INTERNAL_TRACE_WRITER_SCOPE = "langfuse-internal-trace-writer";
@@ -35,6 +36,7 @@ export async function publishInternalOtelSpans(params: {
   spans: ReadableSpan[];
   projectId: string;
   sdkName: string;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
 }): Promise<void> {
   const serialized = JsonTraceSerializer.serializeRequest(params.spans);
   if (!serialized) return;
@@ -55,6 +57,7 @@ export async function publishInternalOtelSpans(params: {
     // exposing internal traces as user environments and bypassing the
     // trace-upsert eval-loop guard.
     isLangfuseInternal: true,
+    analyticsAdmissionContext: params.analyticsAdmissionContext,
   });
 
   if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
@@ -103,6 +106,7 @@ export type InternalOtelSpanInput = Pick<
 export async function writeInternalTraceViaOtelIngestion(trace: {
   rootSpanId: string;
   eventInputs: InternalOtelSpanInput[];
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
 }): Promise<void> {
   const { eventInputs } = trace;
   if (eventInputs.length === 0) return;
@@ -215,6 +219,7 @@ export async function writeInternalTraceViaOtelIngestion(trace: {
       spans: exporter.getFinishedSpans(),
       projectId: eventInputs[0].projectId,
       sdkName: INTERNAL_TRACE_WRITER_SDK_NAME,
+      analyticsAdmissionContext: trace.analyticsAdmissionContext,
     });
   } finally {
     await tracerProvider.shutdown().catch(() => undefined);

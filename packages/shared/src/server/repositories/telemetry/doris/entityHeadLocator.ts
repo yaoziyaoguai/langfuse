@@ -4,6 +4,11 @@ import { InvalidRequestError } from "../../../../errors";
 
 type EntityHeadLocatorClient = PrismaClient | Prisma.TransactionClient;
 
+type EventHeadWhere =
+  | { readonly lookupId: string; readonly owningTraceId?: string }
+  | { readonly owningTraceId: string }
+  | { readonly owningTraceId: { readonly in: string[] } };
+
 export type EventHeadLocator = {
   readonly partitionDate: string;
   readonly traceId: string;
@@ -28,9 +33,7 @@ function dateOnly(value: Date): string {
 async function findEventHeadLocators(input: {
   readonly client: EntityHeadLocatorClient;
   readonly projectId: string;
-  readonly where:
-    | { readonly lookupId: string; readonly owningTraceId?: string }
-    | { readonly owningTraceId: string };
+  readonly where: EventHeadWhere;
 }): Promise<readonly EventHeadLocator[]> {
   const rows = await input.client.analyticsEntityHead.findMany({
     where: {
@@ -89,6 +92,23 @@ export async function findTraceEventHeadLocators(input: {
     client,
     projectId: input.projectId,
     where: { owningTraceId: input.traceId },
+  });
+}
+
+export async function findTraceEventHeadLocatorsByIds(input: {
+  readonly client?: EntityHeadLocatorClient;
+  readonly projectId: string;
+  readonly traceIds: readonly string[];
+}): Promise<readonly EventHeadLocator[]> {
+  requireId(input.projectId, "projectId");
+  const traceIds = [...new Set(input.traceIds)];
+  traceIds.forEach((traceId) => requireId(traceId, "traceId"));
+  if (traceIds.length === 0) return [];
+  const client = input.client ?? (await import("../../../../db.js")).prisma;
+  return findEventHeadLocators({
+    client,
+    projectId: input.projectId,
+    where: { owningTraceId: { in: traceIds } },
   });
 }
 

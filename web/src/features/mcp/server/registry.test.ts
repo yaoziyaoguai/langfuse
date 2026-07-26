@@ -20,7 +20,7 @@ const context: ServerContext = {
 describe("MCP tool registry community capability gates", () => {
   it("keeps deferred tools discoverable but blocks their handlers", async () => {
     const handler = vi.fn().mockResolvedValue({ executed: true });
-    const registry = new ToolRegistry("doris");
+    const registry = new ToolRegistry("doris", async () => false);
     registry.register({
       name: "evals",
       description: "Deferred evaluator tools",
@@ -51,7 +51,7 @@ describe("MCP tool registry community capability gates", () => {
   it("blocks R1B dataset-run tools without hiding R1A dataset tools", async () => {
     const runHandler = vi.fn().mockResolvedValue({ executed: true });
     const itemHandler = vi.fn().mockResolvedValue({ executed: true });
-    const registry = new ToolRegistry("doris");
+    const registry = new ToolRegistry("doris", async () => false);
     registry.register({
       name: "datasets",
       description: "Dataset tools",
@@ -112,6 +112,33 @@ describe("MCP tool registry community capability gates", () => {
     await expect(tool?.handler({}, context)).resolves.toEqual({
       executed: true,
     });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("enables Doris evaluator handlers only after durable activation", async () => {
+    const handler = vi.fn().mockResolvedValue({ executed: true });
+    const isCapabilityAvailable = vi.fn().mockResolvedValue(true);
+    const registry = new ToolRegistry("doris", isCapabilityAvailable);
+    registry.register({
+      name: "evals",
+      description: "Activated evaluator tools",
+      tools: [
+        {
+          definition: {
+            name: "create-evaluator",
+            description: "Create an evaluator",
+            inputSchema: { type: "object" },
+          },
+          handler,
+        },
+      ],
+    });
+
+    const tool = await registry.getEnabledTool("create-evaluator", context);
+    await expect(tool?.handler({}, context)).resolves.toEqual({
+      executed: true,
+    });
+    expect(isCapabilityAvailable).toHaveBeenCalledWith("evaluations", "doris");
     expect(handler).toHaveBeenCalledOnce();
   });
 });

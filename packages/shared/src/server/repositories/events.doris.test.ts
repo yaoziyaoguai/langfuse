@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   },
   observations: {
     list: vi.fn(),
+    scan: vi.fn(),
     listForTrace: vi.fn(),
     count: vi.fn(),
     counts: vi.fn(),
@@ -60,6 +61,7 @@ vi.mock("./telemetry/doris/publicTraces", () => ({
 
 import {
   getSessionMetricsFromEvents,
+  getTraceDeleteCursorPageFromEvents,
   getObservationByIdFromEventsTable,
   getAgentGraphDataFromEventsTable,
   getEventsFilterOptionsForColumns,
@@ -348,6 +350,8 @@ describe("events repository Doris routing", () => {
       metadata: { region: "eu" },
       toolCalls: ["search"],
       toolCallNames: ["search"],
+      experimentItemExpectedOutput: '{"answer":"expected"}',
+      experimentItemMetadata: { dataset: "golden" },
     };
     mocks.observations.list.mockResolvedValue({
       items: [fullObservation],
@@ -362,6 +366,7 @@ describe("events repository Doris routing", () => {
         minStartTime: new Date("2026-07-17T09:59:59.000Z"),
         maxStartTime: new Date("2026-07-17T10:00:01.000Z"),
         truncated: false,
+        includeExperimentFields: true,
         includeToolCallFields: true,
       }),
     ).resolves.toEqual([
@@ -370,6 +375,8 @@ describe("events repository Doris routing", () => {
         input: '{"question":"full"}',
         output: '{"answer":"full"}',
         metadata: { region: "eu" },
+        experimentItemExpectedOutput: '{"answer":"expected"}',
+        experimentItemMetadata: { dataset: "golden" },
         toolCalls: ["search"],
         toolCallNames: ["search"],
       },
@@ -395,6 +402,43 @@ describe("events repository Doris routing", () => {
         observationIds: ["span-1"],
       }),
     ).resolves.toEqual([{ id: "span-1", traceId: "trace-1" }]);
+  });
+
+  it("routes the durable event trace-delete cursor through Doris", async () => {
+    mocks.observations.scan.mockResolvedValue({
+      items: [observation],
+      nextCursor: null,
+    });
+
+    await expect(
+      getTraceDeleteCursorPageFromEvents({
+        projectId: "project-1",
+        filter: [],
+        cutoffCreatedAt: new Date("2026-07-18T00:00:00.000Z"),
+        cursor: {
+          id: "span-cursor",
+          traceId: "trace-cursor",
+          timestamp: "2026-07-17T12:00:00.000Z",
+        },
+        limit: 50,
+      }),
+    ).resolves.toEqual([
+      {
+        id: "span-1",
+        traceId: "trace-1",
+        timestamp: "2026-07-17T10:00:00.000Z",
+      },
+    ]);
+
+    const cursor = mocks.observations.scan.mock.calls[0]?.[0]?.cursor as string;
+    expect(
+      JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
+    ).toEqual({
+      version: 1,
+      startTime: "2026-07-17T12:00:00.000Z",
+      traceId: "trace-cursor",
+      spanId: "span-cursor",
+    });
   });
 
   it("routes trace graph rows through the bounded Doris detail reader", async () => {
@@ -465,6 +509,7 @@ describe("events repository Doris routing", () => {
     ).resolves.toEqual([
       { column: "name", value: "name-value", count: 2 },
       { column: "traceTags", value: "traceTags-value", count: 2 },
+      { column: "experimentId", value: "experimentId-value", count: 2 },
     ]);
     await expect(
       getEventsFilterOptionValuesPage({
@@ -496,8 +541,15 @@ describe("events repository Doris routing", () => {
         },
       }),
     );
-    expect(mocks.observations.filterOptionValues).not.toHaveBeenCalledWith(
+    expect(mocks.observations.filterOptionValues).toHaveBeenCalledWith(
       expect.objectContaining({ column: "experimentId" }),
+    );
+
+    await getEventsGroupedByTraceName("project-1", filter, {
+      scope: "scoredTraces",
+    });
+    expect(mocks.observations.filterOptionValues).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requireScore: {} }),
     );
   });
 

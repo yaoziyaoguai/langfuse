@@ -15,9 +15,18 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { DorisClient, type DorisQueryExecutor } from "../client";
-import { checkDorisReadiness, EXPECTED_DORIS_MIGRATIONS } from "../readiness";
+import {
+  checkDorisReadiness,
+  LATEST_APPROVED_DORIS_MIGRATIONS,
+} from "../readiness";
+import { DorisPoCMysqlClient } from "../../doris-poc/mysqlClient";
+import {
+  parseDorisTestNamespace,
+  resetOwnedDorisTestDatabase,
+} from "../testDatabase";
 
 const ENABLED = process.env.DORIS_POC_ENABLED === "1";
+const TEST_NAMESPACE = ENABLED ? parseDorisTestNamespace() : null;
 const MIGRATION_FILE = path.resolve(
   __dirname,
   "../../../../doris/migrations/0001_baseline.sql",
@@ -29,26 +38,40 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
     port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
     user: process.env.DORIS_POC_USER ?? "root",
     password: process.env.DORIS_POC_PASSWORD ?? "",
-    database: process.env.DORIS_POC_DATABASE ?? "langfuse_poc",
+    database: TEST_NAMESPACE?.database ?? "doris_test_disabled",
   };
 
   // Admin connection (no default DB) to drop/create the PoC database fresh.
   beforeAll(async () => {
-    const admin = await createConnection({
+    if (!TEST_NAMESPACE) throw new Error("Doris test namespace is required");
+    const admin = new DorisPoCMysqlClient({
       host: cfg.host,
       port: cfg.port,
       user: cfg.user,
       password: cfg.password,
     });
-    await admin.query(`DROP DATABASE IF EXISTS ${cfg.database}`);
-    await admin.query(`CREATE DATABASE ${cfg.database}`);
-    await admin.end();
+    try {
+      await resetOwnedDorisTestDatabase({
+        admin,
+        connectDatabase: (database) =>
+          new DorisPoCMysqlClient({
+            host: cfg.host,
+            port: cfg.port,
+            user: cfg.user,
+            password: cfg.password,
+            database,
+          }),
+        namespace: TEST_NAMESPACE,
+      });
+    } finally {
+      await admin.end();
+    }
   });
 
   it("applies the baseline migration to a fresh database", async () => {
     const result = await runMigrations(cfg);
     expect(result.applied).toEqual(
-      EXPECTED_DORIS_MIGRATIONS.map(({ name }) => name),
+      LATEST_APPROVED_DORIS_MIGRATIONS.map(({ name }) => name),
     );
     expect(result.skipped).toEqual([]);
 
@@ -78,7 +101,7 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
     await expect(checkDorisReadiness(executor)).resolves.toEqual({
       ready: true,
       code: "READY",
-      schemaVersion: EXPECTED_DORIS_MIGRATIONS.length,
+      schemaVersion: LATEST_APPROVED_DORIS_MIGRATIONS.length,
     });
     await conn.end();
   }, 120_000);
@@ -119,7 +142,7 @@ describe.skipIf(!ENABLED)("Doris migration runner", () => {
     const result = await runMigrations(cfg);
     expect(result.applied).toEqual([]);
     expect(result.skipped).toEqual(
-      EXPECTED_DORIS_MIGRATIONS.map(({ name }) => name),
+      LATEST_APPROVED_DORIS_MIGRATIONS.map(({ name }) => name),
     );
   });
 

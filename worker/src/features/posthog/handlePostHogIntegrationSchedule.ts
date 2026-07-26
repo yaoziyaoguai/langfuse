@@ -5,6 +5,8 @@ import {
   logger,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
+import { env } from "../../env";
+import { scheduleDorisAnalyticsIntegrations } from "../analytics-integrations/scheduleDorisAnalyticsIntegrations";
 
 export const handlePostHogIntegrationSchedule = async () => {
   const postHogIntegrationProjects = await prisma.posthogIntegration.findMany({
@@ -31,6 +33,16 @@ export const handlePostHogIntegrationSchedule = async () => {
   logger.info(
     `[POSTHOG] Scheduling ${postHogIntegrationProjects.length} PostHog integrations for sync`,
   );
+
+  if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+    await scheduleDorisAnalyticsIntegrations({
+      integrationType: "POSTHOG",
+      projectIds: postHogIntegrationProjects.map(({ projectId }) => projectId),
+      queue: postHogIntegrationProcessingQueue,
+      jobName: QueueJobs.PostHogIntegrationProcessingJob,
+    });
+    return;
+  }
 
   await postHogIntegrationProcessingQueue.addBulk(
     postHogIntegrationProjects.map((integration) => ({

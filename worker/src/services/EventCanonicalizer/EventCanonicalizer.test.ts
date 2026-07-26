@@ -172,9 +172,9 @@ describe("EventCanonicalizer", () => {
         promptName: undefined,
         promptVersion: undefined,
       },
-      rawObjectKey: "raw/project-1/operation-1",
+      rawObjectKey: "raw/project-1/operation-replay",
       sourceTime,
-      systemTimestamp: 1_784_282_600_000_000_000n,
+      systemTimestamp: 1_784_282_700_000_000_000n,
       canonicalizerVersion: "r1a-v1",
       schemaVersion: 1,
     });
@@ -215,5 +215,53 @@ describe("EventCanonicalizer", () => {
         schemaVersion: 1,
       }),
     ).rejects.toMatchObject({ code: "ANALYTICS_VALIDATION_ERROR" });
+  });
+
+  it("preserves the complete experiment context in schema version 2", async () => {
+    const canonicalizer = new EventCanonicalizer({
+      warnOnUsageTotalMismatch: vi.fn(),
+      resolvePrompt: vi.fn().mockResolvedValue(null),
+      resolveGenerationUsage: vi.fn().mockResolvedValue(null),
+    });
+
+    const event = await canonicalizer.canonicalize({
+      eventData: {
+        ...input(),
+        experimentId: "run-1",
+        experimentName: "prompt experiment",
+        experimentMetadataNames: ["owner", "nested.region"],
+        experimentMetadataValues: ["team-a", "eu"],
+        experimentDescription: "foundation round trip",
+        experimentDatasetId: "dataset-1",
+        experimentItemId: "item-1",
+        experimentItemVersion: "2026-07-17T09:59:00.123Z",
+        experimentItemRootSpanId: "span-1",
+        experimentItemExpectedOutput: '{"answer":42}',
+        experimentItemMetadataNames: ["difficulty"],
+        experimentItemMetadataValues: ["hard"],
+      },
+      rawObjectKey: "raw/project-1/operation-experiment",
+      sourceTime: deriveV4SourceTime({
+        envelopeTimestamp: "2026-07-17T10:02:00.000000001Z",
+        bodyStartTime: "2026-07-17T10:00:00Z",
+        bodyEndTime: "2026-07-17T10:01:00Z",
+      }),
+      systemTimestamp: 1_784_282_600_000_000_000n,
+      canonicalizerVersion: "2",
+      schemaVersion: 2,
+    });
+
+    expect(event).toMatchObject({
+      experimentId: "run-1",
+      experimentName: "prompt experiment",
+      experimentMetadata: { owner: "team-a", "nested.region": "eu" },
+      experimentDescription: "foundation round trip",
+      experimentDatasetId: "dataset-1",
+      experimentItemId: "item-1",
+      experimentItemVersion: 1_784_282_340_123_000_000n,
+      experimentItemRootSpanId: "span-1",
+      experimentItemExpectedOutput: '{"answer":42}',
+      experimentItemMetadata: { difficulty: "hard" },
+    });
   });
 });

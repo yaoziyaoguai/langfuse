@@ -7,24 +7,33 @@ import {
   claimDeletionOperation,
   findDeletionOperationForProject,
   hasPreBarrierIngestionWork,
+  isDorisAnalyticsBackend,
   logger,
   markDeletionBarrierVisible,
   markDeletionOperationRetrying,
   markDeletionOperationPhase,
   renewDeletionOperationLease,
+  type AnalyticsRuntimeAdmissionContext,
+  type SerializedAnalyticsDurableProvenance,
 } from "@langfuse/shared/src/server";
 
 import {
   getDorisAnalyticsLifecycleRuntime,
   type DorisAnalyticsLifecycleRuntime,
 } from "../../services/dorisAnalyticsLifecycle";
-import { deleteMediaItemsForTraces } from "./processClickhouseTraceDelete";
+import { getWorkerAnalyticsAdmissionContext } from "../../analyticsRuntime";
+import { withAnalyticsDeletionWorkFence } from "../analytics-deletion/analyticsDeletionWorkFence";
+import {
+  deleteMediaItemsForTraces,
+  processClickhouseTraceDelete,
+} from "./processClickhouseTraceDelete";
 import { processPostgresTraceDelete } from "./processPostgresTraceDelete";
 
 export type TraceDeletionReference = {
   readonly operationId: string;
   readonly traceId: string;
   readonly generation: bigint;
+  readonly analyticsProvenance?: SerializedAnalyticsDurableProvenance;
 };
 
 async function operationFor(
@@ -47,16 +56,46 @@ async function operationFor(
 }
 
 /**
- * Makes a trace invisible first, then converges known Doris keys and attributable
- * Postgres/media state. Raw multi-trace ingestion objects remain lifecycle-owned.
+ * Makes a trace invisible in the selected analytics backend, then converges
+ * attributable Postgres/media state. Raw multi-trace objects remain lifecycle-owned.
  */
 export async function processAnalyticsTraceDelete(
   projectId: string,
   reference: TraceDeletionReference,
-  lifecycle: DorisAnalyticsLifecycleRuntime = getDorisAnalyticsLifecycleRuntime(),
+  lifecycle?: DorisAnalyticsLifecycleRuntime,
+  admissionContext: AnalyticsRuntimeAdmissionContext | null = getWorkerAnalyticsAdmissionContext(),
 ): Promise<void> {
   const currentOperation = await operationFor(projectId, reference);
-  if (currentOperation.status === "COMPLETED") return;
+  const selectedBackend = isDorisAnalyticsBackend()
+    ? ("doris" as const)
+    : ("clickhouse" as const);
+  await withAnalyticsDeletionWorkFence({
+    client: prisma,
+    operation: currentOperation,
+    serializedProvenance: reference.analyticsProvenance,
+    admissionContext,
+    selectedBackend,
+    claimKind: "analytics-deletion-operation",
+    run: () =>
+      currentOperation.status === "COMPLETED"
+        ? Promise.resolve()
+        : processFencedAnalyticsTraceDelete({
+            projectId,
+            reference,
+            lifecycle:
+              currentOperation.analyticsBackend === "DORIS"
+                ? (lifecycle ?? getDorisAnalyticsLifecycleRuntime())
+                : lifecycle,
+          }),
+  });
+}
+
+async function processFencedAnalyticsTraceDelete(input: {
+  readonly projectId: string;
+  readonly reference: TraceDeletionReference;
+  readonly lifecycle?: DorisAnalyticsLifecycleRuntime;
+}): Promise<void> {
+  const { projectId, reference, lifecycle } = input;
   const owner = randomUUID();
   const operation = await claimDeletionOperation({
     operationId: reference.operationId,
@@ -77,13 +116,23 @@ export async function processAnalyticsTraceDelete(
       throw new Error("Trace deletion is held by the analytics checkpoint");
     }
     if (!operation.logicallyInvisible) {
-      const barrier = await lifecycle.store.publishTraceTombstone({
-        operationId: operation.id,
-        projectId,
-        traceId: reference.traceId,
-        generation: reference.generation,
-        createdAt: operation.createdAt,
-      });
+      const barrier =
+        operation.analyticsBackend !== "DORIS"
+          ? await processClickhouseTraceDelete(projectId, [
+              reference.traceId,
+            ]).then(() => ({
+              visible: true,
+              barrierLabel: `clickhouse-deletion-${operation.id}`,
+            }))
+          : await (
+              lifecycle ?? getDorisAnalyticsLifecycleRuntime()
+            ).store.publishTraceTombstone({
+              operationId: operation.id,
+              projectId,
+              traceId: reference.traceId,
+              generation: reference.generation,
+              createdAt: operation.createdAt,
+            });
       if (!barrier.visible) {
         await markDeletionOperationRetrying({
           operationId: operation.id,
@@ -111,6 +160,7 @@ export async function processAnalyticsTraceDelete(
       await hasPreBarrierIngestionWork({
         projectId,
         barrierCreatedAt: operation.createdAt,
+        barrierAcceptanceSequence: operation.ingestionBarrierSequence,
       })
     ) {
       await markDeletionOperationRetrying({
@@ -141,7 +191,11 @@ export async function processAnalyticsTraceDelete(
     const heads = await prisma.analyticsEntityHead.findMany({
       where: { projectId, owningTraceId: reference.traceId },
     });
-    await lifecycle.materializedDeletion.deleteHeads(operation.id, heads);
+    if (operation.analyticsBackend === "DORIS") {
+      await (
+        lifecycle ?? getDorisAnalyticsLifecycleRuntime()
+      ).materializedDeletion.deleteHeads(operation.id, heads);
+    }
     await deleteMediaItemsForTraces(projectId, [reference.traceId]);
     await processPostgresTraceDelete(projectId, [reference.traceId]);
     await prisma.traceControlState.deleteMany({
@@ -174,7 +228,7 @@ export async function processAnalyticsTraceDelete(
         lease,
       });
     }
-    logger.warn("Doris trace deletion will retry", {
+    logger.warn("Analytics trace deletion will retry", {
       projectId,
       deletionOperationId: operation.id,
       phase: current.phase,

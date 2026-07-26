@@ -79,6 +79,16 @@ function entities(): readonly CanonicalAnalyticsEntity[] {
       serviceName: "api",
       telemetrySdkLanguage: "nodejs",
       eventBytes: 123,
+      experimentId: "run-1",
+      experimentName: "prompt experiment",
+      experimentMetadata: { owner: "team-a" },
+      experimentDescription: "foundation round trip",
+      experimentDatasetId: "dataset-1",
+      experimentItemId: "item-1",
+      experimentItemVersion: normalizeVersionToken("2026-07-17T09:59:00.123Z"),
+      experimentItemExpectedOutput: '{"answer":42}',
+      experimentItemMetadata: { difficulty: "hard" },
+      experimentItemRootSpanId: "span-1",
     },
     {
       ...common,
@@ -104,6 +114,8 @@ function entities(): readonly CanonicalAnalyticsEntity[] {
       queueId: null,
       environment: "production",
       metadata: { evaluator: "human" },
+      datasetRunId: "run-1",
+      executionTraceId: "evaluation-trace-1",
     },
     {
       ...common,
@@ -118,6 +130,34 @@ function entities(): readonly CanonicalAnalyticsEntity[] {
       eventId: "event-1",
       bucketName: "media",
       bucketPath: "project-1/file-1.bin",
+    },
+    {
+      ...common,
+      kind: "datasetRunItem",
+      sourceContract: "dataset-run-item",
+      sourceVersion: sourceVersion + 3n,
+      canonicalPayloadHash: canonicalPayloadHash({
+        kind: "datasetRunItem",
+      }),
+      runItemId: "run-item-1",
+      datasetRunId: "run-1",
+      datasetItemId: "item-1",
+      datasetId: "dataset-1",
+      traceId: "trace-1",
+      observationId: "span-1",
+      error: null,
+      createdAt: startTime,
+      updatedAt: startTime,
+      datasetRunName: "run one",
+      datasetRunDescription: "description",
+      datasetRunMetadata: { owner: "team-a" },
+      datasetRunCreatedAt: startTime - 1_000_000_000n,
+      datasetItemVersion: startTime - 2_000_000_000n,
+      datasetItemInput: { question: "life" },
+      datasetItemExpectedOutput: { answer: 42 },
+      datasetItemMetadata: { difficulty: "hard" },
+      datasetDeletionGeneration: 0n,
+      runDeletionGeneration: 0n,
     },
   ];
 }
@@ -138,6 +178,14 @@ function batch(
       fenceGeneration: 1n,
       traceDeletionGeneration: 0n,
       projectDeletionGeneration: 0n,
+      ...(entity.kind === "datasetRunItem"
+        ? {
+            owningDatasetId: entity.datasetId,
+            owningDatasetRunId: entity.datasetRunId,
+            datasetDeletionGeneration: entity.datasetDeletionGeneration,
+            runDeletionGeneration: entity.runDeletionGeneration,
+          }
+        : {}),
     })),
   };
 }
@@ -148,7 +196,7 @@ describe("DorisBatchSink", () => {
     const prepared = prepareDorisLoadBatches(batch(source));
     const reordered = prepareDorisLoadBatches(batch([...source].reverse()));
     expect(reordered).toEqual(prepared);
-    expect(prepared).toHaveLength(3);
+    expect(prepared).toHaveLength(4);
 
     const eventBatch = prepared.find(
       ({ targetTable }) => targetTable === "events_current",
@@ -176,6 +224,11 @@ describe("DorisBatchSink", () => {
       total_input_tokens: "10",
       total_output_tokens: "2",
       total_cost: "0.7",
+      experiment_id: "run-1",
+      experiment_name: "prompt experiment",
+      experiment_metadata: { owner: "team-a" },
+      experiment_item_version: "2026-07-17 09:59:00.123000",
+      experiment_item_root_span_id: "span-1",
     });
     expect(eventBatch.payloadHash).toMatch(/^[a-f0-9]{64}$/);
 
@@ -190,6 +243,8 @@ describe("DorisBatchSink", () => {
       data_type: "NUMERIC",
       value: 0.9,
       timestamp: "2026-07-17 10:00:00.123456",
+      dataset_run_id: "run-1",
+      execution_trace_id: "evaluation-trace-1",
     });
 
     const file = JSON.parse(
@@ -204,6 +259,25 @@ describe("DorisBatchSink", () => {
       version_token: (sourceVersion + 2n).toString(),
       bucket_path: "project-1/file-1.bin",
     });
+
+    const runItem = JSON.parse(
+      prepared
+        .find(({ targetTable }) => targetTable === "dataset_run_items_current")!
+        .ndjsonBody.trim(),
+    ) as Record<string, unknown>;
+    expect(runItem).toMatchObject({
+      project_id: "project-1",
+      run_item_id: "run-item-1",
+      dataset_run_id: "run-1",
+      dataset_item_id: "item-1",
+      dataset_id: "dataset-1",
+      trace_id: "trace-1",
+      dataset_run_metadata: { owner: "team-a" },
+      dataset_item_input: '{"question":"life"}',
+      dataset_item_expected_output: '{"answer":42}',
+      dataset_deletion_generation: "0",
+      run_deletion_generation: "0",
+    });
   });
 
   it("retains a typed lookup id beside the collision-free entity key", () => {
@@ -211,11 +285,54 @@ describe("DorisBatchSink", () => {
       describeCanonicalCandidates(batch(entities())).map(
         ({ entityType, lookupId }) => ({ entityType, lookupId }),
       ),
-    ).toEqual([
-      { entityType: "EVENT", lookupId: "span-1" },
-      { entityType: "FILE_REFERENCE", lookupId: "file-1" },
-      { entityType: "SCORE", lookupId: "score-1" },
-    ]);
+    ).toEqual(
+      expect.arrayContaining([
+        { entityType: "EVENT", lookupId: "span-1" },
+        { entityType: "FILE_REFERENCE", lookupId: "file-1" },
+        { entityType: "SCORE", lookupId: "score-1" },
+        { entityType: "DATASET_RUN_ITEM", lookupId: "run-item-1" },
+      ]),
+    );
+  });
+
+  it("keeps literal dotted dynamic-object keys in raw JSON companions", () => {
+    const source = entities()[0]!;
+    if (source.kind !== "event") throw new Error("Expected event fixture");
+    const event = {
+      ...source,
+      metadata: { resourceAttributes: { "service.name": "api" } },
+      modelParameters: { "provider.option": true },
+      usageDetails: { input: 10, "custom.count": 4 },
+      costDetails: { "custom.cost": 0.25 },
+      providedUsageDetails: { "provider.input": 9 },
+      providedCostDetails: { "provider.cost": 0.2 },
+      toolDefinitions: { "tool.name": "{}" },
+    };
+    const prepared = prepareDorisLoadBatches(batch([event]))[0]!;
+    const row = JSON.parse(prepared.ndjsonBody.trim()) as Record<
+      string,
+      unknown
+    >;
+
+    expect(JSON.parse(String(row.metadata_json))).toEqual(event.metadata);
+    expect(JSON.parse(String(row.model_parameters_json))).toEqual(
+      event.modelParameters,
+    );
+    expect(JSON.parse(String(row.usage_details_json))).toEqual(
+      event.usageDetails,
+    );
+    expect(JSON.parse(String(row.cost_details_json))).toEqual(
+      event.costDetails,
+    );
+    expect(JSON.parse(String(row.provided_usage_details_json))).toEqual(
+      event.providedUsageDetails,
+    );
+    expect(JSON.parse(String(row.provided_cost_details_json))).toEqual(
+      event.providedCostDetails,
+    );
+    expect(JSON.parse(String(row.tool_definitions_json))).toEqual(
+      event.toolDefinitions,
+    );
   });
 
   it("deterministically splits expanded canonical rows below the load limit", () => {

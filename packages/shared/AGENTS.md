@@ -7,8 +7,8 @@ Use root [AGENTS.md](../../AGENTS.md) for monorepo-level rules.
 
 - Shared domain, database, queue, and server utilities used by `web` and
   `worker`.
-- Primary owner of Postgres schema, ClickHouse schema, and queue payload
-  contracts.
+- Primary owner of Postgres schema, ClickHouse/Doris analytics schemas,
+  analytics runtime control contracts, and queue payload contracts.
 
 ## Maintenance Contract
 
@@ -37,6 +37,15 @@ Use root [AGENTS.md](../../AGENTS.md) for monorepo-level rules.
   `(projectId, name)` rather than stored on extra evaluator identity fields.
 - Prisma migrations: `prisma/migrations/*`
 - ClickHouse migrations: `clickhouse/migrations/{clustered,unclustered}/*`
+- Doris migrations: `doris/migrations/*`
+- Selectable analytics persistence and runtime fencing:
+  `src/server/analytics-persistence/*`
+- Analytics backend control repositories:
+  `src/server/repositories/analytics{Backend,Capability,Checkpoint,Deletion,Ingestion,Retention,Runtime}*`
+- Durable batch-export manifest, execution claim, and cleanup contracts:
+  `src/server/repositories/batchExportManifests.ts`
+- Batch-export queue provenance and generation payloads:
+  `src/server/queues.ts`
 - Seeder and support scripts: `scripts/seeder/*`, `clickhouse/scripts/*`
 
 ## Export Entry Points
@@ -87,6 +96,11 @@ the same PR.
 - Prisma generate: `pnpm --filter @langfuse/shared run db:generate`
 - Prisma migrate (dev): `pnpm --filter @langfuse/shared run db:migrate`
 - ClickHouse reset: `pnpm --filter @langfuse/shared run ch:reset`
+- Isolated Doris integration suite:
+  `pnpm --filter @langfuse/shared run test:doris`
+- Doris schema migration: `pnpm --filter @langfuse/shared run doris:migrate`
+- Coordinated analytics checkpoint:
+  `pnpm --filter @langfuse/shared run doris:checkpoint`
 
 ## Playbooks
 
@@ -117,6 +131,22 @@ the same PR.
    - https://langfuse.com/docs/api-and-data-platform/features/blob-storage-export-fields
      Surface any mismatches in field names, types, nullability, or filter
      descriptions so they can be addressed in the docs repo.
+
+### Doris schema or analytics control change
+
+1. Add ordered, checksum-stable Doris SQL under `doris/migrations/*`; never
+   rewrite an already released migration.
+2. Keep the migration allowlist and schema/canonical compatibility ranges in
+   `src/server/doris/readiness.ts` and `src/server/analytics-persistence/*`
+   aligned with the rollout phase.
+3. Put deployment markers, leases, claims, deletion generations, retention,
+   and checkpoints in Postgres repositories. Keep backend data access behind
+   the selected analytics backend; do not introduce dual writes or hot switch.
+4. Stamp managed durable queue work with backend generation and workload
+   provenance. Consumers must claim and revalidate it before side effects;
+   missing or stale provenance fails closed.
+5. Run `db:generate` for Postgres control-schema changes, targeted shared/web/
+   worker tests, and the isolated real-backend suite via `test:doris`.
 
 ### Queue payload contract change
 

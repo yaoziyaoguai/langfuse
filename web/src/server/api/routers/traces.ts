@@ -63,6 +63,7 @@ import {
   AgentGraphDataSchema,
 } from "@/src/features/trace-graph-view/types";
 import { env } from "@/src/env.mjs";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 import {
   toDomainWithStringifiedMetadata,
   toDomainArrayWithStringifiedMetadata,
@@ -541,6 +542,7 @@ export const traceRouter = createTRPCRouter({
         input.traceIds,
         {
           organizationId: ctx.session.orgId,
+          analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
           requester: {
             principalType: "user",
             principalId: ctx.session.user.id,

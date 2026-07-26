@@ -7,6 +7,8 @@ export type AnalyticsWorkerTopology = {
   readonly backend: AnalyticsBackend;
   readonly clickhouseAnalyticsEnabled: boolean;
   readonly dorisAnalyticsEnabled: boolean;
+  readonly coreBatchExportsEnabled: boolean;
+  readonly legacyTraceDeletionCleanerEnabled: boolean;
 };
 
 /** Resolves the mutually exclusive analytics worker topology at process start. */
@@ -18,5 +20,7 @@ export function resolveAnalyticsWorkerTopology(
     backend,
     clickhouseAnalyticsEnabled: backend === "clickhouse",
     dorisAnalyticsEnabled: backend === "doris",
+    coreBatchExportsEnabled: true,
+    legacyTraceDeletionCleanerEnabled: backend === "clickhouse",
   };
 }

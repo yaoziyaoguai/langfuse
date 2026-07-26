@@ -13,6 +13,11 @@ function operation(scope: "TRACE" | "PROJECT"): AnalyticsDeletionOperation {
     traceId: scope === "TRACE" ? "trace-1" : null,
     generation: 7n,
     checkpointGeneration: 0n,
+    analyticsBackend: "DORIS",
+    deploymentGeneration: 9n,
+    workloadEpochFingerprint: "a".repeat(64),
+    runtimeContractVersion: 3,
+    producerRuntimeLeaseId: "runtime-original",
     workerFence: 0n,
     leaseOwner: null,
     leaseExpiresAt: null,
@@ -45,6 +50,13 @@ describe("processAnalyticsDeletionRecoveryOperation", () => {
       operationId: "operation-trace",
       traceId: "trace-1",
       generation: 7n,
+      analyticsProvenance: {
+        analyticsBackend: "DORIS",
+        deploymentGeneration: "9",
+        workloadEpochFingerprint: "a".repeat(64),
+        runtimeContractVersion: 3,
+        producerRuntimeLeaseId: "runtime-original",
+      },
     });
     expect(markPendingTraceCompleted).toHaveBeenCalledWith({
       projectId: "project-1",
@@ -67,7 +79,17 @@ describe("processAnalyticsDeletionRecoveryOperation", () => {
     expect(processProject).toHaveBeenCalledWith({
       projectId: "project-1",
       organizationId: "org-1",
-      reference: { operationId: "operation-project", generation: 7n },
+      reference: {
+        operationId: "operation-project",
+        generation: 7n,
+        analyticsProvenance: {
+          analyticsBackend: "DORIS",
+          deploymentGeneration: "9",
+          workloadEpochFingerprint: "a".repeat(64),
+          runtimeContractVersion: 3,
+          producerRuntimeLeaseId: "runtime-original",
+        },
+      },
     });
     expect(processTrace).not.toHaveBeenCalled();
     expect(markPendingTraceCompleted).not.toHaveBeenCalled();

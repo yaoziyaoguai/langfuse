@@ -4,6 +4,7 @@ import type { AnalyticsCheckpointGeneration } from "@prisma/client";
 import {
   AnalyticsCheckpointCoordinator,
   canonicalCheckpointManifestHash,
+  type AnalyticsCheckpointIoOperation,
   verifyAnalyticsCheckpointForRestore,
 } from "./AnalyticsCheckpointCoordinator";
 
@@ -17,6 +18,11 @@ function checkpoint() {
     operationHighWatermarkAcceptedAtNanos: 1_784_376_000_000_000_000n,
     loadHighWatermarkCreatedAt: new Date("2026-07-18T12:00:01.000Z"),
     deletionHighWatermarkCreatedAt: new Date("2026-07-18T12:00:02.000Z"),
+    analyticsBackend: "DORIS",
+    deploymentGeneration: 3n,
+    workloadEpochFingerprint: "e".repeat(64),
+    runtimeContractVersion: 1,
+    producerRuntimeLeaseId: "runtime-producer",
     postgresSnapshotId: null,
     postgresWalLsn: null,
     dorisSnapshotId: null,
@@ -39,19 +45,34 @@ describe("AnalyticsCheckpointCoordinator", () => {
   it("drains, verifies, signs, anchors, then seals one common checkpoint", async () => {
     const recordArtifacts = vi.fn().mockResolvedValue(true);
     const seal = vi.fn().mockResolvedValue(true);
+    const renew = vi.fn().mockResolvedValue(true);
+    const postgresCapture = vi.fn().mockResolvedValue({
+      snapshotId: "pg-backup-7",
+      walLsn: "0/16B6C50",
+      digest: "a".repeat(64),
+    });
     const publishLatest = vi.fn().mockResolvedValue({
       reference: "anchor://generation/7",
     });
+    const fencedOperations: AnalyticsCheckpointIoOperation[] = [];
+    const runFencedIo = async <T>(input: {
+      readonly operation: AnalyticsCheckpointIoOperation;
+      readonly execute: () => Promise<T>;
+    }): Promise<T> => {
+      fencedOperations.push(input.operation);
+      return input.execute();
+    };
     const coordinator = new AnalyticsCheckpointCoordinator({
       leaseOwner: "checkpoint-worker",
       leaseMs: 60_000,
       timeoutMs: 30_000,
       pollIntervalMs: 100,
+      runFencedIo,
       repository: {
         findPendingAnchor: vi.fn().mockResolvedValue(null),
         claimAnchorReconciliation: vi.fn(),
         begin: vi.fn().mockResolvedValue(checkpoint()),
-        renew: vi.fn().mockResolvedValue(true),
+        renew,
         drainState: vi
           .fn()
           .mockResolvedValueOnce({
@@ -71,11 +92,7 @@ describe("AnalyticsCheckpointCoordinator", () => {
         abort: vi.fn(),
       },
       postgres: {
-        capture: vi.fn().mockResolvedValue({
-          snapshotId: "pg-backup-7",
-          walLsn: "0/16B6C50",
-          digest: "a".repeat(64),
-        }),
+        capture: postgresCapture,
       },
       doris: {
         capture: vi.fn().mockResolvedValue({
@@ -131,6 +148,75 @@ describe("AnalyticsCheckpointCoordinator", () => {
         externalAnchorRef: "anchor://generation/7",
       }),
     );
+    expect(fencedOperations).toEqual(["artifact-captures", "anchor-publish"]);
+    expect(renew).toHaveBeenCalledTimes(3);
+    expect(renew.mock.invocationCallOrder[1]).toBeLessThan(
+      postgresCapture.mock.invocationCallOrder[0]!,
+    );
+    expect(recordArtifacts.mock.invocationCallOrder[0]).toBeLessThan(
+      renew.mock.invocationCallOrder[2]!,
+    );
+  });
+
+  it("requires one checkpoint lease to outlive a bounded external IO call", () => {
+    expect(
+      () =>
+        new AnalyticsCheckpointCoordinator({
+          leaseOwner: "checkpoint-worker",
+          leaseMs: 60_000,
+          timeoutMs: 60_000,
+          pollIntervalMs: 1_000,
+          runFencedIo: async (input) => input.execute(),
+          repository: {} as never,
+          postgres: {} as never,
+          doris: {} as never,
+          lifecycle: {} as never,
+          signer: {} as never,
+          anchor: {} as never,
+        }),
+    ).toThrow("lease");
+  });
+
+  it("does not start external IO after its managed generation is fenced", async () => {
+    const postgresCapture = vi.fn();
+    const dorisCapture = vi.fn();
+    const lifecycleCapture = vi.fn();
+    const coordinator = new AnalyticsCheckpointCoordinator({
+      leaseOwner: "checkpoint-worker",
+      leaseMs: 60_000,
+      timeoutMs: 30_000,
+      pollIntervalMs: 100,
+      runFencedIo: async <T>(): Promise<T> => {
+        throw new Error("Analytics backend deployment generation changed");
+      },
+      repository: {
+        findPendingAnchor: vi.fn().mockResolvedValue(null),
+        claimAnchorReconciliation: vi.fn(),
+        begin: vi.fn().mockResolvedValue(checkpoint()),
+        renew: vi.fn().mockResolvedValue(true),
+        drainState: vi.fn().mockResolvedValue({
+          nonterminalOperations: 0,
+          nonterminalLoads: 0,
+          nonterminalDeletions: 0,
+          drained: true,
+        }),
+        recordArtifacts: vi.fn(),
+        seal: vi.fn(),
+        abort: vi.fn().mockResolvedValue(false),
+      },
+      postgres: { capture: postgresCapture },
+      doris: { capture: dorisCapture },
+      lifecycle: { capture: lifecycleCapture },
+      signer: { keyId: "key", sign: vi.fn() },
+      anchor: { publishLatest: vi.fn(), readLatest: vi.fn() },
+    });
+
+    await expect(coordinator.run()).rejects.toThrow(
+      "deployment generation changed",
+    );
+    expect(postgresCapture).not.toHaveBeenCalled();
+    expect(dorisCapture).not.toHaveBeenCalled();
+    expect(lifecycleCapture).not.toHaveBeenCalled();
   });
 
   it("aborts an unanchored checkpoint when the pre-cut drain times out", async () => {
@@ -141,6 +227,7 @@ describe("AnalyticsCheckpointCoordinator", () => {
       leaseMs: 60_000,
       timeoutMs: 1_500,
       pollIntervalMs: 1_000,
+      runFencedIo: async (input) => input.execute(),
       repository: {
         findPendingAnchor: vi.fn().mockResolvedValue(null),
         claimAnchorReconciliation: vi.fn(),
@@ -179,7 +266,17 @@ describe("AnalyticsCheckpointCoordinator", () => {
   });
 
   it("rejects tampering and old-valid rollback before restore mutation", async () => {
-    const manifest = { generation: "7", artifacts: { postgres: "pg-7" } };
+    const manifest = {
+      generation: "7",
+      analyticsProvenance: {
+        analyticsBackend: "DORIS",
+        deploymentGeneration: "3",
+        workloadEpochFingerprint: "e".repeat(64),
+        runtimeContractVersion: 1,
+        producerRuntimeLeaseId: "runtime-producer",
+      },
+      artifacts: { postgres: "pg-7" },
+    };
     const manifestHash = canonicalCheckpointManifestHash(manifest);
     const sealed = {
       ...checkpoint(),

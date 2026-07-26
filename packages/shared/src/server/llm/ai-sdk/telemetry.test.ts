@@ -16,6 +16,11 @@ vi.mock("../../otel/OtelIngestionProcessor", () => ({
 }));
 
 const VALID_TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
+const analyticsAdmissionContext = {
+  runtimeLeaseId: "runtime-lease-1",
+  backend: "doris" as const,
+  deploymentGeneration: 2n,
+};
 
 const traceSinkParams: TraceSinkParams = {
   targetProjectId: "project-1",
@@ -58,6 +63,10 @@ describe("createAiSdkTelemetryCapture", () => {
       traceSinkParams: {
         ...traceSinkParams,
         prompt: { name: "p", version: 3 },
+        eventsWriter: {
+          analyticsAdmissionContext,
+          write: vi.fn(),
+        },
       },
     });
     expect(capture).toBeDefined();
@@ -73,6 +82,7 @@ describe("createAiSdkTelemetryCapture", () => {
         // ingestion schema; the public schema strips the "langfuse-"
         // environment prefix and would bypass the eval-loop guard.
         isLangfuseInternal: true,
+        analyticsAdmissionContext,
         // Ensures the direct events write runs, which is the only path that
         // materializes langfuse.experiment.* into experiment_* columns.
         ingestionVersion: "4",

@@ -19,7 +19,13 @@ import {
   getEvalTargetObjectFromSourceTable,
 } from "@langfuse/shared";
 import { env } from "@/src/env.mjs";
-import { CreateObservationBatchEvaluationActionSchema } from "../validation";
+import {
+  CreateObservationBatchEvaluationActionSchema,
+  scopeBatchEvaluationQuery,
+} from "../validation";
+import { randomUUID } from "node:crypto";
+import { withAnalyticsBatchActionPublicationAdmission } from "@/src/server/analyticsQueuePublicationAdmission";
+import { NotImplementedError } from "@langfuse/shared";
 
 export const runEvaluationRouter = createTRPCRouter({
   create: protectedProjectProcedure
@@ -34,10 +40,11 @@ export const runEvaluationRouter = createTRPCRouter({
 
         const {
           projectId,
-          query,
+          query: inputQuery,
           evaluatorIds: rawEvaluatorIds,
           sourceTable = BatchEvalSourceTable.EVENTS,
         } = input;
+        const query = scopeBatchEvaluationQuery(inputQuery, sourceTable);
 
         if (env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN !== "true") {
           throw new TRPCError({
@@ -103,7 +110,7 @@ export const runEvaluationRouter = createTRPCRouter({
         }
 
         const userId = ctx.session.user.id;
-        const batchConfig = { evaluatorIds };
+        const batchConfig = { evaluatorIds, sourceTable };
 
         logger.info(
           "[TRPC] Creating observation-run-batched-evaluation action",
@@ -114,50 +121,75 @@ export const runEvaluationRouter = createTRPCRouter({
           },
         );
 
-        const batchAction = await ctx.prisma.batchAction.create({
-          data: {
-            projectId,
-            userId,
-            actionType: ActionId.ObservationBatchEvaluation,
-            tableName: BatchTableNames.Events,
-            status: BatchActionStatus.Queued,
-            query,
-            config: batchConfig,
+        const batchActionId = randomUUID();
+        return withAnalyticsBatchActionPublicationAdmission({
+          actionId: ActionId.ObservationBatchEvaluation,
+          resourceIdentity: batchActionId,
+          additionalCapabilities:
+            sourceTable === BatchEvalSourceTable.EVENTS ? [] : ["experiments"],
+          publish: async (guard) => {
+            const queue = BatchActionQueue.getInstance();
+            if (!queue) {
+              throw new Error("BatchActionQueue is not initialized");
+            }
+            const batchAction = await guard.withIoFence(async (tx) => {
+              const created = await tx.batchAction.create({
+                data: {
+                  id: batchActionId,
+                  projectId,
+                  userId,
+                  actionType: ActionId.ObservationBatchEvaluation,
+                  tableName: BatchTableNames.Events,
+                  status: BatchActionStatus.Queued,
+                  query,
+                  config: batchConfig,
+                },
+              });
+              await auditLog(
+                {
+                  session: ctx.session,
+                  resourceType: "batchAction",
+                  resourceId: created.id,
+                  projectId,
+                  action: ActionId.ObservationBatchEvaluation,
+                  after: created,
+                },
+                tx,
+              );
+              return created;
+            });
+
+            await guard.withIoFence(() =>
+              queue.add(
+                QueueJobs.BatchActionProcessingJob,
+                {
+                  id: batchAction.id,
+                  name: QueueJobs.BatchActionProcessingJob,
+                  timestamp: batchAction.createdAt,
+                  payload: {
+                    actionId: ActionId.ObservationBatchEvaluation,
+                    batchActionId: batchAction.id,
+                    projectId,
+                    cutoffCreatedAt: batchAction.createdAt,
+                    query,
+                    evaluatorIds: batchConfig.evaluatorIds,
+                    sourceTable: batchConfig.sourceTable,
+                  },
+                },
+                {
+                  jobId: batchAction.id,
+                },
+              ),
+            );
+
+            return { id: batchAction.id };
           },
         });
-
-        await auditLog({
-          session: ctx.session,
-          resourceType: "batchAction",
-          resourceId: batchAction.id,
-          projectId,
-          action: ActionId.ObservationBatchEvaluation,
-          after: batchAction,
-        });
-
-        await BatchActionQueue.getInstance()?.add(
-          QueueJobs.BatchActionProcessingJob,
-          {
-            id: batchAction.id,
-            name: QueueJobs.BatchActionProcessingJob,
-            timestamp: new Date(),
-            payload: {
-              actionId: ActionId.ObservationBatchEvaluation,
-              batchActionId: batchAction.id,
-              projectId,
-              cutoffCreatedAt: new Date(),
-              query,
-              evaluatorIds: batchConfig.evaluatorIds,
-            },
-          },
-          {
-            jobId: batchAction.id,
-          },
-        );
-
-        return { id: batchAction.id };
       } catch (e) {
         logger.error(e);
+        if (e instanceof NotImplementedError) {
+          throw new TRPCError({ code: "NOT_IMPLEMENTED", message: e.message });
+        }
         if (e instanceof TRPCError) {
           throw e;
         }

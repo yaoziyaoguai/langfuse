@@ -5,10 +5,14 @@ import {
   logger,
 } from "@langfuse/shared/src/server";
 import { randomUUID } from "crypto";
+import { env } from "../../env";
+import { scheduleDorisAnalyticsIntegrations } from "../analytics-integrations/scheduleDorisAnalyticsIntegrations";
 
 let legacyJobsDrained = false;
 
-export const handleBlobStorageIntegrationSchedule = async () => {
+export const handleBlobStorageIntegrationSchedule = async (input?: {
+  readonly projectId?: string;
+}) => {
   const now = new Date();
 
   const blobStorageIntegrationProjects =
@@ -19,12 +23,16 @@ export const handleBlobStorageIntegrationSchedule = async () => {
       },
       where: {
         enabled: true,
-        OR: [
-          // Never synced before
-          { lastSyncAt: null },
-          // Next sync is due
-          { nextSyncAt: { lte: now } },
-        ],
+        ...(input?.projectId
+          ? { projectId: input.projectId }
+          : {
+              OR: [
+                // Never synced before
+                { lastSyncAt: null },
+                // Next sync is due
+                { nextSyncAt: { lte: now } },
+              ],
+            }),
       },
     });
 
@@ -52,6 +60,18 @@ export const handleBlobStorageIntegrationSchedule = async () => {
     logger.info(
       "[BLOB INTEGRATION] Drained legacy failed jobs from processing queue",
     );
+  }
+
+  if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+    await scheduleDorisAnalyticsIntegrations({
+      integrationType: "BLOB_STORAGE",
+      projectIds: blobStorageIntegrationProjects.map(
+        ({ projectId }) => projectId,
+      ),
+      queue: blobStorageIntegrationProcessingQueue,
+      jobName: QueueJobs.BlobStorageIntegrationProcessingJob,
+    });
+    return;
   }
 
   await blobStorageIntegrationProcessingQueue.addBulk(

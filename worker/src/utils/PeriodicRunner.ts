@@ -9,6 +9,7 @@ import { SpanKind } from "@opentelemetry/api";
  */
 export abstract class PeriodicRunner {
   private timeoutId: NodeJS.Timeout | null = null;
+  private currentRun: Promise<void> | null = null;
   private isRunning = false;
 
   protected abstract get name(): string;
@@ -20,7 +21,7 @@ export abstract class PeriodicRunner {
       return;
     }
     this.isRunning = true;
-    this.runAndScheduleNext();
+    this.launchRun();
   }
 
   public stop(): void {
@@ -29,6 +30,24 @@ export abstract class PeriodicRunner {
       clearTimeout(this.timeoutId);
       this.timeoutId = null;
     }
+  }
+
+  public async stopAndDrain(): Promise<void> {
+    this.stop();
+    await this.currentRun;
+  }
+
+  private launchRun(): void {
+    const run = this.runAndScheduleNext();
+    this.currentRun = run;
+    run.then(
+      () => {
+        if (this.currentRun === run) this.currentRun = null;
+      },
+      () => {
+        if (this.currentRun === run) this.currentRun = null;
+      },
+    );
   }
 
   private async runAndScheduleNext(): Promise<void> {
@@ -65,7 +84,7 @@ export abstract class PeriodicRunner {
       return;
     }
     this.timeoutId = setTimeout(() => {
-      this.runAndScheduleNext();
+      this.launchRun();
     }, delayMs);
   }
 }

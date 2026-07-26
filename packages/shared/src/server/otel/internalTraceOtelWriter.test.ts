@@ -7,6 +7,7 @@ import {
 
 const publishToOtelIngestionQueue = vi.fn().mockResolvedValue(undefined);
 const publishToAnalyticsIngestion = vi.fn().mockResolvedValue(undefined);
+const processorConstructor = vi.fn();
 
 vi.mock("./OtelIngestionProcessor", async (importOriginal) => {
   const actual =
@@ -14,6 +15,9 @@ vi.mock("./OtelIngestionProcessor", async (importOriginal) => {
   return {
     ...actual,
     OtelIngestionProcessor: class {
+      constructor(config: unknown) {
+        processorConstructor(config);
+      }
       publishToOtelIngestionQueue = publishToOtelIngestionQueue;
       publishToAnalyticsIngestion = publishToAnalyticsIngestion;
     },
@@ -67,6 +71,24 @@ beforeEach(() => {
 });
 
 describe("writeInternalTraceViaOtelIngestion", () => {
+  it("passes analytics admission to the selected ingestion processor", async () => {
+    const analyticsAdmissionContext = {
+      runtimeLeaseId: "runtime-lease-1",
+      backend: "doris" as const,
+      deploymentGeneration: 3n,
+    };
+
+    await writeInternalTraceViaOtelIngestion({
+      rootSpanId: TRACE_ID,
+      eventInputs: [codeEvalRootInput],
+      analyticsAdmissionContext,
+    });
+
+    expect(processorConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({ analyticsAdmissionContext }),
+    );
+  });
+
   it("publishes a trace that converts through the real OTel ingestion processor", async () => {
     await writeInternalTraceViaOtelIngestion({
       rootSpanId: TRACE_ID,

@@ -28,6 +28,10 @@ import {
   parseClickhouseUTCDateTimeFormat,
   queryClickhouse,
 } from "../repositories/clickhouse";
+import {
+  getDorisTelemetryRepositories,
+  isDorisAnalyticsBackend,
+} from "./telemetry/doris";
 import { experimentItemsTableNativeUiColumnDefinitions } from "../tableMappings/mapExperimentItemsTable";
 import {
   experimentPreAggCols,
@@ -128,6 +132,13 @@ export const getExperimentsCountFromEvents = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.count({
+      projectId: props.projectId,
+      filters: props.filter,
+    });
+  }
+
   const rows = await getExperimentsFromEventsGeneric<{ count: string }>({
     select: "count",
     projectId: props.projectId,
@@ -147,6 +158,16 @@ export const getExperimentsFromEvents = async (props: {
   limit?: number;
   page?: number;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.list({
+      projectId: props.projectId,
+      filters: props.filter,
+      orderBy: props.orderBy,
+      limit: props.limit,
+      page: props.page,
+    });
+  }
+
   const rows =
     await getExperimentsFromEventsGeneric<ExperimentEventsDataReturnType>({
       select: "rows",
@@ -176,6 +197,9 @@ export const getExperimentMetricsFromEvents = async (props: {
 }) => {
   if (props.experimentIds.length === 0) {
     return [];
+  }
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.metrics(props);
   }
 
   // Use eventsExperimentsAggregation with "metrics" field set for simplified aggregation
@@ -452,6 +476,16 @@ type ExperimentItemInput = {
 export const getExperimentItemsCountFromEvents = async (
   props: ExperimentItemInput,
 ): Promise<number> => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.itemsCount({
+      projectId: props.projectId,
+      baseExperimentId: props.baseExperimentId,
+      compExperimentIds: props.compExperimentIds,
+      filtersByExperiment: props.filterByExperiment,
+      requireBaselinePresence: props.config?.requireBaselinePresence,
+    });
+  }
+
   const { projectId, config } = props;
 
   const qualifiedItems = getExperimentItemsFromEventsGeneric({
@@ -716,6 +750,30 @@ export const getExperimentItemsFilterOptions = async (
   trace_score_booleans: string[];
   trace_score_columns: ScoreColumnDefinition[];
 }> => {
+  if (isDorisAnalyticsBackend()) {
+    const repositories = getDorisTelemetryRepositories();
+    const [observation, trace] = await Promise.all([
+      repositories.experiments.scoreFilterOptions({
+        ...props,
+        level: "observation",
+      }),
+      repositories.experiments.scoreFilterOptions({
+        ...props,
+        level: "trace",
+      }),
+    ]);
+    return {
+      obs_scores_avg: observation.numeric,
+      obs_score_categories: observation.categorical,
+      obs_score_booleans: observation.boolean,
+      obs_score_columns: observation.scoreColumns,
+      trace_scores_avg: trace.numeric,
+      trace_score_categories: trace.categorical,
+      trace_score_booleans: trace.boolean,
+      trace_score_columns: trace.scoreColumns,
+    };
+  }
+
   const { observation, trace } =
     await getExperimentItemScoreOptionsByLevel(props);
 
@@ -786,6 +844,28 @@ export const getExperimentScoreOptions = async (
   experiment_score_categories: Array<{ label: string; values: string[] }>;
   experiment_score_columns: ScoreColumnDefinition[];
 }> => {
+  if (isDorisAnalyticsBackend()) {
+    const repositories = getDorisTelemetryRepositories();
+    const [observation, experiment] = await Promise.all([
+      repositories.experiments.scoreFilterOptions({
+        ...props,
+        level: "observation",
+      }),
+      repositories.experiments.scoreFilterOptions({
+        ...props,
+        level: "experiment",
+      }),
+    ]);
+    return {
+      obs_scores_avg: observation.numeric,
+      obs_score_categories: observation.categorical,
+      obs_score_columns: observation.scoreColumns,
+      experiment_scores_avg: experiment.numeric,
+      experiment_score_categories: experiment.categorical,
+      experiment_score_columns: experiment.scoreColumns,
+    };
+  }
+
   const { observation, experiment } =
     await getExperimentScoreOptionsByLevel(props);
 
@@ -1041,6 +1121,18 @@ export const getExperimentItemsFromEvents = async (
     config,
   } = props;
 
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.items({
+      projectId,
+      baseExperimentId,
+      compExperimentIds,
+      filtersByExperiment: filterByExperiment,
+      requireBaselinePresence: config?.requireBaselinePresence,
+      limit,
+      offset,
+    });
+  }
+
   // ========== QUERY 1: Get filtered item_ids using intersection logic ==========
   const { query: itemIdsQuery, params: itemIdsParams } =
     getExperimentItemsFromEventsGeneric({
@@ -1168,6 +1260,15 @@ export const getExperimentItemsBatchIO = async (props: {
     return [];
   }
 
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.batchIO({
+      projectId,
+      itemIds,
+      baseExperimentId,
+      compExperimentIds,
+    });
+  }
+
   const allExperimentIds = [
     ...(baseExperimentId ? [baseExperimentId] : []),
     ...compExperimentIds,
@@ -1264,6 +1365,10 @@ export const getExperimentItemsBatchIO = async (props: {
 export const getExperimentNamesFromEvents = async (props: {
   projectId: string;
 }) => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().experiments.names(props);
+  }
+
   const queryBuilder = new EventsAggQueryBuilder({
     projectId: props.projectId,
     groupByColumn: "e.experiment_name",

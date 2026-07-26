@@ -48,6 +48,7 @@ export function buildSearchPlan(input: {
     readonly searchType?: readonly TracingSearchType[];
   };
   readonly filtersRequireFullContent: boolean;
+  readonly allowUnboundedFullContent?: boolean;
 }): LogicalSearchPlan | null {
   assertAnalyticsTimeRange(input.range);
   const query = input.search?.query.trim() ?? "";
@@ -62,6 +63,7 @@ export function buildSearchPlan(input: {
       ));
   if (
     requiresFullContent &&
+    !input.allowUnboundedFullContent &&
     input.range.to.getTime() - input.range.from.getTime() >
       MAX_FULL_CONTENT_RANGE_MS
   ) {

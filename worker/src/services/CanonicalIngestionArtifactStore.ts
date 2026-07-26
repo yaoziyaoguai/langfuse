@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import {
   AnalyticsPersistenceError,
   assertAnalyticsBatchBoundary,
+  encodeDatasetRunItemIdentity,
   encodeEventIdentity,
   encodeFileReferenceIdentity,
   encodeScoreIdentity,
   type AnalyticsSourceContract,
   type CanonicalAnalyticsBatch,
+  type CanonicalAnalyticsDatasetRunItem,
   type CanonicalAnalyticsEntity,
   type CanonicalAnalyticsEntityClaim,
   type CanonicalAnalyticsEvent,
@@ -86,6 +88,11 @@ function canonicalEntityKey(entity: CanonicalAnalyticsEntity): string {
         entityType: entity.entityType,
         entityId: entity.entityId,
         fileId: entity.fileId,
+      });
+    case "datasetRunItem":
+      return encodeDatasetRunItemIdentity({
+        projectId: entity.projectId,
+        runItemId: entity.runItemId,
       });
   }
 }
@@ -389,6 +396,37 @@ function restoreEntity(value: unknown): CanonicalAnalyticsEntity {
         serviceName: nullableString(entity, "serviceName"),
         telemetrySdkLanguage: nullableString(entity, "telemetrySdkLanguage"),
         eventBytes: numberValue(entity, "eventBytes"),
+        ...(Object.hasOwn(entity, "experimentId")
+          ? {
+              experimentId: nullableString(entity, "experimentId"),
+              experimentName: nullableString(entity, "experimentName"),
+              experimentMetadata: jsonRecord(entity, "experimentMetadata"),
+              experimentDescription: nullableString(
+                entity,
+                "experimentDescription",
+              ),
+              experimentDatasetId: nullableString(
+                entity,
+                "experimentDatasetId",
+              ),
+              experimentItemId: nullableString(entity, "experimentItemId"),
+              experimentItemVersion: nullableDecimalBigInt(
+                entity.experimentItemVersion,
+              ),
+              experimentItemExpectedOutput: nullableString(
+                entity,
+                "experimentItemExpectedOutput",
+              ),
+              experimentItemMetadata: jsonRecord(
+                entity,
+                "experimentItemMetadata",
+              ),
+              experimentItemRootSpanId: nullableString(
+                entity,
+                "experimentItemRootSpanId",
+              ),
+            }
+          : {}),
       };
       return restored;
     }
@@ -429,6 +467,40 @@ function restoreEntity(value: unknown): CanonicalAnalyticsEntity {
         queueId: nullableString(entity, "queueId"),
         environment: stringValue(entity, "environment"),
         metadata: jsonRecord(entity, "metadata"),
+        ...(Object.hasOwn(entity, "datasetRunId")
+          ? {
+              datasetRunId: nullableString(entity, "datasetRunId"),
+              executionTraceId: nullableString(entity, "executionTraceId"),
+            }
+          : {}),
+      };
+      return restored;
+    }
+    case "datasetRunItem": {
+      const restored: CanonicalAnalyticsDatasetRunItem = {
+        ...restoreBase(entity, "dataset-run-item"),
+        kind: "datasetRunItem",
+        runItemId: stringValue(entity, "runItemId"),
+        datasetRunId: stringValue(entity, "datasetRunId"),
+        datasetItemId: stringValue(entity, "datasetItemId"),
+        datasetId: stringValue(entity, "datasetId"),
+        traceId: stringValue(entity, "traceId"),
+        observationId: nullableString(entity, "observationId"),
+        error: nullableString(entity, "error"),
+        createdAt: decimalBigInt(entity.createdAt),
+        updatedAt: decimalBigInt(entity.updatedAt),
+        datasetRunName: stringValue(entity, "datasetRunName"),
+        datasetRunDescription: nullableString(entity, "datasetRunDescription"),
+        datasetRunMetadata: jsonRecord(entity, "datasetRunMetadata"),
+        datasetRunCreatedAt: decimalBigInt(entity.datasetRunCreatedAt),
+        datasetItemVersion: nullableDecimalBigInt(entity.datasetItemVersion),
+        datasetItemInput: jsonValue(entity.datasetItemInput),
+        datasetItemExpectedOutput: jsonValue(entity.datasetItemExpectedOutput),
+        datasetItemMetadata: jsonRecord(entity, "datasetItemMetadata"),
+        datasetDeletionGeneration: decimalBigInt(
+          entity.datasetDeletionGeneration,
+        ),
+        runDeletionGeneration: decimalBigInt(entity.runDeletionGeneration),
       };
       return restored;
     }
@@ -541,6 +613,18 @@ export function decodeCanonicalArtifact(
           projectDeletionGeneration: decimalBigInt(
             claim.projectDeletionGeneration,
           ),
+          ...(Object.hasOwn(claim, "owningDatasetId")
+            ? {
+                owningDatasetId: nullableString(claim, "owningDatasetId"),
+                owningDatasetRunId: nullableString(claim, "owningDatasetRunId"),
+                datasetDeletionGeneration: decimalBigInt(
+                  claim.datasetDeletionGeneration,
+                ),
+                runDeletionGeneration: decimalBigInt(
+                  claim.runDeletionGeneration,
+                ),
+              }
+            : {}),
         } satisfies CanonicalAnalyticsEntityClaim;
       }),
     };

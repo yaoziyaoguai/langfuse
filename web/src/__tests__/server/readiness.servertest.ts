@@ -4,6 +4,7 @@ import { createMocks } from "node-mocks-http";
 const mocks = vi.hoisted(() => ({
   analyticsBackend: "doris" as "clickhouse" | "doris",
   checkAnalyticsReadiness: vi.fn(),
+  runtimeReady: vi.fn(),
 }));
 
 vi.mock("@/src/env.mjs", () => ({
@@ -22,6 +23,9 @@ vi.mock("@/src/features/telemetry", () => ({
   telemetry: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/src/utils/shutdown", () => ({ isSigtermReceived: () => false }));
+vi.mock("@/src/server/analyticsRuntime", () => ({
+  checkWebAnalyticsRuntimeReadiness: mocks.runtimeReady,
+}));
 vi.mock("@langfuse/shared/src/db", () => ({ prisma: {} }));
 vi.mock("@langfuse/shared/src/server", () => ({
   checkAnalyticsReadiness: mocks.checkAnalyticsReadiness,
@@ -43,9 +47,10 @@ vi.mock("@langfuse/shared/src/server", () => ({
 
 import handler from "@/src/pages/api/public/ready";
 
-async function callHandler() {
+async function callHandler(query?: NextApiRequest["query"]) {
   const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
     method: "GET",
+    query,
   });
   await handler(req, res);
   return res;
@@ -55,6 +60,7 @@ describe("public readiness", () => {
   beforeEach(() => {
     mocks.analyticsBackend = "doris";
     mocks.checkAnalyticsReadiness.mockReset();
+    mocks.runtimeReady.mockReset().mockResolvedValue(true);
   });
 
   it("returns a sanitized 503 when Doris schema readiness fails", async () => {
@@ -74,12 +80,39 @@ describe("public readiness", () => {
     });
   });
 
-  it("does not probe Doris before the composition-root switch", async () => {
+  it("checks the runtime without probing Doris when ClickHouse is selected", async () => {
     mocks.analyticsBackend = "clickhouse";
 
     const res = await callHandler();
 
     expect(res._getStatusCode()).toBe(200);
+    expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
+    expect(mocks.runtimeReady).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the caller expects the other analytics backend", async () => {
+    mocks.analyticsBackend = "clickhouse";
+
+    const res = await callHandler({ analyticsBackend: "doris" });
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(res._getJSONData()).toMatchObject({
+      status: "Expected analytics backend is not selected",
+    });
+    expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
+    expect(mocks.runtimeReady).not.toHaveBeenCalled();
+  });
+
+  it("fails readiness for either backend when the runtime lease is not ready", async () => {
+    mocks.analyticsBackend = "clickhouse";
+    mocks.runtimeReady.mockResolvedValue(false);
+
+    const res = await callHandler();
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(res._getJSONData()).toMatchObject({
+      status: "Analytics runtime readiness check failed",
+    });
     expect(mocks.checkAnalyticsReadiness).not.toHaveBeenCalled();
   });
 });

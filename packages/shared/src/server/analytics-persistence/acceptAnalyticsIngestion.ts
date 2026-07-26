@@ -1,10 +1,28 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { PrismaClient } from "@prisma/client";
+import type { AnalyticsIngestionOperation, PrismaClient } from "@prisma/client";
 
-import { createAnalyticsIngestionReceipt } from "../repositories/analyticsIngestionOperations";
+import { prisma } from "../../db";
+import {
+  AnalyticsIngestionReceiptConflictError,
+  createAnalyticsIngestionReceipt,
+  findAnalyticsIngestionOperationForProject,
+} from "../repositories/analyticsIngestionOperations";
 import { safeBlobKeySegment } from "../services/safeBlobKeySegment";
 import type { StorageService } from "../services/StorageService";
+import {
+  lockAnalyticsAdmission,
+  lockLegacyAnalyticsAdmission,
+  type AnalyticsRuntimeAdmissionContext,
+} from "./analyticsBackendAdmission";
+import type { AnalyticsCapabilityName } from "./analyticsCapabilities";
+import {
+  analyticsDurableProvenanceFromRecord,
+  analyticsProducerProvenanceFromAdmission,
+  deserializeAnalyticsDurableProvenance,
+  serializeAnalyticsDurableProvenance,
+  type AnalyticsDurableProvenance,
+} from "./analyticsDurableProvenance";
 import { AnalyticsPersistenceError } from "./errors";
 
 const RAW_FORMAT_VERSION = 1;
@@ -18,6 +36,7 @@ export type RawAnalyticsIngestionEnvelope = {
     | "otlp"
     | "score"
     | "annotation-score"
+    | "dataset-run-item"
     | "internal-event"
     | "legacy-event";
   readonly payload: unknown;
@@ -37,6 +56,7 @@ export type RawAnalyticsIngestionReceiptSeed = {
   readonly acceptedAtNanos: bigint;
   readonly canonicalizerVersion: string;
   readonly schemaVersion: number;
+  readonly analyticsProvenance?: AnalyticsDurableProvenance;
 };
 
 export type DecodedRawAnalyticsIngestionEnvelope =
@@ -46,6 +66,25 @@ export type DecodedRawAnalyticsIngestionEnvelope =
 
 function validationError(): AnalyticsPersistenceError {
   return new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
+}
+
+function analyticsDeploymentProvenanceMatches(
+  existing: AnalyticsDurableProvenance | null | undefined,
+  current: AnalyticsDurableProvenance | null | undefined,
+): boolean {
+  if (!existing || !current) return !existing && !current;
+
+  // 重试可落到同一 deployment 的另一台 Web；原始 producer 仍由 raw envelope 保留。
+  return (
+    existing.analyticsBackend === current.analyticsBackend &&
+    existing.deploymentGeneration === current.deploymentGeneration &&
+    existing.workloadEpochFingerprint === current.workloadEpochFingerprint &&
+    existing.runtimeContractVersion === current.runtimeContractVersion &&
+    existing.capability === current.capability &&
+    existing.capabilityActivationGeneration ===
+      current.capabilityActivationGeneration &&
+    existing.capabilityContractVersion === current.capabilityContractVersion
+  );
 }
 
 export function encodeRawAnalyticsIngestionEnvelope(
@@ -58,6 +97,7 @@ export function encodeRawAnalyticsIngestionEnvelope(
       "otlp",
       "score",
       "annotation-score",
+      "dataset-run-item",
       "internal-event",
       "legacy-event",
     ].includes(envelope.source) ||
@@ -91,6 +131,13 @@ export function encodeRawAnalyticsIngestionEnvelope(
               acceptedAtNanos: receipt.acceptedAtNanos.toString(),
               canonicalizerVersion: receipt.canonicalizerVersion,
               schemaVersion: receipt.schemaVersion,
+              ...(receipt.analyticsProvenance
+                ? {
+                    analyticsProvenance: serializeAnalyticsDurableProvenance(
+                      receipt.analyticsProvenance,
+                    ),
+                  }
+                : {}),
             },
           }
         : {}),
@@ -124,6 +171,7 @@ export function decodeRawAnalyticsIngestionEnvelope(
       (envelope.source !== "otlp" &&
         envelope.source !== "score" &&
         envelope.source !== "annotation-score" &&
+        envelope.source !== "dataset-run-item" &&
         envelope.source !== "internal-event" &&
         envelope.source !== "legacy-event") ||
       (envelope.isLangfuseInternal !== undefined &&
@@ -171,7 +219,16 @@ function assertReceiptSeed(seed: RawAnalyticsIngestionReceiptSeed): void {
     seed.acceptedAtNanos / 1_000_000n !== BigInt(seed.acceptedAt.getTime()) ||
     !seed.canonicalizerVersion ||
     !Number.isSafeInteger(seed.schemaVersion) ||
-    seed.schemaVersion <= 0
+    seed.schemaVersion <= 0 ||
+    (seed.analyticsProvenance !== undefined &&
+      (() => {
+        try {
+          serializeAnalyticsDurableProvenance(seed.analyticsProvenance);
+          return false;
+        } catch {
+          return true;
+        }
+      })())
   ) {
     throw validationError();
   }
@@ -205,6 +262,13 @@ function decodeReceiptSeed(
       acceptedAtNanos: BigInt(seed.acceptedAtNanos),
       canonicalizerVersion: seed.canonicalizerVersion,
       schemaVersion: seed.schemaVersion,
+      ...(seed.analyticsProvenance === undefined
+        ? {}
+        : {
+            analyticsProvenance: deserializeAnalyticsDurableProvenance(
+              seed.analyticsProvenance,
+            ),
+          }),
     };
     assertReceiptSeed(decoded);
     return decoded;
@@ -242,6 +306,125 @@ function normalizePrefix(prefix: string): string {
     : normalized;
 }
 
+function rawConflict(operationId: string): AnalyticsPersistenceError {
+  return new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
+    tags: { operationId, phase: "raw_reconciliation" },
+  });
+}
+
+const PERMANENT_RAW_RECEIPT_ERRORS = new Set([
+  "Project not found",
+  "Analytics ingestion is fenced by project deletion",
+  "Analytics ingestion admission does not match provenance",
+  "Analytics backend deployment generation changed",
+  "Analytics ingestion durable provenance changed",
+  "Legacy unstamped analytics work is fenced by deployment",
+  "Managed analytics ingestion requires provenance",
+]);
+
+function isPermanentRawReceiptError(error: unknown): boolean {
+  return (
+    error instanceof AnalyticsIngestionReceiptConflictError ||
+    (error instanceof AnalyticsPersistenceError && !error.retryable) ||
+    (error instanceof Error && PERMANENT_RAW_RECEIPT_ERRORS.has(error.message))
+  );
+}
+
+function validateExistingRaw(input: {
+  readonly body: string;
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly sourceOperationId: string;
+  readonly canonicalizerVersion: string;
+  readonly schemaVersion: number;
+  readonly producerProvenance: AnalyticsDurableProvenance | null;
+  readonly envelope: RawAnalyticsIngestionEnvelope;
+}): RawAnalyticsIngestionReceiptSeed {
+  let decoded: DecodedRawAnalyticsIngestionEnvelope;
+  try {
+    decoded = decodeRawAnalyticsIngestionEnvelope(input.body);
+  } catch {
+    throw rawConflict(input.operationId);
+  }
+  const seed = decoded.receipt;
+  const existingEnvelope: RawAnalyticsIngestionEnvelope = {
+    formatVersion: decoded.formatVersion,
+    source: decoded.source,
+    payload: decoded.payload,
+    ...(decoded.isLangfuseInternal === true
+      ? { isLangfuseInternal: true }
+      : {}),
+    attribution: decoded.attribution,
+  };
+  if (
+    !seed ||
+    seed.operationId !== input.operationId ||
+    seed.projectId !== input.projectId ||
+    seed.sourceOperationId !== input.sourceOperationId ||
+    seed.canonicalizerVersion !== input.canonicalizerVersion ||
+    seed.schemaVersion !== input.schemaVersion ||
+    !analyticsDeploymentProvenanceMatches(
+      seed.analyticsProvenance,
+      input.producerProvenance,
+    ) ||
+    encodeRawAnalyticsIngestionEnvelope(existingEnvelope, seed) !==
+      input.body ||
+    sha256(encodeRawAnalyticsIngestionEnvelope(existingEnvelope)) !==
+      sha256(encodeRawAnalyticsIngestionEnvelope(input.envelope))
+  ) {
+    throw rawConflict(input.operationId);
+  }
+  return seed;
+}
+
+function receiptSeedFromOperation(
+  operation: AnalyticsIngestionOperation,
+): RawAnalyticsIngestionReceiptSeed {
+  const provenance = analyticsDurableProvenanceFromRecord(operation);
+  return {
+    operationId: operation.id,
+    projectId: operation.projectId,
+    sourceOperationId: operation.sourceOperationId,
+    acceptedAt: operation.acceptedAt,
+    acceptedAtNanos: operation.acceptedAtNanos,
+    canonicalizerVersion: operation.canonicalizerVersion,
+    schemaVersion: operation.schemaVersion,
+    ...(provenance ? { analyticsProvenance: provenance } : {}),
+  };
+}
+
+export async function captureAnalyticsFoundationProvenance(input: {
+  readonly client?: PrismaClient;
+  readonly admissionContext: AnalyticsRuntimeAdmissionContext | null;
+  readonly requiredContract: {
+    readonly schemaVersion: number;
+    readonly canonicalizerVersion: string;
+  };
+  readonly capability?: AnalyticsCapabilityName;
+}): Promise<AnalyticsDurableProvenance | null> {
+  const client = input.client ?? prisma;
+  return client.$transaction(async (transaction) => {
+    if (!input.admissionContext) {
+      await lockLegacyAnalyticsAdmission(transaction);
+      return null;
+    }
+    const admission = await lockAnalyticsAdmission({
+      transaction,
+      runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+      expectedBackend: input.admissionContext.backend,
+      expectedDeploymentGeneration: input.admissionContext.deploymentGeneration,
+      ...(input.capability
+        ? { capability: input.capability, action: "externalProducer" as const }
+        : { action: "foundation" as const }),
+      requiredContract: input.requiredContract,
+    });
+    return analyticsProducerProvenanceFromAdmission(
+      admission,
+      input.capability,
+    );
+  });
+}
+
 export async function acceptAnalyticsIngestion(input: {
   readonly projectId: string;
   readonly envelope: RawAnalyticsIngestionEnvelope;
@@ -254,7 +437,11 @@ export async function acceptAnalyticsIngestion(input: {
   readonly acceptedAt?: Date;
   readonly acceptedAtNanos?: bigint;
   readonly rawPrefix?: string;
+  readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
+  readonly capability?: AnalyticsCapabilityName;
+  readonly captureFoundationProvenance?: typeof captureAnalyticsFoundationProvenance;
   readonly createReceipt?: typeof createAnalyticsIngestionReceipt;
+  readonly findReceipt?: typeof findAnalyticsIngestionOperationForProject;
 }): Promise<{ readonly operationId: string; readonly status: "ACCEPTED" }> {
   const operationId = input.operationId ?? randomUUID();
   const acceptedAt = input.acceptedAt ?? new Date();
@@ -271,8 +458,22 @@ export async function acceptAnalyticsIngestion(input: {
   ) {
     throw validationError();
   }
+  // 在 admission 或 storage I/O 前先拒绝无法稳定序列化的 envelope。
+  encodeRawAnalyticsIngestionEnvelope(input.envelope);
 
   const sourceOperationId = input.sourceOperationId ?? operationId;
+  const admissionContext = input.admissionContext ?? null;
+  const producerProvenance = await (
+    input.captureFoundationProvenance ?? captureAnalyticsFoundationProvenance
+  )({
+    client: input.client,
+    admissionContext,
+    requiredContract: {
+      schemaVersion: input.schemaVersion,
+      canonicalizerVersion: input.canonicalizerVersion,
+    },
+    ...(input.capability ? { capability: input.capability } : {}),
+  });
   let receiptSeed: RawAnalyticsIngestionReceiptSeed = {
     operationId,
     projectId: input.projectId,
@@ -281,63 +482,59 @@ export async function acceptAnalyticsIngestion(input: {
     acceptedAtNanos,
     canonicalizerVersion: input.canonicalizerVersion,
     schemaVersion: input.schemaVersion,
+    ...(producerProvenance ? { analyticsProvenance: producerProvenance } : {}),
   };
-  const body = encodeRawAnalyticsIngestionEnvelope(input.envelope, receiptSeed);
-  assertRawAnalyticsBodySize(body);
-  let persistedBody = body;
   const rawObjectKey = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/${safeBlobKeySegment(input.projectId)}/${safeBlobKeySegment(operationId)}.json`;
-  const uploadResult = await input.storageService.uploadFileIfAbsent({
-    fileName: rawObjectKey,
-    fileType: "application/json",
-    data: body,
-  });
-  if (uploadResult === "already_exists") {
-    const existing = await input.storageService.downloadIfExists(rawObjectKey);
-    if (existing === null) {
-      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
-        tags: { operationId, phase: "raw_reconciliation" },
-      });
-    }
-    let decoded: DecodedRawAnalyticsIngestionEnvelope;
-    try {
-      decoded = decodeRawAnalyticsIngestionEnvelope(existing);
-    } catch {
-      throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
-        tags: { operationId, phase: "raw_reconciliation" },
-      });
-    }
-    const existingSeed = decoded.receipt;
-    const existingEnvelope: RawAnalyticsIngestionEnvelope = {
-      formatVersion: decoded.formatVersion,
-      source: decoded.source,
-      payload: decoded.payload,
-      ...(decoded.isLangfuseInternal === true
-        ? { isLangfuseInternal: true }
-        : {}),
-      attribution: decoded.attribution,
-    };
-    if (
-      !existingSeed ||
-      existingSeed.operationId !== operationId ||
-      existingSeed.projectId !== input.projectId ||
-      existingSeed.sourceOperationId !== sourceOperationId ||
-      existingSeed.canonicalizerVersion !== input.canonicalizerVersion ||
-      existingSeed.schemaVersion !== input.schemaVersion ||
-      encodeRawAnalyticsIngestionEnvelope(existingEnvelope, existingSeed) !==
-        existing ||
-      sha256(encodeRawAnalyticsIngestionEnvelope(existingEnvelope)) !==
-        sha256(encodeRawAnalyticsIngestionEnvelope(input.envelope))
-    ) {
-      throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
-        tags: { operationId, phase: "raw_reconciliation" },
-      });
-    }
-    receiptSeed = existingSeed;
-    persistedBody = existing;
-  }
-
   const createReceipt = input.createReceipt ?? createAnalyticsIngestionReceipt;
-  await createReceipt({
+  const existingRaw = await input.storageService.downloadIfExists(rawObjectKey);
+  let existingReceipt: AnalyticsIngestionOperation | null = null;
+  if (existingRaw !== null) {
+    receiptSeed = validateExistingRaw({
+      body: existingRaw,
+      operationId,
+      projectId: input.projectId,
+      sourceOperationId,
+      canonicalizerVersion: input.canonicalizerVersion,
+      schemaVersion: input.schemaVersion,
+      producerProvenance,
+      envelope: input.envelope,
+    });
+  } else {
+    existingReceipt = await (
+      input.findReceipt ?? findAnalyticsIngestionOperationForProject
+    )({
+      client: input.client,
+      operationId,
+      projectId: input.projectId,
+    });
+    if (existingReceipt) {
+      receiptSeed = receiptSeedFromOperation(existingReceipt);
+      if (
+        existingReceipt.rawObjectKey !== rawObjectKey ||
+        existingReceipt.sourceOperationId !== sourceOperationId ||
+        existingReceipt.canonicalizerVersion !== input.canonicalizerVersion ||
+        existingReceipt.schemaVersion !== input.schemaVersion ||
+        !analyticsDeploymentProvenanceMatches(
+          receiptSeed.analyticsProvenance,
+          producerProvenance,
+        )
+      ) {
+        throw rawConflict(operationId);
+      }
+    }
+  }
+  const persistedBody = encodeRawAnalyticsIngestionEnvelope(
+    input.envelope,
+    receiptSeed,
+  );
+  assertRawAnalyticsBodySize(persistedBody);
+  if (
+    existingReceipt &&
+    existingReceipt.sourceChecksum !== sha256(persistedBody)
+  ) {
+    throw rawConflict(operationId);
+  }
+  const receipt = {
     client: input.client,
     operationId: receiptSeed.operationId,
     projectId: receiptSeed.projectId,
@@ -348,12 +545,36 @@ export async function acceptAnalyticsIngestion(input: {
     acceptedAtNanos: receiptSeed.acceptedAtNanos,
     canonicalizerVersion: receiptSeed.canonicalizerVersion,
     schemaVersion: receiptSeed.schemaVersion,
+    producerProvenance: receiptSeed.analyticsProvenance ?? null,
+    admissionContext,
     recoverableUntil: new Date(
       receiptSeed.acceptedAt.getTime() + REPLAY_HORIZON_MS,
     ),
     statusExpiresAt: new Date(
       receiptSeed.acceptedAt.getTime() + STATUS_RETENTION_MS,
     ),
+  };
+  if (existingRaw === null) {
+    await createReceipt({ ...receipt, publishReady: false });
+    const uploadResult = await input.storageService.uploadFileIfAbsent({
+      fileName: rawObjectKey,
+      fileType: "application/json",
+      data: persistedBody,
+    });
+    if (uploadResult === "already_exists") {
+      const winner = await input.storageService.downloadIfExists(rawObjectKey);
+      if (winner === null) {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: { operationId, phase: "raw_reconciliation" },
+        });
+      }
+      if (winner !== persistedBody) throw rawConflict(operationId);
+    }
+  }
+  await createReceipt({
+    ...receipt,
+    publishReady: true,
+    rawArtifactVerified: true,
   });
   return { operationId, status: "ACCEPTED" };
 }
@@ -363,23 +584,63 @@ export async function reconcileRawAnalyticsIngestionReceipts(input: {
   readonly client?: PrismaClient;
   readonly rawPrefix?: string;
   readonly limit?: number;
+  readonly cursor?: string;
+  readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly createReceipt?: typeof createAnalyticsIngestionReceipt;
+  readonly findExistingRawObjectKeys?: (
+    rawObjectKeys: readonly string[],
+  ) => Promise<ReadonlySet<string>>;
 }): Promise<{
   readonly scanned: number;
   readonly recovered: number;
   readonly existing: number;
   readonly invalid: number;
+  readonly nextCursor?: string;
 }> {
   const limit = input.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
     throw new TypeError("Invalid raw analytics reconciliation limit");
   }
   const prefix = `${normalizePrefix(input.rawPrefix ?? "")}analytics-ingestion/raw/`;
-  const objects = (await input.storageService.listFiles(prefix)).slice(
-    0,
+  const page = await input.storageService.listFilesPage(prefix, {
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
     limit,
+  });
+  const listedObjects = page.files.sort(
+    (left, right) =>
+      left.createdAt.getTime() - right.createdAt.getTime() ||
+      left.file.localeCompare(right.file),
   );
   const createReceipt = input.createReceipt ?? createAnalyticsIngestionReceipt;
+  const findExistingRawObjectKeys =
+    input.findExistingRawObjectKeys ??
+    (input.createReceipt
+      ? null
+      : async (rawObjectKeys: readonly string[]) => {
+          const client = input.client ?? prisma;
+          const existing = new Set<string>();
+          for (let offset = 0; offset < rawObjectKeys.length; offset += 500) {
+            const rows = await client.analyticsIngestionOperation.findMany({
+              where: {
+                rawObjectKey: {
+                  in: rawObjectKeys.slice(offset, offset + 500),
+                },
+                outboxV2: { isNot: null },
+              },
+              select: { rawObjectKey: true },
+            });
+            for (const row of rows) existing.add(row.rawObjectKey);
+          }
+          return existing;
+        });
+  const existingRawObjectKeys = findExistingRawObjectKeys
+    ? await findExistingRawObjectKeys(
+        listedObjects.map((object) => object.file),
+      )
+    : new Set<string>();
+  const objects = listedObjects
+    .filter((object) => !existingRawObjectKeys.has(object.file))
+    .slice(0, limit);
   let recovered = 0;
   let existing = 0;
   let invalid = 0;
@@ -404,25 +665,44 @@ export async function reconcileRawAnalyticsIngestionReceipts(input: {
       invalid += 1;
       continue;
     }
-    const result = await createReceipt({
-      client: input.client,
-      operationId: seed.operationId,
-      projectId: seed.projectId,
-      sourceOperationId: seed.sourceOperationId,
-      sourceChecksum: sha256(body),
-      rawObjectKey: object.file,
-      acceptedAt: seed.acceptedAt,
-      acceptedAtNanos: seed.acceptedAtNanos,
-      canonicalizerVersion: seed.canonicalizerVersion,
-      schemaVersion: seed.schemaVersion,
-      recoverableUntil: new Date(seed.acceptedAt.getTime() + REPLAY_HORIZON_MS),
-      statusExpiresAt: new Date(
-        seed.acceptedAt.getTime() + STATUS_RETENTION_MS,
-      ),
-    });
+    let result: Awaited<ReturnType<typeof createReceipt>>;
+    try {
+      result = await createReceipt({
+        client: input.client,
+        operationId: seed.operationId,
+        projectId: seed.projectId,
+        sourceOperationId: seed.sourceOperationId,
+        sourceChecksum: sha256(body),
+        rawObjectKey: object.file,
+        acceptedAt: seed.acceptedAt,
+        acceptedAtNanos: seed.acceptedAtNanos,
+        canonicalizerVersion: seed.canonicalizerVersion,
+        schemaVersion: seed.schemaVersion,
+        producerProvenance: seed.analyticsProvenance ?? null,
+        admissionContext: input.admissionContext ?? null,
+        recoverableUntil: new Date(
+          seed.acceptedAt.getTime() + REPLAY_HORIZON_MS,
+        ),
+        statusExpiresAt: new Date(
+          seed.acceptedAt.getTime() + STATUS_RETENTION_MS,
+        ),
+        publishReady: true,
+        rawArtifactVerified: true,
+      });
+    } catch (error) {
+      if (!isPermanentRawReceiptError(error)) throw error;
+      invalid += 1;
+      continue;
+    }
     if (result.created) recovered += 1;
     else existing += 1;
   }
 
-  return { scanned: objects.length, recovered, existing, invalid };
+  return {
+    scanned: objects.length,
+    recovered,
+    existing,
+    invalid,
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+  };
 }

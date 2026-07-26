@@ -10,11 +10,17 @@ import {
   type AnalyticsDeletionRequester,
 } from "./repositories/analyticsDeletionOperations";
 import { isDorisAnalyticsBackend } from "./repositories/telemetry/doris/runtime";
+import {
+  analyticsDurableProvenanceFromRecord,
+  serializeAnalyticsDurableProvenance,
+  type AnalyticsRuntimeAdmissionContext,
+} from "./analytics-persistence";
 
 export interface TraceDeletionProcessorOptions {
   delayMs?: number; // Default from LANGFUSE_TRACE_DELETE_DELAY_MS env var
   organizationId?: string;
   requester?: AnalyticsDeletionRequester;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
 }
 
 export type TraceDeletionDispatch = {
@@ -65,22 +71,29 @@ export async function traceDeletionProcessor(
   }
 
   try {
-    const project = isDorisAnalyticsBackend()
-      ? await prisma.project.findUniqueOrThrow({
-          where: { id: projectId },
-          select: { orgId: true },
-        })
-      : null;
-    const scheduled = project
-      ? await scheduleTraceDeletionOperations({
-          projectId,
-          organizationId: options.organizationId ?? project.orgId,
-          traceIds,
-          requester: options.requester ?? {
-            principalType: "system",
-            principalId: "trace-deletion-processor",
-          },
-        })
+    const isDoris = isDorisAnalyticsBackend();
+    if (isDoris && !options.analyticsAdmissionContext) {
+      throw new Error(
+        "Doris analytics deletion requires managed runtime admission",
+      );
+    }
+    const scheduled = isDoris
+      ? await (async () => {
+          const project = await prisma.project.findUniqueOrThrow({
+            where: { id: projectId },
+            select: { orgId: true },
+          });
+          return scheduleTraceDeletionOperations({
+            projectId,
+            organizationId: options.organizationId ?? project.orgId,
+            traceIds,
+            requester: options.requester ?? {
+              principalType: "system",
+              principalId: "trace-deletion-processor",
+            },
+            analyticsAdmissionContext: options.analyticsAdmissionContext,
+          });
+        })()
       : [];
 
     // Create pending deletion records for all traces
@@ -113,11 +126,21 @@ export async function traceDeletionProcessor(
           ...(scheduled.length > 0
             ? {
                 deletionOperations: scheduled.map(
-                  ({ operation, traceId, generation }) => ({
-                    operationId: operation.id,
-                    traceId,
-                    generation: generation.toString(),
-                  }),
+                  ({ operation, traceId, generation }) => {
+                    const provenance =
+                      analyticsDurableProvenanceFromRecord(operation);
+                    return {
+                      operationId: operation.id,
+                      traceId,
+                      generation: generation.toString(),
+                      ...(provenance
+                        ? {
+                            analyticsProvenance:
+                              serializeAnalyticsDurableProvenance(provenance),
+                          }
+                        : {}),
+                    };
+                  },
                 ),
               }
             : {}),
@@ -127,12 +150,15 @@ export async function traceDeletionProcessor(
         delay: delayMs,
       },
     );
-    return scheduled.map(({ operation, traceId }) => ({
-      deletionOperationId: operation.id,
-      traceId,
-      status: operation.status.toLowerCase() as TraceDeletionDispatch["status"],
-      logicallyInvisible: operation.logicallyInvisible,
-    }));
+    return isDoris
+      ? scheduled.map(({ operation, traceId }) => ({
+          deletionOperationId: operation.id,
+          traceId,
+          status:
+            operation.status.toLowerCase() as TraceDeletionDispatch["status"],
+          logicallyInvisible: operation.logicallyInvisible,
+        }))
+      : [];
   } catch (error) {
     logger.error(`Failed to process trace deletion for project ${projectId}`, {
       projectId,

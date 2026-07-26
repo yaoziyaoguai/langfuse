@@ -9,6 +9,7 @@ vi.mock("../analytics-persistence", () => ({
   acceptAnalyticsIngestion: mocks.acceptAnalyticsIngestion,
   CURRENT_ANALYTICS_CANONICALIZER_VERSION: "1",
   CURRENT_ANALYTICS_SCHEMA_VERSION: 1,
+  NEXT_ANALYTICS_SCHEMA_VERSION: 2,
 }));
 
 vi.mock("../instrumentation", () => ({
@@ -42,6 +43,11 @@ const auth = {
 } satisfies AuthHeaderValidVerificationResultIngestion;
 
 const options = {
+  analyticsAdmissionContext: {
+    runtimeLeaseId: "web-lease",
+    backend: "doris" as const,
+    deploymentGeneration: 7n,
+  },
   attribution: {
     ingestionApiKey: "pk-test",
     ingestionSdkName: "javascript",
@@ -78,8 +84,90 @@ describe("processEventBatch", () => {
     expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "project-1",
+        schemaVersion: 1,
         envelope: expect.objectContaining({
           source: "score",
+          payload: [expect.objectContaining({ id: event.id })],
+        }),
+        admissionContext: options.analyticsAdmissionContext,
+      }),
+    );
+  });
+
+  it("rejects dataset-run scores before mutation while continuing plain scores", async () => {
+    const plainScore = {
+      id: "score-event-plain",
+      type: "score-create",
+      timestamp: "2026-07-18T14:00:00.123Z",
+      body: {
+        id: "score-plain",
+        name: "quality",
+        value: 1,
+        traceId: "trace-1",
+      },
+    };
+    const datasetRunScore = {
+      id: "score-event-run",
+      type: "score-create",
+      timestamp: "2026-07-18T14:00:00.123Z",
+      body: {
+        id: "score-run",
+        name: "quality",
+        value: 1,
+        datasetRunId: "run-1",
+      },
+    };
+
+    await expect(
+      processEventBatch([plainScore, datasetRunScore], auth, options),
+    ).resolves.toMatchObject({
+      successes: [{ id: plainScore.id, status: 201 }],
+      errors: [
+        expect.objectContaining({
+          id: datasetRunScore.id,
+          status: 501,
+          code: "R1B_EXPERIMENTS_UNAVAILABLE",
+        }),
+      ],
+    });
+    expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledOnce();
+    expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 1,
+        envelope: expect.objectContaining({
+          payload: [expect.objectContaining({ id: plainScore.id })],
+        }),
+      }),
+    );
+  });
+
+  it("accepts dataset-run scores with schema 2 and capability provenance", async () => {
+    const event = {
+      id: "score-event-run",
+      type: "score-create",
+      timestamp: "2026-07-18T14:00:00.123Z",
+      body: {
+        id: "score-run",
+        name: "quality",
+        value: 1,
+        datasetRunId: "run-1",
+      },
+    };
+
+    await expect(
+      processEventBatch([event], auth, {
+        ...options,
+        enableDorisDatasetRunIngestion: true,
+      }),
+    ).resolves.toEqual({
+      successes: [{ id: event.id, status: 201 }],
+      errors: [],
+    });
+    expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 2,
+        capability: "datasetRunIngestion",
+        envelope: expect.objectContaining({
           payload: [expect.objectContaining({ id: event.id })],
         }),
       }),
@@ -109,6 +197,7 @@ describe("processEventBatch", () => {
           source: "legacy-event",
           payload: [expect.objectContaining({ id: event.id })],
         }),
+        admissionContext: options.analyticsAdmissionContext,
       }),
     );
   });
@@ -143,5 +232,42 @@ describe("processEventBatch", () => {
       ],
     });
     expect(mocks.acceptAnalyticsIngestion).not.toHaveBeenCalled();
+  });
+
+  it("accepts dataset-run children only when the outer capability gate is open", async () => {
+    const event = {
+      id: "dataset-event-1",
+      type: "dataset-run-item-create",
+      timestamp: "2026-07-18T14:00:00.123Z",
+      body: {
+        id: "dataset-run-item-1",
+        traceId: "trace-1",
+        datasetId: "dataset-1",
+        runId: "run-1",
+        datasetItemId: "item-1",
+      },
+    };
+
+    await expect(
+      processEventBatch([event], auth, {
+        ...options,
+        isLangfuseInternal: true,
+        enableDorisDatasetRunIngestion: true,
+      }),
+    ).resolves.toEqual({
+      successes: [{ id: event.id, status: 201 }],
+      errors: [],
+    });
+    expect(mocks.acceptAnalyticsIngestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        envelope: expect.objectContaining({
+          source: "dataset-run-item",
+          payload: [expect.objectContaining({ id: event.id })],
+        }),
+        schemaVersion: 2,
+        admissionContext: options.analyticsAdmissionContext,
+      }),
+    );
   });
 });

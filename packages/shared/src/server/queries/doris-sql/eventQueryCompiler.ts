@@ -7,7 +7,10 @@ import {
   buildSearchPlan,
   type AnalyticsTimeRange,
 } from "../logical/searchPlan";
-import { compileDorisEventFilters } from "./filterCompiler";
+import {
+  compileDorisEventFilters,
+  compileDorisEventScoreFilters,
+} from "./filterCompiler";
 import { compileDorisSearch } from "./searchCompiler";
 
 const LIST_PROJECTION = `
@@ -37,7 +40,7 @@ const LIST_PROJECTION = `
   e.updated_at,
   e.provided_model_name,
   e.internal_model_id,
-  e.model_parameters AS model_parameters,
+  COALESCE(e.model_parameters_json, CAST(e.model_parameters AS STRING)) AS model_parameters,
   e.prompt_id,
   e.prompt_name,
   e.prompt_version,
@@ -45,10 +48,10 @@ const LIST_PROJECTION = `
   e.total_output_tokens,
   e.total_cost,
   e.tags AS tags,
-  e.usage_details AS usage_details,
-  e.cost_details AS cost_details,
-  e.provided_usage_details AS provided_usage_details,
-  e.provided_cost_details AS provided_cost_details,
+  COALESCE(e.usage_details_json, CAST(e.usage_details AS STRING)) AS usage_details,
+  COALESCE(e.cost_details_json, CAST(e.cost_details AS STRING)) AS cost_details,
+  COALESCE(e.provided_usage_details_json, CAST(e.provided_usage_details AS STRING)) AS provided_usage_details,
+  COALESCE(e.provided_cost_details_json, CAST(e.provided_cost_details AS STRING)) AS provided_cost_details,
   CARDINALITY(JSON_KEYS(e.tool_definitions)) AS tool_definitions_count,
   CARDINALITY(e.tool_calls) AS tool_calls_count,
   e.input_preview AS input_preview,
@@ -57,10 +60,18 @@ const LIST_PROJECTION = `
 const DETAIL_PROJECTION = `${LIST_PROJECTION},
   e.input AS input,
   e.output AS output,
-  e.metadata AS metadata,
-  e.tool_definitions AS tool_definitions,
+  COALESCE(e.metadata_json, CAST(e.metadata AS STRING)) AS metadata,
+  COALESCE(e.tool_definitions_json, CAST(e.tool_definitions AS STRING)) AS tool_definitions,
   e.tool_calls AS tool_calls,
-  e.tool_call_names AS tool_call_names`;
+  e.tool_call_names AS tool_call_names,
+  e.experiment_id AS experiment_id,
+  e.experiment_name AS experiment_name,
+  e.experiment_description AS experiment_description,
+  e.experiment_dataset_id AS experiment_dataset_id,
+  e.experiment_item_id AS experiment_item_id,
+  e.experiment_item_expected_output AS experiment_item_expected_output,
+  COALESCE(e.experiment_item_metadata_json, CAST(e.experiment_item_metadata AS STRING)) AS experiment_item_metadata,
+  e.experiment_item_root_span_id AS experiment_item_root_span_id`;
 
 function utcDate(value: Date): string {
   return value.toISOString().slice(0, 10);
@@ -146,11 +157,11 @@ const EVENT_ORDER_BY_EXPRESSIONS: Readonly<
     "COALESCE(e.total_input_tokens, 0) + COALESCE(e.total_output_tokens, 0)",
   inputCost: "JSON_EXTRACT_DOUBLE(e.cost_details, '$.input')",
   outputCost: "JSON_EXTRACT_DOUBLE(e.cost_details, '$.output')",
-  latency: "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0",
+  latency: "MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0",
   timeToFirstToken:
-    "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.completion_start_time) / 1000000.0",
+    "MICROSECONDS_DIFF(e.completion_start_time, e.start_time) / 1000000.0",
   tokensPerSecond:
-    "e.total_output_tokens / NULLIF(TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time) / 1000000.0, 0)",
+    "e.total_output_tokens / NULLIF(MICROSECONDS_DIFF(e.end_time, e.start_time) / 1000000.0, 0)",
   toolDefinitions: "CARDINALITY(JSON_KEYS(e.tool_definitions))",
   toolCalls: "CARDINALITY(e.tool_calls)",
   hasParentObservation:
@@ -171,6 +182,7 @@ type DorisVisibleEventScopeInput = {
   };
   readonly cursor?: DorisEventCursor;
   readonly partitionDates?: readonly string[];
+  readonly allowUnboundedFullContent?: boolean;
 };
 
 function eventFromSql(
@@ -206,6 +218,7 @@ export function compileDorisVisibleEventScope(
     range: input.range,
     search: input.search,
     filtersRequireFullContent: filterPlan.requiresFullContent,
+    allowUnboundedFullContent: input.allowUnboundedFullContent,
   });
   const params: unknown[] = [];
   const partitionDates = [...new Set(input.partitionDates ?? [])].sort();
@@ -242,6 +255,12 @@ export function compileDorisVisibleEventScope(
       `${aliases.traceDeletion}.trace_id IS NULL`,
       `${aliases.projectDeletion}.project_id IS NULL`,
       ...compileDorisEventFilters(aliasedFilters, bound),
+      ...compileDorisEventScoreFilters({
+        plans: filterPlan.scoreFilters,
+        eventAlias: aliases.event,
+        rangeFrom: range.from,
+        bound,
+      }),
     ];
     const search = compileDorisSearch(searchPlan, bound, aliases.event);
     if (search) predicates.push(search);

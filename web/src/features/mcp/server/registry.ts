@@ -17,12 +17,12 @@ import {
   COMMUNITY_CAPABILITIES,
   capabilityForMcpFeature,
   capabilityForMcpTool,
-  isCommunityCapabilityAvailable,
 } from "@/src/features/capabilities/communityAvailability";
 import { UnsupportedFeatureError } from "../core/errors";
 import { wrapErrorHandling } from "../core/error-formatting";
 import { env } from "@/src/env.mjs";
 import type { AnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { isCommunityCapabilityRuntimeAvailable } from "@/src/server/communityCapabilityRuntime";
 
 /**
  * Registered MCP tool
@@ -85,6 +85,7 @@ export class ToolRegistry {
 
   constructor(
     private readonly analyticsBackend: AnalyticsBackend = env.LANGFUSE_ANALYTICS_BACKEND,
+    private readonly isCapabilityAvailable = isCommunityCapabilityRuntimeAvailable,
   ) {}
 
   /**
@@ -135,7 +136,7 @@ export class ToolRegistry {
       const capability = capabilityForMcpFeature(feature.name);
       if (
         capability &&
-        !isCommunityCapabilityAvailable(capability, this.analyticsBackend)
+        !(await this.isCapabilityAvailable(capability, this.analyticsBackend))
       ) {
         for (const tool of feature.tools) definitions.push(tool.definition);
         continue;
@@ -182,7 +183,7 @@ export class ToolRegistry {
       capabilityForMcpTool(name) ?? capabilityForMcpFeature(feature.name);
     if (
       capability &&
-      !isCommunityCapabilityAvailable(capability, this.analyticsBackend)
+      !(await this.isCapabilityAvailable(capability, this.analyticsBackend))
     ) {
       return {
         ...tool,

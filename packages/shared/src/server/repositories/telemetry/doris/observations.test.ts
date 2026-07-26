@@ -102,6 +102,14 @@ describe("Doris observations repository", () => {
         tool_definitions: '{"search":"{}"}',
         tool_calls: '["search"]',
         tool_call_names: '["search"]',
+        experiment_id: "experiment-1",
+        experiment_name: "prompt experiment",
+        experiment_description: "compare prompts",
+        experiment_dataset_id: "dataset-1",
+        experiment_item_id: "item-1",
+        experiment_item_expected_output: '{"answer":"yes"}',
+        experiment_item_metadata: '{"segment":"paid"}',
+        experiment_item_root_span_id: "span-root",
       },
     ]);
     const repository = new DorisObservationsRepository({
@@ -118,6 +126,10 @@ describe("Doris observations repository", () => {
         output: "true",
         metadata: { region: "eu" },
         toolDefinitions: { search: "{}" },
+        experimentId: "experiment-1",
+        experimentName: "prompt experiment",
+        experimentItemExpectedOutput: '{"answer":"yes"}',
+        experimentItemMetadata: { segment: "paid" },
       }),
     );
     expect(locateObservation).toHaveBeenCalledWith({
@@ -127,6 +139,9 @@ describe("Doris observations repository", () => {
     });
     expect(query.mock.calls[0]?.[0]).toContain("e.partition_date >= ?");
     expect(query.mock.calls[0]?.[0]).toContain("e.span_id IN (?)");
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "e.experiment_item_expected_output AS experiment_item_expected_output",
+    );
     expect(query.mock.calls[0]?.[1]).toEqual(
       expect.arrayContaining(["project-1", "2026-07-17", "span-1"]),
     );
@@ -356,8 +371,9 @@ describe("Doris observations repository", () => {
       }),
     ).resolves.toEqual({ min: 0.5, max: 4, avg: 2.25, count: 8 });
     expect(query.mock.calls[0]?.[0]).toContain(
-      "TIMESTAMPDIFF(MICROSECOND, e.start_time, e.end_time)",
+      "MICROSECONDS_DIFF(e.end_time, e.start_time)",
     );
+    expect(query.mock.calls[0]?.[0]).not.toContain("TIMESTAMPDIFF(MICROSECOND");
     expect(query.mock.calls[0]?.[0]).toContain("e.project_id = ?");
   });
 
@@ -389,8 +405,10 @@ describe("Doris observations repository", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("rejects inactive experiment facets before issuing Doris SQL", async () => {
-    const query = vi.fn();
+  it("returns experiment facets and score-scoped facets from Doris", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValue([{ value: "experiment-1", count: "2" }]);
     const repository = new DorisObservationsRepository({ query });
 
     await expect(
@@ -398,11 +416,16 @@ describe("Doris observations repository", () => {
         projectId: "project-1",
         range,
         filters: [],
-        column: "experimentId" as "name",
+        column: "experimentId",
         limit: 10,
+        requireScore: {},
       }),
-    ).rejects.toMatchObject({ httpCode: 400 });
-    expect(query).not.toHaveBeenCalled();
+    ).resolves.toEqual([
+      { column: "experimentId", value: "experiment-1", count: 2 },
+    ]);
+    expect(query.mock.calls[0]?.[0]).toContain("e.experiment_id AS value");
+    expect(query.mock.calls[0]?.[0]).toContain("FROM scores_current s");
+    expect(query.mock.calls[0]?.[0]).toContain("s.trace_id = e.trace_id");
   });
 
   it("reads recent SDK attribution through the bounded visible event scope", async () => {
@@ -429,5 +452,54 @@ describe("Doris observations repository", () => {
     expect(query.mock.calls[0]?.[0]).toContain("e.`source` LIKE 'otel%'");
     expect(query.mock.calls[0]?.[0]).toContain("ORDER BY e.start_time DESC");
     expect(query.mock.calls[0]?.[0]).toContain("e.project_id = ?");
+  });
+
+  it("aggregates evaluator costs from visible generation metadata", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        evaluator_id: "evaluator-1",
+        total_cost: "0.75",
+        avg_cost: "0.25",
+        execution_count: "3",
+      },
+    ]);
+    const repository = new DorisObservationsRepository({ query });
+
+    await expect(
+      repository.evaluatorCostMetrics({
+        projectId: "project-1",
+        evaluatorIds: ["evaluator-1", "evaluator-2"],
+        now: new Date("2026-07-24T09:00:00.000Z"),
+      }),
+    ).resolves.toEqual([
+      {
+        evaluatorId: "evaluator-1",
+        totalCost: 0.75,
+        avgCost: 0.25,
+        executionCount: 3,
+      },
+    ]);
+
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "ELEMENT_AT(e.metadata, ?) AS STRING",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain("e.`type` = ?");
+    expect(query.mock.calls[0]?.[0]).toContain("SUM(total_cost)");
+    expect(query.mock.calls[0]?.[0]).toContain("AVG(total_cost)");
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "trace_deletion.trace_id IS NULL",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "project_deletion.project_id IS NULL",
+    );
+    expect(query.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        "job_configuration_id",
+        "project-1",
+        "GENERATION",
+        "evaluator-1",
+        "evaluator-2",
+      ]),
+    );
   });
 });

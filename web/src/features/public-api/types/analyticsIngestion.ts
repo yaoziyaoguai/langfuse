@@ -33,7 +33,12 @@ export const AnalyticsIngestionOperationResponse = z.union([
     candidates: z.array(
       z.object({
         candidateKey: z.string(),
-        entityType: z.enum(["EVENT", "SCORE", "FILE_REFERENCE"]),
+        entityType: z.enum([
+          "EVENT",
+          "SCORE",
+          "FILE_REFERENCE",
+          "DATASET_RUN_ITEM",
+        ]),
         disposition: z.enum([
           "PENDING",
           "LOAD_REQUIRED",
@@ -49,7 +54,12 @@ export const AnalyticsIngestionOperationResponse = z.union([
     loads: z.array(
       z.object({
         id: z.string(),
-        entityType: z.enum(["EVENT", "SCORE", "FILE_REFERENCE"]),
+        entityType: z.enum([
+          "EVENT",
+          "SCORE",
+          "FILE_REFERENCE",
+          "DATASET_RUN_ITEM",
+        ]),
         status: z.enum([
           "PENDING",
           "LOADING",

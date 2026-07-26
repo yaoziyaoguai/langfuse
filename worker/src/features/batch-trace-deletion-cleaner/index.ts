@@ -1,15 +1,12 @@
 import { prisma } from "@langfuse/shared/src/db";
 import {
-  isDorisAnalyticsBackend,
   logger,
   recordIncrement,
   traceException,
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
 import { PeriodicExclusiveRunner } from "../../utils/PeriodicExclusiveRunner";
-import { processClickhouseTraceDelete } from "../traces/processClickhouseTraceDelete";
-import { processPostgresTraceDelete } from "../traces/processPostgresTraceDelete";
-import { processAnalyticsTraceDeletionBatch } from "../traces/processAnalyticsTraceDeletionBatch";
+import { processLegacyTraceDeletionBatch } from "./processLegacyTraceDeletionBatch";
 
 const METRIC_PREFIX = "langfuse.batch_trace_deletion_cleaner";
 
@@ -20,15 +17,6 @@ interface ProjectWorkload {
   projectId: string;
   pendingCount: number;
 }
-
-type TraceDeletionBackend = "postgres" | "clickhouse" | "doris";
-type TraceDeletionFailure = {
-  backend: TraceDeletionBackend;
-  errorName: string;
-};
-
-const getErrorName = (error: unknown) =>
-  error instanceof Error ? error.name : typeof error;
 
 /**
  * BatchTraceDeletionCleaner handles periodic deletion of traces from pending_deletions.
@@ -164,60 +152,22 @@ export class BatchTraceDeletionCleaner extends PeriodicExclusiveRunner {
       count: traceIdsToDelete.length,
     });
 
-    const deletionTasks: Array<{
-      backend: TraceDeletionBackend;
-      promise: Promise<void>;
-    }> = isDorisAnalyticsBackend()
-      ? [
-          {
-            backend: "doris",
-            promise: processAnalyticsTraceDeletionBatch({
-              projectId,
-              traceIds: traceIdsToDelete,
-            }),
-          },
-        ]
-      : [
-          {
-            backend: "postgres",
-            promise: processPostgresTraceDelete(projectId, traceIdsToDelete),
-          },
-          {
-            backend: "clickhouse",
-            promise: processClickhouseTraceDelete(projectId, traceIdsToDelete),
-          },
-        ];
-    const settled = await Promise.allSettled(
-      deletionTasks.map(({ promise }) => promise),
-    );
-    const deletionResults = deletionTasks.map(({ backend }, index) => ({
-      backend,
-      result: settled[index]!,
-    }));
-
-    const failures: TraceDeletionFailure[] = deletionResults.flatMap(
-      ({ backend, result }) => {
-        if (result.status === "rejected") {
-          traceException(result.reason);
-          return [
-            {
-              backend,
-              errorName: getErrorName(result.reason),
-            },
-          ];
-        }
-
-        return [];
-      },
-    );
+    const failures = await processLegacyTraceDeletionBatch({
+      projectId,
+      traceIds: traceIdsToDelete,
+    });
 
     if (failures.length > 0) {
+      failures.forEach(({ reason }) => traceException(reason));
       recordIncrement(`${METRIC_PREFIX}.deletion_failures`, 1);
       logger.warn(`${this.name}: Trace deletion failed, will retry later`, {
         projectId,
         count: traceIdsToDelete.length,
         retryDelayMs: env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_INTERVAL_MS,
-        failures,
+        failures: failures.map(({ backend, errorName }) => ({
+          backend,
+          errorName,
+        })),
       });
       return false;
     }

@@ -9,12 +9,27 @@
     "DORIS_STREAM_LOAD_DATABASE",
     "DORIS_STREAM_LOAD_USER",
     "DORIS_STREAM_LOAD_PASSWORD",
+    "DORIS_LOCAL_DEV_MODE",
+    "DORIS_QUERY_USER",
+    "DORIS_STREAM_LOAD_FE_URL",
+    "DORIS_STREAM_LOAD_FE_IP_ALLOWLIST",
+    "DORIS_STREAM_LOAD_BE_ALLOWLIST",
+    "DORIS_STREAM_LOAD_BE_IP_ALLOWLIST",
+    "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP",
+    "DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST",
+    "LANGFUSE_DORIS_PARQUET_SCRATCH_ROOT",
+    "LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES",
+    "LANGFUSE_DORIS_PARQUET_SCRATCH_CLEANUP_INTERVAL_MS",
+    "DORIS_SECURITY_TEST_USER_PREFIX",
+    "DORIS_SECURITY_TEST_PASSWORD",
     "NEXT_PUBLIC_LANGFUSE_BLOB_EXPORT_CUTOFF",
     "NEXT_PUBLIC_LANGFUSE_BLOB_EXPORTER_CUTOFF",
     "DORIS_POC_ENABLED",
     "DORIS_POC_FE_HOST",
     "DORIS_POC_FE_MYSQL_PORT",
     "DORIS_POC_FE_HTTP_ORIGIN",
+    "DORIS_POC_BE_REDIRECT_AUTHORITY",
+    "DORIS_POC_BE_REDIRECT_ORIGIN",
     "DORIS_POC_USER",
     "DORIS_POC_PASSWORD",
     "DORIS_POC_DATABASE",
@@ -27,6 +42,9 @@
     "DORIS_MIGRATOR_USER",
     "DORIS_MIGRATOR_PASSWORD",
     "DORIS_CONTROL_TEST_DATABASE_URL",
+    "DATABASE_URL",
+    "DORIS_TEST_FILE",
+    "DORIS_TEST_MINIO_COMPOSE_PROJECT_NAME",
     "LANGFUSE_CHECKPOINT_POSTGRES_CAPTURE_ARGV_JSON",
     "LANGFUSE_CHECKPOINT_DORIS_CAPTURE_ARGV_JSON",
     "LANGFUSE_CHECKPOINT_SIGNING_PRIVATE_KEY_FILE",
@@ -111,14 +129,24 @@
     },
     "lint": {
       "dependsOn": ["@repo/eslint-plugin#build", "^build"],
-      "env": ["LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE"],
+      "env": [
+        "LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE",
+        "DORIS_POC_BE_REDIRECT_AUTHORITY",
+        "DORIS_POC_BE_REDIRECT_ORIGIN",
+        "DATABASE_URL"
+      ],
       "cache": true,
       "outputLogs": "errors-only",
       "outputs": []
     },
     "@langfuse/shared#lint": {
       "dependsOn": ["@repo/eslint-plugin#build", "^build"],
-      "env": ["LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE"],
+      "env": [
+        "LANGFUSE_CHECKPOINT_ANCHOR_TOKEN_FILE",
+        "DORIS_POC_BE_REDIRECT_AUTHORITY",
+        "DORIS_POC_BE_REDIRECT_ORIGIN",
+        "DATABASE_URL"
+      ],
       "cache": true,
       "outputLogs": "errors-only",
       "outputs": []
@@ -138,6 +166,32 @@
     },
     "test": {
       "dependsOn": ["^test", "db:generate"],
+      "cache": true
+    },
+    "@langfuse/shared#test": {
+      "dependsOn": ["^test", "db:generate"],
+      "env": [
+        "ANALYTICS_QUEUE_DRAIN_REDIS_INTEGRATION",
+        "REDIS_CONNECTION_STRING",
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_USERNAME",
+        "REDIS_AUTH",
+        "REDIS_CLUSTER_ENABLED",
+        "REDIS_CLUSTER_NODES",
+        "REDIS_SENTINEL_ENABLED",
+        "REDIS_SENTINEL_NODES",
+        "REDIS_SENTINEL_MASTER_NAME",
+        "REDIS_TLS_ENABLED"
+      ],
+      "cache": true
+    },
+    "worker#test": {
+      "dependsOn": ["^test", "db:generate"],
+      "env": [
+        "BATCH_ACTION_PUBLICATION_RECOVERY_REDIS_INTEGRATION",
+        "REDIS_CONNECTION_STRING"
+      ],
       "cache": true
     },
     "@repo/eslint-plugin#build": {

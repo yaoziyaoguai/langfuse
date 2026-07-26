@@ -1,14 +1,22 @@
 import { randomUUID } from "node:crypto";
 
+import { Prisma } from "@prisma/client";
 import type {
   AnalyticsDeletionOperation,
   AnalyticsDeletionScope,
-  Prisma,
   PrismaClient,
 } from "@prisma/client";
 
 import { prisma } from "../../db";
-import type { AnalyticsDeletionProgress } from "../analytics-persistence";
+import {
+  analyticsDurableProvenanceFromRecord,
+  analyticsProducerProvenanceFromAdmission,
+  lockAnalyticsAdmission,
+  lockLegacyAnalyticsAdmission,
+  type AnalyticsDeletionProgress,
+  type AnalyticsDurableProvenance,
+  type AnalyticsRuntimeAdmissionContext,
+} from "../analytics-persistence";
 import { getActiveCheckpointGenerationForAcceptance } from "./analyticsCheckpoints";
 
 type AnalyticsControlClient = PrismaClient | Prisma.TransactionClient;
@@ -25,6 +33,30 @@ const ACTIVE_INGESTION_STATUSES = [
   "PERSISTED",
   "RETRYING",
 ] as const;
+
+function preBarrierIngestionWhere(input: {
+  readonly projectId: string;
+  readonly barrierCreatedAt: Date;
+  readonly barrierAcceptanceSequence?: bigint | null;
+}): Prisma.AnalyticsIngestionOperationWhereInput {
+  return {
+    projectId: input.projectId,
+    status: { in: [...ACTIVE_INGESTION_STATUSES] },
+    ...(input.barrierAcceptanceSequence === undefined ||
+    input.barrierAcceptanceSequence === null
+      ? { createdAt: { lte: input.barrierCreatedAt } }
+      : {
+          OR: [
+            {
+              acceptanceSequence: {
+                lt: input.barrierAcceptanceSequence,
+              },
+            },
+            { acceptanceSequence: null },
+          ],
+        }),
+  };
+}
 
 export type AnalyticsDeletionRequester = {
   readonly principalType: "user" | "api_key" | "system";
@@ -141,12 +173,111 @@ async function serializable<T>(
   throw new Error("Unreachable deletion transaction state");
 }
 
+async function captureDeletionProvenance(input: {
+  readonly transaction: Prisma.TransactionClient;
+  readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
+  readonly now: Date;
+}): Promise<AnalyticsDurableProvenance | null> {
+  if (!input.admissionContext) {
+    await lockLegacyAnalyticsAdmission(input.transaction);
+    return null;
+  }
+  const admission = await lockAnalyticsAdmission({
+    transaction: input.transaction,
+    runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    expectedBackend: input.admissionContext.backend,
+    expectedDeploymentGeneration: input.admissionContext.deploymentGeneration,
+    action: "foundation",
+    now: input.now,
+  });
+  return analyticsProducerProvenanceFromAdmission(admission);
+}
+
+async function databaseClock(
+  transaction: Prisma.TransactionClient,
+): Promise<Date> {
+  const [row] = await transaction.$queryRaw<readonly { now: Date }[]>(
+    Prisma.sql`SELECT clock_timestamp() AS now`,
+  );
+  if (!row || !Number.isFinite(row.now.getTime())) {
+    throw new Error("Postgres did not return its current timestamp");
+  }
+  return row.now;
+}
+
+async function lockProjectForDeletion(input: {
+  readonly transaction: Prisma.TransactionClient;
+  readonly projectId: string;
+  readonly organizationId: string;
+  readonly mode: "SHARE" | "UPDATE";
+  readonly requireActive?: boolean;
+}): Promise<{ readonly id: string; readonly deletedAt: Date | null }> {
+  const lockClause =
+    input.mode === "SHARE" ? Prisma.sql`FOR SHARE` : Prisma.sql`FOR UPDATE`;
+  const rows = await input.transaction.$queryRaw<
+    readonly { id: string; deletedAt: Date | null }[]
+  >(
+    Prisma.sql`
+      SELECT id, deleted_at AS "deletedAt"
+      FROM projects
+      WHERE id = ${input.projectId}
+        AND org_id = ${input.organizationId}
+        ${input.requireActive === false ? Prisma.empty : Prisma.sql`AND deleted_at IS NULL`}
+      ${lockClause}
+    `,
+  );
+  if (rows.length !== 1) throw new Error("Project not found");
+  return rows[0]!;
+}
+
+async function ingestionBarrierSequence(
+  transaction: Prisma.TransactionClient,
+): Promise<bigint> {
+  const [barrier] = await transaction.$queryRaw<
+    readonly { sequence: bigint }[]
+  >(
+    Prisma.sql`SELECT nextval('analytics_ingestion_acceptance_sequence') AS sequence`,
+  );
+  if (!barrier || barrier.sequence < 1n) {
+    throw new Error("Postgres did not return an ingestion barrier sequence");
+  }
+  return barrier.sequence;
+}
+
+function assertDeletionProvenanceMatchesAdmission(
+  operation: AnalyticsDeletionOperation,
+  admissionProvenance: AnalyticsDurableProvenance | null,
+): void {
+  let durableProvenance: AnalyticsDurableProvenance | null;
+  try {
+    durableProvenance = analyticsDurableProvenanceFromRecord(operation);
+  } catch {
+    throw new Error("Analytics deletion durable provenance changed");
+  }
+  if (
+    (durableProvenance === null) !== (admissionProvenance === null) ||
+    (durableProvenance !== null &&
+      admissionProvenance !== null &&
+      (durableProvenance.analyticsBackend !==
+        admissionProvenance.analyticsBackend ||
+        durableProvenance.deploymentGeneration !==
+          admissionProvenance.deploymentGeneration ||
+        durableProvenance.workloadEpochFingerprint !==
+          admissionProvenance.workloadEpochFingerprint ||
+        durableProvenance.runtimeContractVersion !==
+          admissionProvenance.runtimeContractVersion))
+  ) {
+    throw new Error("Analytics deletion durable provenance changed");
+  }
+}
+
 export async function scheduleTraceDeletionOperations(input: {
   readonly client?: PrismaClient;
   readonly projectId: string;
   readonly organizationId: string;
   readonly traceIds: readonly string[];
   readonly requester: AnalyticsDeletionRequester;
+  readonly analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly now?: Date;
 }): Promise<readonly ScheduledTraceDeletion[]> {
   if (
@@ -161,11 +292,25 @@ export async function scheduleTraceDeletionOperations(input: {
     throw new TypeError("Invalid trace deletion request");
   }
   const client = input.client ?? prisma;
-  const now = input.now ?? new Date();
-
   return serializable(client, async (transaction) => {
     const checkpointGeneration =
-      await getActiveCheckpointGenerationForAcceptance({ transaction, now });
+      await getActiveCheckpointGenerationForAcceptance({
+        transaction,
+        now: input.now ?? new Date(),
+      });
+    await lockProjectForDeletion({
+      transaction,
+      projectId: input.projectId,
+      organizationId: input.organizationId,
+      mode: "UPDATE",
+    });
+    const now = await databaseClock(transaction);
+    const ingestionBarrier = await ingestionBarrierSequence(transaction);
+    const provenance = await captureDeletionProvenance({
+      transaction,
+      admissionContext: input.analyticsAdmissionContext,
+      now,
+    });
     const projectDeletion =
       await transaction.analyticsProjectDeletionGeneration.findUnique({
         where: { projectId: input.projectId },
@@ -174,14 +319,6 @@ export async function scheduleTraceDeletionOperations(input: {
     if (projectDeletion) {
       throw new AnalyticsProjectDeletionInProgressError();
     }
-    await transaction.project.findFirstOrThrow({
-      where: {
-        id: input.projectId,
-        orgId: input.organizationId,
-        deletedAt: null,
-      },
-      select: { id: true },
-    });
     const scheduled: ScheduledTraceDeletion[] = [];
     for (const traceId of traceIds) {
       const current = await transaction.analyticsDeletionTombstone.findUnique({
@@ -201,6 +338,7 @@ export async function scheduleTraceDeletionOperations(input: {
           })
         : null;
       if (current && existing) {
+        assertDeletionProvenanceMatchesAdmission(existing, provenance);
         scheduled.push({
           operation: existing,
           traceId,
@@ -229,8 +367,10 @@ export async function scheduleTraceDeletionOperations(input: {
           traceId,
           generation,
           checkpointGeneration,
+          ingestionBarrierSequence: ingestionBarrier,
           requesterPrincipalType: input.requester.principalType,
           requesterPrincipalId: input.requester.principalId,
+          ...(provenance ?? {}),
           status:
             current?.barrierVisibleAt && current.status !== "RETRYING"
               ? current.status
@@ -254,19 +394,32 @@ export async function scheduleProjectDeletionOperation(input: {
   readonly projectId: string;
   readonly organizationId: string;
   readonly requester: AnalyticsDeletionRequester;
+  readonly analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly now?: Date;
 }): Promise<AnalyticsDeletionOperation> {
   if (!input.projectId || !input.organizationId) {
     throw new TypeError("Invalid project deletion request");
   }
   const client = input.client ?? prisma;
-  const now = input.now ?? new Date();
   return serializable(client, async (transaction) => {
     const checkpointGeneration =
-      await getActiveCheckpointGenerationForAcceptance({ transaction, now });
-    await transaction.project.findFirstOrThrow({
-      where: { id: input.projectId, orgId: input.organizationId },
-      select: { id: true },
+      await getActiveCheckpointGenerationForAcceptance({
+        transaction,
+        now: input.now ?? new Date(),
+      });
+    await lockProjectForDeletion({
+      transaction,
+      projectId: input.projectId,
+      organizationId: input.organizationId,
+      mode: "UPDATE",
+      requireActive: false,
+    });
+    const now = await databaseClock(transaction);
+    const ingestionBarrier = await ingestionBarrierSequence(transaction);
+    const provenance = await captureDeletionProvenance({
+      transaction,
+      admissionContext: input.analyticsAdmissionContext,
+      now,
     });
     const current =
       await transaction.analyticsProjectDeletionGeneration.findUnique({
@@ -282,7 +435,17 @@ export async function scheduleProjectDeletionOperation(input: {
           orderBy: { createdAt: "desc" },
         })
       : null;
-    if (existing) return existing;
+    if (existing) {
+      assertDeletionProvenanceMatchesAdmission(existing, provenance);
+      const softDeleted = await transaction.project.updateMany({
+        where: { id: input.projectId, orgId: input.organizationId },
+        data: { deletedAt: now },
+      });
+      if (softDeleted.count !== 1) {
+        throw new Error("Project disappeared during deletion scheduling");
+      }
+      return existing;
+    }
 
     const generation = current?.generation ?? 1n;
     if (!current) {
@@ -290,7 +453,7 @@ export async function scheduleProjectDeletionOperation(input: {
         data: { projectId: input.projectId, generation },
       });
     }
-    return transaction.analyticsDeletionOperation.create({
+    const operation = await transaction.analyticsDeletionOperation.create({
       data: {
         id: randomUUID(),
         scope: "PROJECT",
@@ -298,8 +461,10 @@ export async function scheduleProjectDeletionOperation(input: {
         projectId: input.projectId,
         generation,
         checkpointGeneration,
+        ingestionBarrierSequence: ingestionBarrier,
         requesterPrincipalType: input.requester.principalType,
         requesterPrincipalId: input.requester.principalId,
+        ...(provenance ?? {}),
         status: "RETRYING",
         phase: "visibility_barrier",
         logicallyInvisible: false,
@@ -307,6 +472,14 @@ export async function scheduleProjectDeletionOperation(input: {
         createdAt: now,
       },
     });
+    const softDeleted = await transaction.project.updateMany({
+      where: { id: input.projectId, orgId: input.organizationId },
+      data: { deletedAt: now },
+    });
+    if (softDeleted.count !== 1) {
+      throw new Error("Project disappeared during deletion scheduling");
+    }
+    return operation;
   });
 }
 
@@ -461,6 +634,7 @@ export async function completeDeletionOperation(input: {
       data: {
         status: "COMPLETED",
         phase: "completed",
+        logicallyInvisible: true,
         completedAt: now,
         cancellationReasonCode: null,
         leaseOwner: null,
@@ -492,10 +666,11 @@ export async function completeDeletionOperation(input: {
   });
 }
 
-export async function completeTraceDeletionsSupersededByProject(input: {
+export async function finalizeProjectDeletionOperation(input: {
   readonly client?: PrismaClient;
   readonly projectOperationId: string;
   readonly projectId: string;
+  readonly organizationId: string;
   readonly projectGeneration: bigint;
   readonly lease: AnalyticsDeletionLease;
   readonly now?: Date;
@@ -505,14 +680,25 @@ export async function completeTraceDeletionsSupersededByProject(input: {
   if (
     !input.projectOperationId ||
     !input.projectId ||
+    !input.organizationId ||
     input.projectGeneration <= 0n ||
     !input.lease.owner ||
     input.lease.fence <= 0n ||
     !Number.isFinite(now.getTime())
   ) {
-    throw new TypeError("Invalid project deletion supersession");
+    throw new TypeError("Invalid project deletion finalization");
   }
   return client.$transaction(async (transaction) => {
+    const projects = await transaction.$queryRaw<readonly { id: string }[]>(
+      Prisma.sql`
+        SELECT id
+        FROM projects
+        WHERE id = ${input.projectId}
+          AND org_id = ${input.organizationId}
+        FOR UPDATE
+      `,
+    );
+    if (projects.length !== 1) return false;
     const projectOperation =
       await transaction.analyticsDeletionOperation.findFirst({
         where: {
@@ -525,9 +711,22 @@ export async function completeTraceDeletionsSupersededByProject(input: {
           logicallyInvisible: true,
           status: { not: "COMPLETED" },
         },
-        select: { id: true },
+        select: {
+          id: true,
+          createdAt: true,
+          ingestionBarrierSequence: true,
+        },
       });
     if (!projectOperation) return false;
+    const hasActivePreBarrierIngestion =
+      await transaction.analyticsIngestionOperation.count({
+        where: preBarrierIngestionWhere({
+          projectId: input.projectId,
+          barrierCreatedAt: projectOperation.createdAt,
+          barrierAcceptanceSequence: projectOperation.ingestionBarrierSequence,
+        }),
+      });
+    if (hasActivePreBarrierIngestion > 0) return false;
 
     await transaction.analyticsDeletionOperation.updateMany({
       where: {
@@ -549,6 +748,36 @@ export async function completeTraceDeletionsSupersededByProject(input: {
       where: { projectId: input.projectId, status: { not: "COMPLETED" } },
       data: { status: "COMPLETED", completedAt: now },
     });
+    const deletedProject = await transaction.project.deleteMany({
+      where: { id: input.projectId, orgId: input.organizationId },
+    });
+    if (deletedProject.count !== 1) {
+      throw new Error("Project disappeared during deletion finalization");
+    }
+    const completed = await transaction.analyticsDeletionOperation.updateMany({
+      where: {
+        id: input.projectOperationId,
+        projectId: input.projectId,
+        scope: "PROJECT",
+        generation: input.projectGeneration,
+        workerFence: input.lease.fence,
+        leaseOwner: input.lease.owner,
+        logicallyInvisible: true,
+        status: { not: "COMPLETED" },
+      },
+      data: {
+        status: "COMPLETED",
+        phase: "completed",
+        logicallyInvisible: true,
+        completedAt: now,
+        cancellationReasonCode: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+    });
+    if (completed.count !== 1) {
+      throw new Error("Project deletion completion lost its fence");
+    }
     return true;
   });
 }
@@ -557,14 +786,11 @@ export async function hasPreBarrierIngestionWork(input: {
   readonly client?: AnalyticsControlClient;
   readonly projectId: string;
   readonly barrierCreatedAt: Date;
+  readonly barrierAcceptanceSequence?: bigint | null;
 }): Promise<boolean> {
   const client = input.client ?? prisma;
   const count = await client.analyticsIngestionOperation.count({
-    where: {
-      projectId: input.projectId,
-      acceptedAt: { lte: input.barrierCreatedAt },
-      status: { in: [...ACTIVE_INGESTION_STATUSES] },
-    },
+    where: preBarrierIngestionWhere(input),
   });
   return count > 0;
 }

@@ -12,6 +12,10 @@ import {
 import { encrypt } from "@langfuse/shared/encryption";
 import { env } from "@/src/env.mjs";
 import { validateBlobStorageEndpoint } from "@langfuse/shared/src/server";
+import {
+  getDorisIntegrationMutationAdmission,
+  syncDorisIntegrationMutation,
+} from "@/src/features/analytics-integrations/server/dorisIntegrationLifecycle";
 
 type UpsertBlobStorageIntegrationInput = {
   type: BlobStorageIntegrationType;
@@ -116,6 +120,7 @@ export async function upsertBlobStorageIntegration(params: {
     exportFieldGroups: data.exportFieldGroups,
     compressed: data.compressed ?? true,
   };
+  const integrationAdmission = getDorisIntegrationMutationAdmission();
 
   return prisma.$transaction(async (tx) => {
     const existing = await tx.blobStorageIntegration.findUnique({
@@ -209,6 +214,13 @@ export async function upsertBlobStorageIntegration(params: {
     if (!backstop.ok) {
       throw new InvalidRequestError(backstop.message);
     }
+    await syncDorisIntegrationMutation({
+      transaction: tx,
+      admissionContext: integrationAdmission,
+      projectId,
+      integrationType: "BLOB_STORAGE",
+      enabled: result.enabled,
+    });
 
     return result;
   });

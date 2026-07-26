@@ -5,15 +5,7 @@ import { createAndAddApiKeysToDb } from "@langfuse/shared/src/server/auth/apiKey
 import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
 import { CloudConfigSchema } from "@langfuse/shared";
-import { isAnalyticsBackend } from "@langfuse/shared/analytics-backend";
-import {
-  initializeClickhouseCompatibility,
-  logger,
-} from "@langfuse/shared/src/server";
-
-if (isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "clickhouse")) {
-  await initializeClickhouseCompatibility();
-}
+import { logger } from "@langfuse/shared/src/server";
 
 // Warn if LANGFUSE_INIT_* variables are set but LANGFUSE_INIT_ORG_ID is missing
 if (!env.LANGFUSE_INIT_ORG_ID) {

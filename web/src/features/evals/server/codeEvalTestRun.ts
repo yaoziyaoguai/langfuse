@@ -14,6 +14,7 @@ import {
   type DispatchResult,
   type InternalTraceWriteInput,
 } from "@langfuse/shared/src/server";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 import {
   LangfuseNotFoundError,
@@ -439,6 +440,7 @@ async function writeTraceViaIngestion(trace: InternalTraceWriteInput) {
   const result = await processEventBatch([traceEvent, ...spanEvents], auth, {
     delay: 0,
     isLangfuseInternal: true,
+    analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
     attribution: createUnknownSdkIngestionAttribution({ authCheck: auth }),
   });
 

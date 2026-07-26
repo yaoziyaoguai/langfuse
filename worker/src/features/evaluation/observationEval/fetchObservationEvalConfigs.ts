@@ -19,9 +19,16 @@ import { type ObservationEvalConfig } from "./types";
  */
 export async function fetchObservationEvalConfigs(
   projectId: string,
+  options?: {
+    readonly jobConfigurationId?: string;
+    readonly includeInactive?: boolean;
+  },
 ): Promise<ObservationEvalConfig[]> {
   // Check cache first
-  const hasNoConfigs = await hasNoEvalConfigsCache(projectId, "eventBased");
+  const hasNoConfigs =
+    !options?.jobConfigurationId &&
+    !options?.includeInactive &&
+    (await hasNoEvalConfigsCache(projectId, "eventBased"));
   if (hasNoConfigs) {
     logger.debug(
       `Skipping observation eval config fetch - no configs cached for project ${projectId}`,
@@ -34,11 +41,18 @@ export async function fetchObservationEvalConfigs(
   const configs = await prisma.jobConfiguration.findMany({
     where: {
       projectId,
+      ...(options?.jobConfigurationId
+        ? { id: options.jobConfigurationId }
+        : {}),
       targetObject: {
         in: [EvalTargetObject.EVENT, EvalTargetObject.EXPERIMENT],
       },
-      status: JobConfigState.ACTIVE,
-      blockedAt: null,
+      ...(options?.includeInactive
+        ? {}
+        : {
+            status: JobConfigState.ACTIVE,
+            blockedAt: null,
+          }),
       evalTemplateId: { not: null },
     },
     select: {
@@ -61,7 +75,11 @@ export async function fetchObservationEvalConfigs(
   });
 
   // Cache if no configs found
-  if (configs.length === 0) {
+  if (
+    configs.length === 0 &&
+    !options?.jobConfigurationId &&
+    !options?.includeInactive
+  ) {
     logger.debug(
       `No observation eval configs found for project ${projectId}, caching`,
     );

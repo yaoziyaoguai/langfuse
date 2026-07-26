@@ -98,6 +98,54 @@ describe("withMiddlewares error handling", () => {
     expect(endpoint).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "/api/public/%65xperiments",
+    "/api/public/%64ataset-run-items",
+    "/api%2Fpublic%2Fexperiments",
+    "/api%5Cpublic%5Cexperiments",
+    "/api/public/datasets/dataset-1/%72uns",
+    "/api/public/ignored%2F..%2Fexperiments",
+    "/api//public///experiments",
+  ])("gates canonical-equivalent Doris URL %s", async (url) => {
+    envState.backend = "doris";
+    const endpoint = vi.fn();
+    const handler = withMiddlewares({ GET: endpoint });
+    const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+      method: "GET",
+      url,
+    });
+
+    await handler(req, res);
+
+    expect(res._getStatusCode()).toBe(501);
+    expect(JSON.parse(res._getData())).toEqual(
+      COMMUNITY_CAPABILITIES.experiments,
+    );
+    expect(endpoint).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "/api/public/%E0%A4%A",
+    "https://langfuse.local/api/public/experiments",
+    "//langfuse.local/api/public/experiments",
+    "/%2F%2Flangfuse.local/api/public/experiments",
+    "/api%252Fpublic%252Fexperiments",
+    "/api%25252Fpublic%25252Fexperiments",
+  ])("rejects non-canonical Doris request URL %s", async (url) => {
+    envState.backend = "doris";
+    const endpoint = vi.fn();
+    const handler = withMiddlewares({ GET: endpoint });
+    const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+      method: "GET",
+      url,
+    });
+
+    await handler(req, res);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(endpoint).not.toHaveBeenCalled();
+  });
+
   describe("BaseError handling", () => {
     it("preserves structured Doris time-range validation metadata", async () => {
       const error = Object.assign(

@@ -14,6 +14,7 @@ import { $root } from "@/src/pages/api/public/otel/otlp-proto/generated/root";
 import { gunzip } from "node:zlib";
 import { ForbiddenError } from "@langfuse/shared";
 import { env } from "@/src/env.mjs";
+import { getWebAnalyticsAdmissionContext } from "@/src/server/analyticsRuntime";
 
 export const config = {
   api: {
@@ -179,6 +180,7 @@ export default withMiddlewares({
         sdkName: attribution.ingestionSdkName,
         sdkVersion: attribution.ingestionSdkVersion,
         ingestionVersion,
+        analyticsAdmissionContext: getWebAnalyticsAdmissionContext(),
       });
 
       // At this point, we have the raw OpenTelemetry Span body. We upload the full batch to S3

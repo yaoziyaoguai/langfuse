@@ -109,11 +109,12 @@ describe("create experiment jobs", () => {
 
     // Verify that processing info was logged
     expect(mockLogger.info).toHaveBeenCalledWith(
-      "Processing experiment create job with ClickHouse batching",
+      "Processing experiment create job",
       expect.objectContaining({
         projectId,
         datasetId,
         runId,
+        analyticsBackend: "clickhouse",
       }),
     );
   });

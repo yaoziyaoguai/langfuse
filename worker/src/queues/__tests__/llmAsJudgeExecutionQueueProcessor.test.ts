@@ -49,6 +49,9 @@ vi.mock("@langfuse/shared/src/db", () => ({
 vi.mock("../../features/evaluation/observationEval", () => ({
   processObservationEval: vi.fn(),
 }));
+vi.mock("../../features/evaluation/evaluationExecutionAdmission", () => ({
+  assertEvaluationExecutionAdmission: vi.fn(),
+}));
 
 // Mock logger and span
 vi.mock("@langfuse/shared/src/server", () => {
@@ -108,6 +111,7 @@ import { processObservationEval } from "../../features/evaluation/observationEva
 import {
   LLMAsJudgeExecutionQueue,
   classifyEvaluatorLlmError,
+  logger,
   traceException,
 } from "@langfuse/shared/src/server";
 import { retryLLMRateLimitError } from "../../features/utils";
@@ -279,7 +283,7 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
         data: expect.objectContaining({
           status: JobExecutionStatus.ERROR,
           endTime: expect.any(Date),
-          error: "Rate limit exceeded",
+          error: "The evaluation model is temporarily unavailable.",
           executionTraceId: "test-trace-id",
         }),
       });
@@ -304,7 +308,7 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
         data: expect.objectContaining({
           status: JobExecutionStatus.ERROR,
           endTime: expect.any(Date),
-          error: "Rate limit exceeded",
+          error: "The evaluation model is temporarily unavailable.",
           executionTraceId: "test-trace-id",
         }),
       });
@@ -328,7 +332,7 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
         data: expect.objectContaining({
           status: JobExecutionStatus.ERROR,
           endTime: expect.any(Date),
-          error: "Invalid API key",
+          error: "The evaluation model request failed.",
           executionTraceId: "test-trace-id",
         }),
       });
@@ -367,7 +371,7 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
         data: expect.objectContaining({
           status: JobExecutionStatus.ERROR,
           endTime: expect.any(Date),
-          error: "Job configuration not found",
+          error: "The evaluation could not be completed.",
           executionTraceId: "test-trace-id",
         }),
       });
@@ -400,14 +404,16 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
 
   describe("unexpected errors (retryable by BullMQ)", () => {
     it("should set ERROR status with generic message for unexpected errors", async () => {
-      const unexpectedError = new Error("Database connection failed");
+      const unexpectedError = new Error(
+        "postgresql://user:password@db Authorization: Bearer secret",
+      );
       (processObservationEval as Mock).mockRejectedValue(unexpectedError);
 
       const job = createMockJob();
 
       // Should rethrow for BullMQ retry
       await expect(llmAsJudgeExecutionQueueProcessor(job)).rejects.toThrow(
-        "Database connection failed",
+        "An internal error occurred",
       );
 
       expect(prisma.jobExecution.update).toHaveBeenCalledWith({
@@ -421,6 +427,12 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
           executionTraceId: "test-trace-id",
         }),
       });
+      expect(
+        JSON.stringify((logger.error as unknown as Mock).mock.calls),
+      ).not.toContain("password");
+      expect(
+        JSON.stringify((logger.error as unknown as Mock).mock.calls),
+      ).not.toContain("Bearer secret");
     });
 
     it("should call traceException for unexpected errors", async () => {
@@ -435,7 +447,11 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
         // Expected to throw
       }
 
-      expect(traceException).toHaveBeenCalledWith(unexpectedError);
+      expect(traceException).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "An internal error occurred" }),
+        undefined,
+        "EVALUATION_INTERNAL_ERROR",
+      );
     });
 
     it("should rethrow unexpected errors for BullMQ retry", async () => {
@@ -445,7 +461,7 @@ describe("llmAsJudgeExecutionQueueProcessor", () => {
       const job = createMockJob();
 
       await expect(llmAsJudgeExecutionQueueProcessor(job)).rejects.toThrow(
-        "Network timeout",
+        "An internal error occurred",
       );
     });
   });
