@@ -3,6 +3,9 @@ import { QueueName, TQueueJobTypes } from "../queues";
 import { createBullMQQueueOptionsWithRedis } from "./redis";
 import { logger } from "../logger";
 
+export const BATCH_EXPORT_QUEUE_ATTEMPTS = 8;
+export const BATCH_EXPORT_QUEUE_BACKOFF_DELAY_MS = 5_000;
+
 export class BatchExportQueue {
   private static instance: Queue<TQueueJobTypes[QueueName.BatchExport]> | null =
     null;
@@ -23,10 +26,10 @@ export class BatchExportQueue {
             defaultJobOptions: {
               removeOnComplete: true,
               removeOnFail: 10_000,
-              attempts: 8,
+              attempts: BATCH_EXPORT_QUEUE_ATTEMPTS,
               backoff: {
                 type: "exponential",
-                delay: 5000,
+                delay: BATCH_EXPORT_QUEUE_BACKOFF_DELAY_MS,
               },
             },
           },
