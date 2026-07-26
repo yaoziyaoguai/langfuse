@@ -1,6 +1,6 @@
 # Doris Runtime Security and Credential Boundary
 
-This document defines the R1A runtime boundary introduced in U2. ClickHouse is
+This document defines the R1A runtime boundary enforced by the F0 foundation. ClickHouse is
 the default, while `LANGFUSE_ANALYTICS_BACKEND=doris` activates the Doris
 adapter for the whole deployment. The local `1 FE + 1 BE` profile is for
 development only and does not prove production availability, capacity, RPO, or
@@ -24,6 +24,31 @@ must never be present in either runtime image. The application rejects root,
 empty passwords, cleartext production endpoints, query/load identity reuse,
 and unpinned Stream Load FE/BE addresses.
 
+### Application grant contract
+
+The tested application grant contract is owned by
+`packages/shared/src/server/doris/leastPrivilege.ts`. Create the four users in
+the deployment secret-management workflow, then apply the generated grants:
+
+| Identity     | Object scope                                                                                                                                                                       | Grants                                                               | Explicitly denied                                      |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------ |
+| Web query    | `<database>.*`                                                                                                                                                                     | `SELECT_PRIV`                                                        | Stream Load/INSERT, CREATE, ALTER, DROP                |
+| Worker query | `<database>.*`                                                                                                                                                                     | `SELECT_PRIV`                                                        | Stream Load/INSERT, CREATE, ALTER, DROP                |
+| Worker load  | `events_current`, `scores_current`, `blob_storage_file_log`, `trace_tombstones`, `project_tombstones`, `dataset_run_items_current`, `dataset_tombstones`, `dataset_run_tombstones` | table-scoped `LOAD_PRIV`                                             | SELECT, CREATE, ALTER, DROP, schema migration ledger   |
+| Migrator     | `<database>.*`                                                                                                                                                                     | `SELECT_PRIV`, `LOAD_PRIV`, `CREATE_PRIV`, `ALTER_PRIV`, `DROP_PRIV` | presence in any long-running web or worker environment |
+
+The migrator needs `SELECT_PRIV` and `LOAD_PRIV` only to read and append the
+checksummed `_langfuse_schema_migrations` ledger. Application-created tables
+must be added to the worker-load allowlist in the same change as their forward
+migration. Never grant `LOAD_PRIV` at database scope to the worker-load
+identity.
+
+The real-Doris security integration test creates four random, non-root users,
+executes successful SELECT, Stream Load, and migration probes with the owning
+identity, and verifies each deny boundary. Its parent harness drops the exact
+run-owned users even if the test process fails. A mock permission check does
+not satisfy this gate.
+
 ## Network and TLS boundary
 
 - Query uses the MySQL protocol over verified TLS to the configured FE DNS
@@ -35,7 +60,16 @@ and unpinned Stream Load FE/BE addresses.
 - Only one body-preserving `307` is followed. The redirect origin must exactly
   match `DORIS_STREAM_LOAD_BE_ALLOWLIST`, every resolved address must match
   `DORIS_STREAM_LOAD_BE_IP_ALLOWLIST`, and TLS cannot be downgraded. Userinfo in
-  `Location` is discarded; the client supplies its own load credential.
+  `Location` is discarded; the client supplies its configured load credential
+  only after the origin and IP checks pass.
+- Only explicit local development mode may rewrite an allowlisted advertised BE
+  origin to a host-reachable origin. The exact JSON
+  `DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP` is rejected in production and
+  normal development. The original origin is still resolved and pinned first;
+  the rewrite target is separately resolved and pinned by
+  `DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST`. Origin entries reject
+  userinfo, path, query, hash, wildcards, TLS downgrade, and rewrite chains.
+  A second `307` is never followed.
 - Query and load CA files are mounted read-only from the workload's secret
   injection mechanism. Private FE/BE service ports are not exposed publicly.
 - Doris disks and the backup repository require infrastructure encryption at
@@ -67,6 +101,17 @@ does not depend on Doris, so a storage outage does not create a restart loop.
 5. From an isolated verification job, prove the old credential can no longer
    connect and the new credential still passes readiness.
 6. Close old pools and record the rotation evidence and timestamp.
+
+For a retired user identity, revoke by dropping that exact principal after the
+new pool is proven:
+
+```sql
+DROP USER '<retired_identity>'@'%';
+```
+
+The verification job must attempt both authentication and the retired
+identity's former workload operation. Record only redacted pass/fail evidence;
+never record credentials, Authorization headers, connection URLs, or payloads.
 
 Any failed revocation check, unallowlisted address, certificate verification
 failure, filtered row, unknown load without label reconciliation, or schema

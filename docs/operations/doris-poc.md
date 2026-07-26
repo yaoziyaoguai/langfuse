@@ -1,5 +1,10 @@
 # Doris PoC — U1 Frozen Physical Design and Measured Results
 
+> Historical design record: this file freezes the initial physical-engine PoC,
+> not the current product capability matrix. Current availability and activation
+> contracts are maintained in
+> [`analytics-backend-capabilities.md`](./analytics-backend-capabilities.md).
+
 This document records the U1 engine/physical-design PoC outcome for the Langfuse
 Community Doris Analytics Storage Refactor. The machine-readable companion is
 `packages/shared/doris/poc/workload-manifest.yaml`.

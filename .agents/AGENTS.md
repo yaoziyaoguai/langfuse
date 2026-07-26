@@ -66,6 +66,13 @@ langfuse/
   - `@langfuse/shared` -> no imports from `web`, `worker`, or `ee`
 - Queue payload schemas and queue-name contracts are owned by
   `packages/shared/src/server/queues.ts`.
+- Durable Doris batch-export intent, manifest, execution-claim, and recovery
+  contracts are owned by
+  `packages/shared/src/server/repositories/batchExportManifests.ts`; Worker
+  execution, dispatch recovery, and orphan cleanup live under
+  `worker/src/features/batchExport/`,
+  `worker/src/features/batch-export-dispatch-runner/`, and
+  `worker/src/features/batch-export-manifest-orphan-cleaner/`.
 - High-signal shared entry points:
   - Domain models: `packages/shared/src/domain/{observations,traces,scores}.ts`
   - Postgres schema: `packages/shared/prisma/schema.prisma`
