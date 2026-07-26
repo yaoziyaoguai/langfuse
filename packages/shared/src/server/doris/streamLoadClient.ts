@@ -4,6 +4,10 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 
+import {
+  assertAnalyticsRuntimeIoAllowed,
+  onAnalyticsRuntimeIoFenced,
+} from "../analytics-persistence/analyticsRuntimeIoFence";
 import { DorisError, toDorisError } from "./errors";
 
 export interface DorisStreamLoadConfig {
@@ -15,6 +19,8 @@ export interface DorisStreamLoadConfig {
   readonly allowedFeAddresses?: readonly string[];
   readonly allowedRedirectOrigins: readonly string[];
   readonly allowedRedirectAddresses?: readonly string[];
+  readonly redirectOriginRewriteMap?: Readonly<Record<string, string>>;
+  readonly allowedRewriteAddresses?: readonly string[];
   readonly tlsCaPath?: string;
   readonly requestTimeoutMs?: number;
   readonly maxBodyBytes?: number;
@@ -61,6 +67,7 @@ const UNKNOWN_OUTCOMES = new Set([
   "UNKNOWN",
   "",
 ]);
+const RETRYABLE_REJECTION_MARKERS = ["MEM_LIMIT_EXCEEDED"] as const;
 const RECONCILIATION_STATES = new Set([
   "UNKNOWN",
   "PREPARE",
@@ -79,6 +86,14 @@ function asNonNegativeInteger(value: unknown): number {
     throw new DorisError("LOAD_REJECTED", false);
   }
   return number;
+}
+
+function isRetryableLoadRejection(parsed: Record<string, unknown>): boolean {
+  const message = parsed.Message ?? parsed.message;
+  return (
+    typeof message === "string" &&
+    RETRYABLE_REJECTION_MARKERS.some((marker) => message.includes(marker))
+  );
 }
 
 async function defaultResolveAddresses(hostname: string): Promise<string[]> {
@@ -110,6 +125,7 @@ export class DorisStreamLoadClient {
   }
 
   async load(request: DorisStreamLoadRequest): Promise<DorisStreamLoadResult> {
+    assertAnalyticsRuntimeIoAllowed();
     const database = request.database ?? this.config.database;
     if (
       !IDENTIFIER.test(database) ||
@@ -135,6 +151,7 @@ export class DorisStreamLoadClient {
       this.config.allowedFeAddresses ?? [],
       this.config.requireTls,
     );
+    assertAnalyticsRuntimeIoAllowed();
     const response = await this.put(
       initialUrl,
       request,
@@ -142,6 +159,7 @@ export class DorisStreamLoadClient {
       0,
       pinnedFeAddress,
     );
+    assertAnalyticsRuntimeIoAllowed();
     return this.parseResponse(response, request.label);
   }
 
@@ -149,13 +167,18 @@ export class DorisStreamLoadClient {
     readonly label: string;
     readonly database?: string;
   }): Promise<DorisStreamLoadReconciliation> {
+    assertAnalyticsRuntimeIoAllowed();
     const database = input.database ?? this.config.database;
     if (!LABEL.test(input.label) || !IDENTIFIER.test(database)) {
       throw new DorisError("INVALID_REQUEST", false);
     }
     if (this.config.reconcileLabelStatus) {
       try {
-        return await this.config.reconcileLabelStatus(input.label);
+        const reconciliation = await this.config.reconcileLabelStatus(
+          input.label,
+        );
+        assertAnalyticsRuntimeIoAllowed();
+        return reconciliation;
       } catch (error) {
         throw toDorisError(error);
       }
@@ -172,7 +195,9 @@ export class DorisStreamLoadClient {
         this.config.allowedFeAddresses ?? [],
         this.config.requireTls,
       );
+      assertAnalyticsRuntimeIoAllowed();
       const response = await this.getOnce(url, pinnedAddress);
+      assertAnalyticsRuntimeIoAllowed();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw new DorisError("ANALYTICS_UNAVAILABLE", true);
       }
@@ -218,10 +243,12 @@ export class DorisStreamLoadClient {
     redirectDepth = 0,
     pinnedAddress?: string,
   ): Promise<RawResponse> {
+    assertAnalyticsRuntimeIoAllowed();
     if (this.config.requireTls && url.protocol !== "https:") {
       throw new DorisError("REDIRECT_REJECTED", false);
     }
     const response = await this.putOnce(url, request, body, pinnedAddress);
+    assertAnalyticsRuntimeIoAllowed();
     if (response.statusCode !== 307) return response;
     if (redirectDepth > 0) {
       throw new DorisError("REDIRECT_REJECTED", false);
@@ -235,28 +262,76 @@ export class DorisStreamLoadClient {
     } catch (_error) {
       throw new DorisError("REDIRECT_REJECTED", false);
     }
+    // Doris may advertise `user:@host`; never trust redirect credentials.
+    // The client supplies its configured load identity after origin/IP checks.
     redirect.username = "";
     redirect.password = "";
     if (
+      !["http:", "https:"].includes(redirect.protocol) ||
+      !redirect.hostname ||
+      redirect.hostname.includes("*") ||
+      redirect.hash ||
       (this.config.requireTls && redirect.protocol !== "https:") ||
       !this.config.allowedRedirectOrigins.includes(redirect.origin)
     ) {
       throw new DorisError("REDIRECT_REJECTED", false);
     }
 
+    const rewriteOrigin =
+      this.config.redirectOriginRewriteMap?.[redirect.origin];
     const allowedAddresses = this.config.allowedRedirectAddresses ?? [];
-    const pinnedRedirectAddress = await this.resolvePinnedAddress(
+    const pinnedOriginalRedirectAddress = await this.resolvePinnedAddress(
       redirect.hostname,
       allowedAddresses,
-      this.config.requireTls,
+      this.config.requireTls || rewriteOrigin !== undefined,
     );
 
+    let requestUrl = redirect;
+    let pinnedRequestAddress = pinnedOriginalRedirectAddress;
+    if (rewriteOrigin !== undefined) {
+      let targetOrigin: URL;
+      try {
+        targetOrigin = new URL(rewriteOrigin);
+      } catch (_error) {
+        throw new DorisError("REDIRECT_REJECTED", false);
+      }
+      if (
+        !["http:", "https:"].includes(targetOrigin.protocol) ||
+        !targetOrigin.hostname ||
+        targetOrigin.hostname.includes("*") ||
+        targetOrigin.username ||
+        targetOrigin.password ||
+        (targetOrigin.pathname !== "/" && targetOrigin.pathname !== "") ||
+        targetOrigin.search ||
+        targetOrigin.hash ||
+        targetOrigin.origin !== rewriteOrigin ||
+        (redirect.protocol === "https:" &&
+          targetOrigin.protocol !== "https:") ||
+        (this.config.requireTls && targetOrigin.protocol !== "https:") ||
+        Object.hasOwn(
+          this.config.redirectOriginRewriteMap ?? {},
+          targetOrigin.origin,
+        )
+      ) {
+        throw new DorisError("REDIRECT_REJECTED", false);
+      }
+      pinnedRequestAddress = await this.resolvePinnedAddress(
+        targetOrigin.hostname,
+        this.config.allowedRewriteAddresses ?? [],
+        true,
+      );
+      requestUrl = new URL(
+        `${redirect.pathname}${redirect.search}`,
+        targetOrigin.origin,
+      );
+    }
+
     return this.put(
-      redirect,
+      requestUrl,
       request,
       body,
       redirectDepth + 1,
-      pinnedRedirectAddress,
+      pinnedRequestAddress,
     );
   }
 
@@ -266,11 +341,14 @@ export class DorisStreamLoadClient {
     body: Buffer,
     pinnedAddress?: string,
   ): Promise<RawResponse> {
+    assertAnalyticsRuntimeIoAllowed();
     return new Promise((resolve, reject) => {
       let settled = false;
+      let removeFenceListener: () => void = () => undefined;
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
+        removeFenceListener();
         callback();
       };
       const transport = url.protocol === "https:" ? https : http;
@@ -325,16 +403,22 @@ export class DorisStreamLoadClient {
       );
       req.on("continue", () => req.end(body));
       req.on("error", (error) => finish(() => reject(toDorisError(error))));
+      removeFenceListener = onAnalyticsRuntimeIoFenced(() =>
+        req.destroy(new DorisError("ANALYTICS_UNAVAILABLE", true)),
+      );
       req.flushHeaders();
     });
   }
 
   private getOnce(url: URL, pinnedAddress?: string): Promise<RawResponse> {
+    assertAnalyticsRuntimeIoAllowed();
     return new Promise((resolve, reject) => {
       let settled = false;
+      let removeFenceListener: () => void = () => undefined;
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
+        removeFenceListener();
         callback();
       };
       const transport = url.protocol === "https:" ? https : http;
@@ -377,6 +461,9 @@ export class DorisStreamLoadClient {
         req.destroy(new Error("Doris load reconciliation timed out")),
       );
       req.on("error", (error) => finish(() => reject(toDorisError(error))));
+      removeFenceListener = onAnalyticsRuntimeIoFenced(() =>
+        req.destroy(new DorisError("ANALYTICS_UNAVAILABLE", true)),
+      );
       req.end();
     });
   }
@@ -408,6 +495,9 @@ export class DorisStreamLoadClient {
       UNKNOWN_OUTCOMES.has(status.toUpperCase()) ||
       (status === "Success" && !httpSuccess);
     if (status !== "Success" && !requiresReconciliation) {
+      if (isRetryableLoadRejection(parsed)) {
+        throw new DorisError("ANALYTICS_UNAVAILABLE", true);
+      }
       throw new DorisError("LOAD_REJECTED", false);
     }
     return {

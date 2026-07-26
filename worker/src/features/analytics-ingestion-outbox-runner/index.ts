@@ -3,6 +3,7 @@ import {
   logger,
   recordIncrement,
   recoverStalePublishedAnalyticsIngestionOutbox,
+  type AnalyticsRuntimeAdmissionContext,
 } from "@langfuse/shared/src/server";
 
 import { publishAnalyticsIngestionOutboxBatch } from "../../queues/analyticsIngestionQueue";
@@ -24,6 +25,7 @@ export class AnalyticsIngestionOutboxRunner extends PeriodicRunner {
       readonly recoverStale?: typeof recoverStalePublishedAnalyticsIngestionOutbox;
       readonly handoffLegacy?: typeof handoffLegacyAnalyticsIngestionOutbox;
       readonly assertReady?: () => Promise<void>;
+      readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
       readonly now?: () => Date;
     },
   ) {
@@ -70,6 +72,9 @@ export class AnalyticsIngestionOutboxRunner extends PeriodicRunner {
     )({
       workerId: this.dependencies.workerId,
       limit: this.dependencies.batchSize,
+      ...(this.dependencies.getAdmissionContext
+        ? { getAdmissionContext: this.dependencies.getAdmissionContext }
+        : {}),
     });
     if (handedOff > 0 || recovered > 0 || published > 0) {
       logger.debug("Published Doris analytics ingestion outbox rows", {

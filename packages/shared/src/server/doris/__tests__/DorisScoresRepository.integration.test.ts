@@ -1,26 +1,38 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { DorisPoCMysqlClient } from "../../doris-poc/mysqlClient";
+import {
+  assertOwnedDorisTestDatabase,
+  parseDorisTestNamespace,
+} from "../testDatabase";
 import { readDorisScoresForPublicApi } from "../../repositories/telemetry/doris/publicScores";
 import { DorisScoresRepository } from "../../repositories/telemetry/doris/scores";
-import type { DorisTrace } from "../../repositories/telemetry/doris/traces";
 
 const enabled = process.env.DORIS_POC_ENABLED === "1";
 const describeDoris = enabled ? describe : describe.skip;
+const testNamespace = enabled ? parseDorisTestNamespace() : null;
 const projectId = "doris-score-read-integration";
+
+async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
+  const rows: T[] = [];
+  for await (const value of values) rows.push(value);
+  return rows;
+}
 
 describeDoris("Doris score repository", () => {
   let db: DorisPoCMysqlClient;
   let repository: DorisScoresRepository;
 
   beforeAll(async () => {
+    if (!testNamespace) throw new Error("Doris test namespace is required");
     db = new DorisPoCMysqlClient({
       host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
       port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
       user: process.env.DORIS_POC_USER ?? "root",
       password: process.env.DORIS_POC_PASSWORD ?? "",
-      database: "langfuse_poc",
+      database: testNamespace.database,
     });
+    await assertOwnedDorisTestDatabase(db, testNamespace);
     const query = async <T extends object>(
       sql: string,
       params?: readonly unknown[],
@@ -32,6 +44,35 @@ describeDoris("Doris score repository", () => {
           ? [{ partitionDate: "2026-07-17", scoreId }]
           : [],
     });
+
+    const insertTraceEvent = (traceId: string, userId: string) =>
+      db.execute(
+        `INSERT INTO events_current
+          (project_id, partition_date, trace_id, span_id, parent_span_id,
+           is_app_root, version_token, type, environment, name, user_id,
+           session_id, trace_name, start_time, created_at, updated_at, source,
+           ingestion_sdk_name, ingestion_sdk_version, tags)
+         VALUES (?, '2026-07-17', ?, CONCAT(?, '-root'), NULL, TRUE, 1000,
+           'SPAN', 'production', 'root', ?, 'session-1', 'trace',
+           '2026-07-17 09:00:00.000000', '2026-07-17 09:00:00.000000',
+           '2026-07-17 09:00:00.000000', 'api', 'js', '5.0.0', ARRAY('prod'))`,
+        [projectId, traceId, traceId, userId],
+      );
+    await insertTraceEvent("trace-1", "target-user");
+    await insertTraceEvent("trace-2", "other-user");
+    await db.execute(
+      `INSERT INTO events_current
+        (project_id, partition_date, trace_id, span_id, parent_span_id,
+         is_app_root, version_token, type, environment, name, user_id,
+         session_id, trace_name, start_time, created_at, updated_at, source,
+         ingestion_sdk_name, ingestion_sdk_version, tags)
+       VALUES (?, '2026-07-17', 'trace-1', 'trace-1-child', 'trace-1-root',
+         FALSE, 2000, 'SPAN', 'staging', 'zzz-child', 'zzz-child-user',
+         'child-session', 'zzz-child-trace', '2026-07-17 09:01:00.000000',
+         '2026-07-17 09:01:00.000000', '2026-07-17 09:01:00.000000',
+         'api', 'js', '5.0.0', ARRAY('child'))`,
+      [projectId],
+    );
 
     const insertScore = (input: {
       projectId: string;
@@ -167,6 +208,24 @@ describeDoris("Doris score repository", () => {
     expect(second.nextCursor).toBeNull();
   });
 
+  it("scans canonical score identities for an immutable export manifest", async () => {
+    await expect(
+      collect(
+        repository.scanIdentities({
+          projectId,
+          range,
+          filters: [],
+          limit: 10,
+        }),
+      ),
+    ).resolves.toEqual([
+      { id: "score-boolean" },
+      { id: "score-categorical" },
+      { id: "score-numeric" },
+      { id: "score-text" },
+    ]);
+  });
+
   it("decodes point reads and grouped score values through real Doris", async () => {
     await expect(
       repository.get({ projectId, scoreId: "score-numeric" }),
@@ -227,31 +286,6 @@ describeDoris("Doris score repository", () => {
         {
           list: repository.list.bind(repository),
           count: repository.count.bind(repository),
-          getTrace: async ({ traceId }) =>
-            ({
-              id: traceId,
-              projectId,
-              timestamp: new Date("2026-07-17T09:00:00.000Z"),
-              endTime: new Date("2026-07-17T09:00:01.000Z"),
-              name: "trace",
-              userId: traceId === "trace-1" ? "target-user" : "other-user",
-              tags: ["prod"],
-              environment: "production",
-              sessionId: "session-1",
-              release: null,
-              version: null,
-              inputPreview: null,
-              outputPreview: null,
-              rootObservationId: "span-1",
-              fallbackObservationId: "span-1",
-              incomplete: false,
-              observationCount: 1,
-              totalInputTokens: 0,
-              totalOutputTokens: 0,
-              totalUsage: 0,
-              totalCost: null,
-              latency: 1,
-            }) satisfies DorisTrace,
         },
       ),
     ).resolves.toEqual({

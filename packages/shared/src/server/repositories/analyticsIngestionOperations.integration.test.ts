@@ -115,6 +115,7 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         projectId,
         reasonCode: "MAX_RETRIES_EXHAUSTED",
         expectedGeneration: 1,
+        now: new Date("2026-07-18T12:00:04.000Z"),
         retryDelayMs: 1_000,
       }),
     ).resolves.toBe("requeued");
@@ -170,6 +171,66 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         acceptedAtNanos: input.acceptedAtNanos + 1n,
       }),
     ).rejects.toThrow("Ingestion source operation conflicts with its receipt");
+  });
+
+  it("promotes a pre-deletion receipt after the project is soft-deleted", async () => {
+    const deletionProjectId = `ingestion-deletion-project-${suffix}`;
+    const operationId = `ingestion-deletion-operation-${suffix}`;
+    const input = {
+      client: prisma,
+      operationId,
+      projectId: deletionProjectId,
+      sourceOperationId: `ingestion-deletion-source-${suffix}`,
+      sourceChecksum: "b".repeat(64),
+      rawObjectKey: `events/${deletionProjectId}/raw/source.json`,
+      acceptedAt: new Date("2026-07-18T12:00:00.000Z"),
+      acceptedAtNanos: 1_784_376_000_000_000_000n,
+      canonicalizerVersion: "1",
+      schemaVersion: 3,
+      recoverableUntil: new Date("2026-07-25T12:00:00.000Z"),
+      statusExpiresAt: new Date("2026-08-24T12:00:00.000Z"),
+    };
+
+    await prisma.project.create({
+      data: {
+        id: deletionProjectId,
+        name: "Doris ingestion deletion race test",
+        orgId: organizationId,
+      },
+    });
+    try {
+      await expect(
+        repository.createAnalyticsIngestionReceipt({
+          ...input,
+          publishReady: false,
+        }),
+      ).resolves.toMatchObject({ created: true });
+      await prisma.$transaction([
+        prisma.analyticsProjectDeletionGeneration.create({
+          data: { projectId: deletionProjectId, generation: 1n },
+        }),
+        prisma.project.update({
+          where: { id: deletionProjectId },
+          data: { deletedAt: new Date("2026-07-18T12:01:00.000Z") },
+        }),
+      ]);
+
+      await expect(
+        repository.createAnalyticsIngestionReceipt({
+          ...input,
+          publishReady: true,
+          rawArtifactVerified: true,
+        }),
+      ).resolves.toMatchObject({ created: false });
+      await expect(
+        prisma.analyticsIngestionOutboxV2.count({ where: { operationId } }),
+      ).resolves.toBe(1);
+    } finally {
+      await prisma.project.deleteMany({ where: { id: deletionProjectId } });
+      await prisma.analyticsProjectDeletionGeneration.deleteMany({
+        where: { projectId: deletionProjectId },
+      });
+    }
   });
 
   it("atomically hands nonterminal legacy outbox rows to V2", async () => {
@@ -509,7 +570,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         loadBatches: {
           create: {
             id: `unknown-load-${suffix}`,
-            projectId,
             databaseName: "langfuse",
             targetTable: "events_current",
             logicalBatchId: "events-2026-07-10-000000",
@@ -604,7 +664,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
           create: [
             {
               id: visibleLoadId,
-              projectId,
               databaseName: "langfuse",
               targetTable: "events_current",
               logicalBatchId: "partial-visible",
@@ -619,7 +678,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
             },
             {
               id: pendingLoadId,
-              projectId,
               databaseName: "langfuse",
               targetTable: "events_current",
               logicalBatchId: "partial-pending",
@@ -633,7 +691,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         candidates: {
           create: [
             {
-              projectId,
               candidateKey: `partial-visible-${suffix}`,
               entityType: "EVENT",
               entityKey: `visible-entity-${suffix}`,
@@ -644,7 +701,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
               loadBatchId: visibleLoadId,
             },
             {
-              projectId,
               candidateKey: `partial-pending-${suffix}`,
               entityType: "EVENT",
               entityKey: `pending-entity-${suffix}`,
@@ -712,7 +768,6 @@ describe.skipIf(!controlDatabaseUrl)("analytics ingestion operations", () => {
         loadBatches: {
           create: {
             id: loadBatchId,
-            projectId,
             databaseName: "langfuse",
             targetTable: "events_current",
             logicalBatchId: "terminal-race",

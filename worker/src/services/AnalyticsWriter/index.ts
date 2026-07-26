@@ -5,6 +5,7 @@ import {
   type AnalyticsBatchReceipt,
   type AnalyticsBatchSink,
   type CanonicalAnalyticsBatch,
+  type CanonicalAnalyticsEntity,
 } from "@langfuse/shared/analytics-persistence";
 import {
   acquireAnalyticsMutationPermit,
@@ -17,6 +18,8 @@ import {
   findAnalyticsIngestionOperationForProject,
   freezeAnalyticsIngestionManifest,
   getProjectDeletionGeneration,
+  getDatasetDeletionGeneration,
+  getDatasetRunDeletionGeneration,
   getAnalyticsRetentionBarrier,
   getTraceDeletionGeneration,
   initializeTraceControlState,
@@ -25,6 +28,9 @@ import {
   recordAnalyticsLoadReconciliation,
   reserveCanonicalizationFence,
   DorisError,
+  type AnalyticsEvaluationDispatchTargetInput,
+  type AnalyticsIntegrationDeliveryTargetInput,
+  type AnalyticsRuntimeAdmissionContext,
 } from "@langfuse/shared/src/server";
 
 import {
@@ -48,6 +54,52 @@ const RECONCILIATION_STATES: ReadonlySet<string> = new Set([
   "VISIBLE",
   "ABORTED",
 ]);
+
+async function currentDeletionGenerations(input: {
+  readonly client: PrismaClient;
+  readonly projectId: string;
+  readonly descriptor: CanonicalCandidateDescriptor;
+}): Promise<{
+  readonly project: bigint;
+  readonly trace: bigint;
+  readonly dataset: bigint;
+  readonly run: bigint;
+}> {
+  const [project, trace, dataset, run] = await Promise.all([
+    getProjectDeletionGeneration({
+      client: input.client,
+      projectId: input.projectId,
+    }),
+    input.descriptor.owningTraceId
+      ? getTraceDeletionGeneration({
+          client: input.client,
+          projectId: input.projectId,
+          traceId: input.descriptor.owningTraceId,
+        })
+      : 0n,
+    input.descriptor.owningDatasetId
+      ? getDatasetDeletionGeneration({
+          client: input.client,
+          projectId: input.projectId,
+          datasetId: input.descriptor.owningDatasetId,
+        })
+      : 0n,
+    input.descriptor.owningDatasetRunId
+      ? getDatasetRunDeletionGeneration({
+          client: input.client,
+          projectId: input.projectId,
+          datasetRunId: input.descriptor.owningDatasetRunId,
+        })
+      : 0n,
+  ]);
+  return { project, trace, dataset, run };
+}
+
+function hasDeletionBarrier(
+  generations: Awaited<ReturnType<typeof currentDeletionGenerations>>,
+): boolean {
+  return Object.values(generations).some((generation) => generation !== 0n);
+}
 
 type FrozenCandidateDisposition = {
   candidateKey: string;
@@ -124,12 +176,137 @@ function candidatePublication(
     entityType: descriptor.entityType,
     entityKey: descriptor.entityKey,
     owningTraceId: descriptor.owningTraceId,
+    owningDatasetId: descriptor.owningDatasetId,
+    owningDatasetRunId: descriptor.owningDatasetRunId,
     partitionDate: partitionDate(descriptor.partitionDate),
     sourceVersion: descriptor.claim.entity.sourceVersion,
     canonicalPayloadHash: descriptor.claim.entity.canonicalPayloadHash,
     traceDeletionGeneration: descriptor.claim.traceDeletionGeneration,
     projectDeletionGeneration: descriptor.claim.projectDeletionGeneration,
+    datasetDeletionGeneration: descriptor.claim.datasetDeletionGeneration ?? 0n,
+    runDeletionGeneration: descriptor.claim.runDeletionGeneration ?? 0n,
   }));
+}
+
+function nanosDate(value: bigint): Date {
+  const milliseconds = value / 1_000_000n;
+  if (
+    milliseconds < BigInt(Number.MIN_SAFE_INTEGER) ||
+    milliseconds > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
+  }
+  const date = new Date(Number(milliseconds));
+  if (!Number.isFinite(date.getTime())) {
+    throw new AnalyticsPersistenceError("ANALYTICS_VALIDATION_ERROR", false);
+  }
+  return date;
+}
+
+export function analyticsEvaluationTargetsFromCanonicalBatch(
+  batch: CanonicalAnalyticsBatch,
+): readonly AnalyticsEvaluationDispatchTargetInput[] {
+  const targets: AnalyticsEvaluationDispatchTargetInput[] = [];
+  for (const descriptor of describeCanonicalCandidates(batch)) {
+    const entity: CanonicalAnalyticsEntity = descriptor.claim.entity;
+    if (entity.kind === "event") {
+      const targetTimestamp = nanosDate(entity.startTime);
+      targets.push(
+        {
+          candidateKey: descriptor.candidateKey,
+          targetType: "TRACE_UPSERT",
+          targetId: entity.traceId,
+          traceId: entity.traceId,
+          observationId: null,
+          datasetItemId: null,
+          targetTimestamp,
+          traceEnvironment: entity.environment,
+        },
+        {
+          candidateKey: descriptor.candidateKey,
+          targetType: "OBSERVATION_UPSERT",
+          targetId: entity.spanId,
+          traceId: entity.traceId,
+          observationId: entity.spanId,
+          datasetItemId: null,
+          targetTimestamp,
+          traceEnvironment: entity.environment,
+        },
+      );
+    } else if (entity.kind === "datasetRunItem") {
+      targets.push({
+        candidateKey: descriptor.candidateKey,
+        targetType: "DATASET_RUN_ITEM_UPSERT",
+        targetId: entity.runItemId,
+        traceId: entity.traceId,
+        observationId: entity.observationId,
+        datasetItemId: entity.datasetItemId,
+        datasetItemValidFrom:
+          entity.datasetItemVersion === null
+            ? null
+            : nanosDate(entity.datasetItemVersion),
+        targetTimestamp: nanosDate(entity.createdAt),
+        traceEnvironment: null,
+      });
+    }
+  }
+  return targets;
+}
+
+const MAX_INTEGRATION_DELIVERY_ESTIMATED_BYTES = 16 * 1024 * 1024;
+
+function analyticsIntegrationEntityEstimatedBytes(
+  entity: CanonicalAnalyticsEntity,
+): number {
+  const serialized = JSON.stringify(entity, (_key, value: unknown) =>
+    typeof value === "bigint" ? value.toString() : value,
+  );
+  return Math.min(
+    Buffer.byteLength(serialized, "utf8"),
+    MAX_INTEGRATION_DELIVERY_ESTIMATED_BYTES,
+  );
+}
+
+export function analyticsIntegrationTargetsFromCanonicalBatch(
+  batch: CanonicalAnalyticsBatch,
+): readonly AnalyticsIntegrationDeliveryTargetInput[] {
+  const targets: AnalyticsIntegrationDeliveryTargetInput[] = [];
+  for (const descriptor of describeCanonicalCandidates(batch)) {
+    const entity = descriptor.claim.entity;
+    const estimatedBytes = analyticsIntegrationEntityEstimatedBytes(entity);
+    if (entity.kind === "event") {
+      targets.push(
+        {
+          candidateKey: descriptor.candidateKey,
+          deliveryKind: "TRACE",
+          entityKey: entity.traceId,
+          estimatedBytes,
+        },
+        {
+          candidateKey: descriptor.candidateKey,
+          deliveryKind: "OBSERVATION",
+          entityKey: entity.spanId,
+          estimatedBytes,
+        },
+      );
+      if (entity.type === "GENERATION") {
+        targets.push({
+          candidateKey: descriptor.candidateKey,
+          deliveryKind: "GENERATION",
+          entityKey: entity.spanId,
+          estimatedBytes,
+        });
+      }
+    } else if (entity.kind === "score") {
+      targets.push({
+        candidateKey: descriptor.candidateKey,
+        deliveryKind: "SCORE",
+        entityKey: entity.scoreId,
+        estimatedBytes,
+      });
+    }
+  }
+  return targets;
 }
 
 function controlStateRepresentative(
@@ -164,6 +341,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       readonly databaseName: string;
       readonly canonicalPrefix: string;
       readonly workerId: string;
+      readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
       readonly now?: () => Date;
     },
   ) {
@@ -193,11 +371,24 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
     }
 
     await this.loadFrozenBatches(operation, artifact);
+    const admissionContext = this.dependencies.getAdmissionContext?.() ?? null;
     const completion = await completeAnalyticsIngestionOperation({
       client: this.dependencies.client,
       operationId: batch.operationId,
       projectId: batch.projectId,
       now: this.now(),
+      ...(admissionContext
+        ? {
+            evaluationCapture: {
+              admissionContext,
+              targets: analyticsEvaluationTargetsFromCanonicalBatch(artifact),
+            },
+            integrationCapture: {
+              admissionContext,
+              targets: analyticsIntegrationTargetsFromCanonicalBatch(artifact),
+            },
+          }
+        : {}),
     });
     if (
       completion.outcome === "pending" ||
@@ -293,11 +484,38 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
     }
     if (aborted) return false;
 
+    const canonicalArtifact =
+      operation.canonicalObjectKey && operation.canonicalArtifactChecksum
+        ? await this.dependencies.artifactStore.get(
+            operation.canonicalObjectKey,
+            operation.canonicalArtifactChecksum,
+          )
+        : null;
+    if (canonicalArtifact) {
+      assertArtifactForOperation(operation, canonicalArtifact);
+    }
+    const admissionContext = this.dependencies.getAdmissionContext?.() ?? null;
     const completion = await completeAnalyticsIngestionOperation({
       client: this.dependencies.client,
       operationId: operation.id,
       projectId: operation.projectId,
       now: this.now(),
+      ...(admissionContext && canonicalArtifact
+        ? {
+            evaluationCapture: {
+              admissionContext,
+              targets:
+                analyticsEvaluationTargetsFromCanonicalBatch(canonicalArtifact),
+            },
+            integrationCapture: {
+              admissionContext,
+              targets:
+                analyticsIntegrationTargetsFromCanonicalBatch(
+                  canonicalArtifact,
+                ),
+            },
+          }
+        : {}),
     });
     if (completion.outcome === "pending") {
       throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
@@ -499,18 +717,12 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         });
         continue;
       }
-      const projectGeneration = await getProjectDeletionGeneration({
+      const deletionGenerations = await currentDeletionGenerations({
         client: this.dependencies.client,
         projectId: operation.projectId,
+        descriptor,
       });
-      const traceGeneration = descriptor.owningTraceId
-        ? await getTraceDeletionGeneration({
-            client: this.dependencies.client,
-            projectId: operation.projectId,
-            traceId: descriptor.owningTraceId,
-          })
-        : 0n;
-      if (projectGeneration !== 0n || traceGeneration !== 0n) {
+      if (hasDeletionBarrier(deletionGenerations)) {
         dispositionResults.push({
           candidateKey: descriptor.candidateKey,
           disposition: "CANCELLED_BY_DELETION" as const,
@@ -529,6 +741,8 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         entityKey: descriptor.entityKey,
         lookupId: descriptor.lookupId,
         owningTraceId: descriptor.owningTraceId,
+        owningDatasetId: descriptor.owningDatasetId,
+        owningDatasetRunId: descriptor.owningDatasetRunId,
         expectedSourceVersion: descriptor.claim.expectedSourceVersion,
         sourceVersion: descriptor.claim.entity.sourceVersion,
         canonicalPayloadHash: descriptor.claim.entity.canonicalPayloadHash,
@@ -537,6 +751,9 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
         fenceGeneration: operation.canonicalizationFence,
         traceDeletionGeneration: descriptor.claim.traceDeletionGeneration,
         projectDeletionGeneration: descriptor.claim.projectDeletionGeneration,
+        datasetDeletionGeneration:
+          descriptor.claim.datasetDeletionGeneration ?? 0n,
+        runDeletionGeneration: descriptor.claim.runDeletionGeneration ?? 0n,
       });
       // An identical head only proves that another operation won the CAS; it
       // does not prove that winner's Doris load is already visible. Re-loading
@@ -586,20 +803,12 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
       if (!descriptor) {
         throw new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false);
       }
-      const [projectGeneration, traceGeneration] = await Promise.all([
-        getProjectDeletionGeneration({
-          client: this.dependencies.client,
-          projectId: operation.projectId,
-        }),
-        descriptor.owningTraceId
-          ? getTraceDeletionGeneration({
-              client: this.dependencies.client,
-              projectId: operation.projectId,
-              traceId: descriptor.owningTraceId,
-            })
-          : 0n,
-      ]);
-      if (projectGeneration === 0n && traceGeneration === 0n) {
+      const deletionGenerations = await currentDeletionGenerations({
+        client: this.dependencies.client,
+        projectId: operation.projectId,
+        descriptor,
+      });
+      if (!hasDeletionBarrier(deletionGenerations)) {
         continue;
       }
       requiredKeys.delete(descriptor.candidateKey);

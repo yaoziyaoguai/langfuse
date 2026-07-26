@@ -3,20 +3,25 @@ import { createHash } from "node:crypto";
 import type { AnalyticsIngestionOperation, PrismaClient } from "@prisma/client";
 import {
   AnalyticsPersistenceError,
-  canonicalPayloadHash,
+  canonicalEntityPayloadHash,
   decodeRawAnalyticsIngestionEnvelope,
+  deriveDatasetRunItemSourceTime,
   deriveFileReferenceSourceTime,
   deriveOtlpSourceTime,
   deriveScoreSourceTime,
   deriveV4SourceTime,
   type CanonicalAnalyticsBatch,
+  type CanonicalAnalyticsDatasetRunItem,
   type CanonicalAnalyticsEntityClaim,
+  type CanonicalAnalyticsEvent,
   type CanonicalAnalyticsFileReference,
   type CanonicalAnalyticsScore,
   type OtlpNanoTimestamp,
 } from "@langfuse/shared/analytics-persistence";
 import {
   createIngestionEventSchema,
+  getDatasetDeletionGeneration,
+  getDatasetRunDeletionState,
   getProjectDeletionGeneration,
   getTraceDeletionGeneration,
   OtelIngestionProcessor,
@@ -25,7 +30,11 @@ import {
 } from "@langfuse/shared/src/server";
 import type { StorageService } from "@langfuse/shared/src/server";
 
-import { EventCanonicalizer, toCanonicalRecord } from "./EventCanonicalizer";
+import {
+  EventCanonicalizer,
+  toCanonicalJson,
+  toCanonicalRecord,
+} from "./EventCanonicalizer";
 import {
   LegacyEventCanonicalizer,
   type LoadCurrentLegacyEvent,
@@ -48,6 +57,42 @@ type InternalEventPayload = {
   >[0]["eventData"];
   readonly envelopeTimestamp: string;
 };
+
+type DatasetRunItemContext = {
+  readonly run: {
+    readonly name: string;
+    readonly description: string | null;
+    readonly metadata: unknown;
+    readonly createdAt: Date;
+  };
+  readonly item: {
+    readonly input: unknown;
+    readonly expectedOutput: unknown;
+    readonly metadata: unknown;
+    readonly validFrom: Date;
+  };
+};
+
+type LoadDatasetRunItemContext = (input: {
+  readonly projectId: string;
+  readonly datasetId: string;
+  readonly datasetRunId: string;
+  readonly datasetItemId: string;
+  readonly datasetVersion: Date | null;
+}) => Promise<DatasetRunItemContext | null>;
+
+type DatasetDeletionSnapshot = {
+  readonly owningDatasetId: string | null;
+  readonly owningDatasetRunId: string | null;
+  readonly datasetDeletionGeneration: bigint;
+  readonly runDeletionGeneration: bigint;
+};
+
+type ResolveDatasetDeletionSnapshot = (input: {
+  readonly projectId: string;
+  readonly datasetId?: string | null;
+  readonly datasetRunId?: string | null;
+}) => Promise<DatasetDeletionSnapshot>;
 
 function sha256(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
@@ -102,6 +147,8 @@ export class RawAnalyticsIngestionCanonicalizer {
   private readonly getProjectGeneration: typeof getProjectDeletionGeneration;
   private readonly getTraceGeneration: typeof getTraceDeletionGeneration;
   private readonly validateScore: typeof validateAndInflateScore;
+  private readonly loadDatasetRunItemContext: LoadDatasetRunItemContext;
+  private readonly resolveDatasetDeletionSnapshot: ResolveDatasetDeletionSnapshot;
   private readonly legacyEventCanonicalizer: LegacyEventCanonicalizer;
 
   constructor(
@@ -116,6 +163,8 @@ export class RawAnalyticsIngestionCanonicalizer {
       readonly getProjectDeletionGeneration?: typeof getProjectDeletionGeneration;
       readonly getTraceDeletionGeneration?: typeof getTraceDeletionGeneration;
       readonly validateAndInflateScore?: typeof validateAndInflateScore;
+      readonly loadDatasetRunItemContext?: LoadDatasetRunItemContext;
+      readonly resolveDatasetDeletionSnapshot?: ResolveDatasetDeletionSnapshot;
       readonly loadCurrentEvent?: LoadCurrentLegacyEvent;
     },
   ) {
@@ -124,7 +173,104 @@ export class RawAnalyticsIngestionCanonicalizer {
     this.getTraceGeneration =
       dependencies.getTraceDeletionGeneration ?? getTraceDeletionGeneration;
     this.validateScore =
-      dependencies.validateAndInflateScore ?? validateAndInflateScore;
+      dependencies.validateAndInflateScore ??
+      (dependencies.client
+        ? (input) => validateAndInflateScore(input, dependencies.client)
+        : validateAndInflateScore);
+    this.loadDatasetRunItemContext =
+      dependencies.loadDatasetRunItemContext ??
+      (async (input) => {
+        if (!dependencies.client) {
+          throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+            tags: { phase: "dataset_run_item_enrichment" },
+          });
+        }
+        const [run, item] = await Promise.all([
+          dependencies.client.datasetRuns.findFirst({
+            where: {
+              id: input.datasetRunId,
+              datasetId: input.datasetId,
+              projectId: input.projectId,
+            },
+            select: {
+              name: true,
+              description: true,
+              metadata: true,
+              createdAt: true,
+            },
+          }),
+          dependencies.client.datasetItem.findFirst({
+            where: {
+              id: input.datasetItemId,
+              datasetId: input.datasetId,
+              projectId: input.projectId,
+              status: "ACTIVE",
+              isDeleted: false,
+              ...(input.datasetVersion
+                ? {
+                    validFrom: { lte: input.datasetVersion },
+                    OR: [
+                      { validTo: null },
+                      { validTo: { gt: input.datasetVersion } },
+                    ],
+                  }
+                : { validTo: null }),
+            },
+            orderBy: { validFrom: "desc" },
+            select: {
+              input: true,
+              expectedOutput: true,
+              metadata: true,
+              validFrom: true,
+            },
+          }),
+        ]);
+        return run && item ? { run, item } : null;
+      });
+    this.resolveDatasetDeletionSnapshot =
+      dependencies.resolveDatasetDeletionSnapshot ??
+      (async (input) => {
+        if (!dependencies.client) {
+          return {
+            owningDatasetId: input.datasetId ?? null,
+            owningDatasetRunId: input.datasetRunId ?? null,
+            datasetDeletionGeneration: 0n,
+            runDeletionGeneration: 0n,
+          };
+        }
+        const runState = input.datasetRunId
+          ? await getDatasetRunDeletionState({
+              client: dependencies.client,
+              projectId: input.projectId,
+              datasetRunId: input.datasetRunId,
+            })
+          : null;
+        let datasetId = input.datasetId ?? runState?.datasetId ?? null;
+        if (!datasetId && input.datasetRunId && dependencies.client) {
+          datasetId =
+            (
+              await dependencies.client.datasetRuns.findFirst({
+                where: {
+                  id: input.datasetRunId,
+                  projectId: input.projectId,
+                },
+                select: { datasetId: true },
+              })
+            )?.datasetId ?? null;
+        }
+        return {
+          owningDatasetId: datasetId,
+          owningDatasetRunId: input.datasetRunId ?? null,
+          datasetDeletionGeneration: datasetId
+            ? await getDatasetDeletionGeneration({
+                client: dependencies.client,
+                projectId: input.projectId,
+                datasetId,
+              })
+            : 0n,
+          runDeletionGeneration: runState?.generation ?? 0n,
+        };
+      });
     this.legacyEventCanonicalizer = new LegacyEventCanonicalizer({
       loadCurrentEvent:
         dependencies.loadCurrentEvent ??
@@ -133,6 +279,27 @@ export class RawAnalyticsIngestionCanonicalizer {
             tags: { phase: "legacy_current_state" },
           });
         }),
+    });
+  }
+
+  private datasetSnapshotForEvent(
+    event: CanonicalAnalyticsEvent,
+  ): Promise<DatasetDeletionSnapshot> {
+    if (
+      event.schemaVersion < 2 ||
+      (!event.experimentDatasetId && !event.experimentId)
+    ) {
+      return Promise.resolve({
+        owningDatasetId: null,
+        owningDatasetRunId: null,
+        datasetDeletionGeneration: 0n,
+        runDeletionGeneration: 0n,
+      });
+    }
+    return this.resolveDatasetDeletionSnapshot({
+      projectId: event.projectId,
+      datasetId: event.experimentDatasetId ?? null,
+      datasetRunId: event.experimentId ?? null,
     });
   }
 
@@ -153,11 +320,11 @@ export class RawAnalyticsIngestionCanonicalizer {
       });
     }
     if (body === null) {
-      throw new AnalyticsPersistenceError("ANALYTICS_UNRECOVERABLE", false, {
+      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
         tags: {
           operationId: operation.id,
           phase: "raw_artifact",
-          reasonCode: "RAW_ARTIFACT_UNAVAILABLE",
+          reasonCode: "RAW_ARTIFACT_PENDING",
         },
       });
     }
@@ -210,6 +377,14 @@ export class RawAnalyticsIngestionCanonicalizer {
           operation,
           payload: envelope.payload,
           trustedAnnotation: true,
+          projectDeletionGeneration,
+          traceDeletionGeneration,
+        });
+        break;
+      case "dataset-run-item":
+        children = await this.canonicalizeDatasetRunItems({
+          operation,
+          payload: envelope.payload,
           projectDeletionGeneration,
           traceDeletionGeneration,
         });
@@ -304,6 +479,7 @@ export class RawAnalyticsIngestionCanonicalizer {
           entity.traceId,
         ),
         projectDeletionGeneration: input.projectDeletionGeneration,
+        ...(await this.datasetSnapshotForEvent(entity)),
       });
     }
     return claims;
@@ -380,6 +556,12 @@ export class RawAnalyticsIngestionCanonicalizer {
         queueId: validated.queueId ?? null,
         environment: validated.environment,
         metadata: toCanonicalRecord(parsed.data.body.metadata ?? {}),
+        ...(input.operation.schemaVersion >= 2
+          ? {
+              datasetRunId: validated.datasetRunId ?? null,
+              executionTraceId: validated.executionTraceId ?? null,
+            }
+          : {}),
         sourceContract: sourceTime.sourceContract,
         sourceVersion: sourceTime.sourceVersion,
         partitionDate: sourceTime.partitionDate,
@@ -391,17 +573,30 @@ export class RawAnalyticsIngestionCanonicalizer {
       };
       const score: CanonicalAnalyticsScore = {
         ...scoreContent,
-        canonicalPayloadHash: canonicalPayloadHash(scoreContent),
+        canonicalPayloadHash: canonicalEntityPayloadHash(scoreContent),
       };
       const traceDeletionGeneration = await input.traceDeletionGeneration(
         score.traceId,
       );
+      const datasetSnapshot =
+        input.operation.schemaVersion >= 2 && score.datasetRunId
+          ? await this.resolveDatasetDeletionSnapshot({
+              projectId: input.operation.projectId,
+              datasetRunId: score.datasetRunId,
+            })
+          : {
+              owningDatasetId: null,
+              owningDatasetRunId: null,
+              datasetDeletionGeneration: 0n,
+              runDeletionGeneration: 0n,
+            };
       claims.push({
         entity: score,
         expectedSourceVersion: null,
         fenceGeneration: 1n,
         traceDeletionGeneration,
         projectDeletionGeneration: input.projectDeletionGeneration,
+        ...datasetSnapshot,
       });
 
       const fileTime = deriveFileReferenceSourceTime({
@@ -429,7 +624,7 @@ export class RawAnalyticsIngestionCanonicalizer {
       };
       const fileReference: CanonicalAnalyticsFileReference = {
         ...fileContent,
-        canonicalPayloadHash: canonicalPayloadHash(fileContent),
+        canonicalPayloadHash: canonicalEntityPayloadHash(fileContent),
       };
       claims.push({
         entity: fileReference,
@@ -437,6 +632,103 @@ export class RawAnalyticsIngestionCanonicalizer {
         fenceGeneration: 1n,
         traceDeletionGeneration,
         projectDeletionGeneration: input.projectDeletionGeneration,
+        ...datasetSnapshot,
+      });
+    }
+    return claims;
+  }
+
+  private async canonicalizeDatasetRunItems(input: {
+    operation: RawAnalyticsOperation;
+    payload: unknown;
+    projectDeletionGeneration: bigint;
+    traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
+  }): Promise<CanonicalAnalyticsEntityClaim[]> {
+    if (input.operation.schemaVersion < 2) {
+      throw new AnalyticsPersistenceError(
+        "ANALYTICS_UNSUPPORTED_FEATURE",
+        false,
+        { tags: { sourceContract: "dataset-run-item" } },
+      );
+    }
+    const schema = createIngestionEventSchema(true);
+    const claims: CanonicalAnalyticsEntityClaim[] = [];
+    for (const value of asArray(input.payload, "dataset-run-item")) {
+      const parsed = schema.safeParse(value);
+      const runItemId = parsed.success ? parsed.data.body.id : null;
+      if (
+        !parsed.success ||
+        parsed.data.type !== "dataset-run-item-create" ||
+        !runItemId
+      ) {
+        throw validationError("dataset-run-item");
+      }
+      const body = parsed.data.body;
+      const context = await this.loadDatasetRunItemContext({
+        projectId: input.operation.projectId,
+        datasetId: body.datasetId,
+        datasetRunId: body.runId,
+        datasetItemId: body.datasetItemId,
+        datasetVersion: body.datasetVersion
+          ? new Date(body.datasetVersion)
+          : null,
+      });
+      if (!context) throw validationError("dataset-run-item");
+      const sourceTime = deriveDatasetRunItemSourceTime({
+        eventTimestamp: parsed.data.timestamp,
+        createdAt: body.createdAt ?? parsed.data.timestamp,
+      });
+      const datasetSnapshot = await this.resolveDatasetDeletionSnapshot({
+        projectId: input.operation.projectId,
+        datasetId: body.datasetId,
+        datasetRunId: body.runId,
+      });
+      const content = {
+        kind: "datasetRunItem" as const,
+        projectId: input.operation.projectId,
+        runItemId,
+        datasetRunId: body.runId,
+        datasetItemId: body.datasetItemId,
+        datasetId: body.datasetId,
+        traceId: body.traceId,
+        observationId: body.observationId ?? null,
+        error: body.error ?? null,
+        createdAt: sourceTime.createdAt,
+        updatedAt: sourceTime.createdAt,
+        datasetRunName: context.run.name,
+        datasetRunDescription: context.run.description,
+        datasetRunMetadata: toCanonicalRecord(context.run.metadata ?? {}),
+        datasetRunCreatedAt:
+          BigInt(context.run.createdAt.getTime()) * 1_000_000n,
+        datasetItemVersion:
+          BigInt(context.item.validFrom.getTime()) * 1_000_000n,
+        datasetItemInput: toCanonicalJson(context.item.input),
+        datasetItemExpectedOutput: toCanonicalJson(context.item.expectedOutput),
+        datasetItemMetadata: toCanonicalRecord(context.item.metadata ?? {}),
+        datasetDeletionGeneration: datasetSnapshot.datasetDeletionGeneration,
+        runDeletionGeneration: datasetSnapshot.runDeletionGeneration,
+        sourceContract: sourceTime.sourceContract,
+        sourceVersion: sourceTime.sourceVersion,
+        partitionDate: sourceTime.partitionDate,
+        canonicalizerVersion: input.operation.canonicalizerVersion,
+        schemaVersion: input.operation.schemaVersion,
+        systemTimestamp: input.operation.acceptedAtNanos,
+        rawObjectKey: input.operation.rawObjectKey,
+        resolvedEnrichmentIds: {},
+      };
+      const entity: CanonicalAnalyticsDatasetRunItem = {
+        ...content,
+        canonicalPayloadHash: canonicalEntityPayloadHash(content),
+      };
+      claims.push({
+        entity,
+        expectedSourceVersion: null,
+        fenceGeneration: 1n,
+        traceDeletionGeneration: await input.traceDeletionGeneration(
+          entity.traceId,
+        ),
+        projectDeletionGeneration: input.projectDeletionGeneration,
+        ...datasetSnapshot,
       });
     }
     return claims;
@@ -483,6 +775,7 @@ export class RawAnalyticsIngestionCanonicalizer {
           event.traceId,
         ),
         projectDeletionGeneration: input.projectDeletionGeneration,
+        ...(await this.datasetSnapshotForEvent(event)),
       });
     }
     return claims;
@@ -527,6 +820,7 @@ export class RawAnalyticsIngestionCanonicalizer {
           event.traceId,
         ),
         projectDeletionGeneration: input.projectDeletionGeneration,
+        ...(await this.datasetSnapshotForEvent(event)),
       },
     ];
   }

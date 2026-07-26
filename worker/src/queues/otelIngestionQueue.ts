@@ -46,6 +46,7 @@ import {
   scheduleObservationEvals,
   createObservationEvalSchedulerDeps,
 } from "../features/evaluation/observationEval";
+import { getWorkerAnalyticsAdmissionContext } from "../analyticsRuntime";
 
 /**
  * Check if HTTP headers from the SDK request indicate the batch is eligible
@@ -471,6 +472,7 @@ export const otelIngestionQueueProcessorBuilder = (
             forwardToEventsTable: shouldForwardToEventsTable,
             attribution,
             isLangfuseInternal,
+            analyticsAdmissionContext: getWorkerAnalyticsAdmissionContext(),
           }),
         ]);
       }

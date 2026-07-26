@@ -1,15 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { Prisma } from "@prisma/client";
 import type {
   AnalyticsCandidateDisposition,
   AnalyticsEntityType,
   AnalyticsIngestionOperation,
   AnalyticsIngestionOperationStatus,
-  Prisma,
   PrismaClient,
 } from "@prisma/client";
 
 import { prisma } from "../../db";
+import {
+  lockAnalyticsAdmission,
+  lockLegacyAnalyticsAdmission,
+  type AnalyticsRuntimeAdmissionContext,
+} from "../analytics-persistence/analyticsBackendAdmission";
+import { toPrismaAnalyticsCapability } from "../analytics-persistence/analyticsBackendMapping";
+import {
+  serializeAnalyticsDurableProvenance,
+  type AnalyticsDurableProvenance,
+} from "../analytics-persistence/analyticsDurableProvenance";
 import { getActiveCheckpointGenerationForAcceptance } from "./analyticsCheckpoints";
 import {
   findAndLockAnalyticsIngestionOperation,
@@ -22,6 +32,7 @@ const RETRY_MAX_DELAY_MS = 30 * 60_000;
 const LEGACY_HANDOFF_ADVISORY_LOCK_KEY = 181_865_275_000_002n;
 const LEGACY_HANDOFF_LOCK_PREFIX = "doris-handoff:";
 const LEGACY_HANDOFF_LOCK_MS = 5 * 60_000;
+const RAW_UPLOAD_GRACE_MS = 30 * 60_000;
 
 async function tryAcquireLegacyHandoffLock(
   transaction: Prisma.TransactionClient,
@@ -87,7 +98,107 @@ type CreateAnalyticsIngestionReceiptInput = {
   schemaVersion: number;
   recoverableUntil: Date;
   statusExpiresAt: Date;
+  producerProvenance?: AnalyticsDurableProvenance | null;
+  admissionContext?: AnalyticsRuntimeAdmissionContext | null;
+  publishReady?: boolean;
+  rawArtifactVerified?: boolean;
 };
+
+async function lockIngestionProject(input: {
+  readonly transaction: Prisma.TransactionClient;
+  readonly projectId: string;
+  readonly allowProjectDeletion: boolean;
+}): Promise<void> {
+  // 已创建的 pre-barrier receipt 必须能在 soft-delete 后完成 promotion，
+  // 否则 Project deletion 会永久等待这条 receipt；新 receipt 仍只接受 active Project。
+  const projects = input.allowProjectDeletion
+    ? await input.transaction.$queryRaw<readonly { id: string }[]>(Prisma.sql`
+        SELECT id
+        FROM projects
+        WHERE id = ${input.projectId}
+        FOR SHARE
+      `)
+    : await input.transaction.$queryRaw<readonly { id: string }[]>(Prisma.sql`
+        SELECT id
+        FROM projects
+        WHERE id = ${input.projectId}
+          AND deleted_at IS NULL
+        FOR SHARE
+      `);
+  if (projects.length !== 1) throw new Error("Project not found");
+  if (input.allowProjectDeletion) return;
+  const projectDeletion =
+    await input.transaction.analyticsProjectDeletionGeneration.findUnique({
+      where: { projectId: input.projectId },
+      select: { generation: true },
+    });
+  if (projectDeletion) {
+    throw new Error("Analytics ingestion is fenced by project deletion");
+  }
+}
+
+async function databaseClock(
+  transaction: Prisma.TransactionClient | PrismaClient,
+): Promise<Date> {
+  const [row] = await transaction.$queryRaw<readonly { now: Date }[]>(
+    Prisma.sql`SELECT clock_timestamp() AS now`,
+  );
+  if (!row || !Number.isFinite(row.now.getTime())) {
+    throw new Error("Postgres did not return its current timestamp");
+  }
+  return row.now;
+}
+
+async function lockIngestionReceiptAdmission(
+  transaction: Prisma.TransactionClient,
+  input: CreateAnalyticsIngestionReceiptInput,
+): Promise<AnalyticsDurableProvenance | null> {
+  const provenance = input.producerProvenance ?? null;
+  const admissionContext = input.admissionContext ?? null;
+  if (!provenance) {
+    if (admissionContext) {
+      throw new Error("Managed analytics ingestion requires provenance");
+    }
+    await lockLegacyAnalyticsAdmission(transaction);
+    return null;
+  }
+
+  serializeAnalyticsDurableProvenance(provenance);
+  const expectedBackend =
+    provenance.analyticsBackend === "DORIS" ? "doris" : "clickhouse";
+  if (
+    !admissionContext ||
+    admissionContext.backend !== expectedBackend ||
+    admissionContext.deploymentGeneration !== provenance.deploymentGeneration
+  ) {
+    throw new Error("Analytics ingestion admission does not match provenance");
+  }
+  const admission = await lockAnalyticsAdmission({
+    transaction,
+    runtimeLeaseId: admissionContext.runtimeLeaseId,
+    expectedBackend,
+    expectedDeploymentGeneration: provenance.deploymentGeneration,
+    ...(provenance.capability
+      ? {
+          capability: provenance.capability,
+          action: "externalProducer" as const,
+        }
+      : { action: "foundation" as const }),
+  });
+  if (
+    admission.analyticsBackend !== provenance.analyticsBackend ||
+    admission.deploymentGeneration !== provenance.deploymentGeneration ||
+    admission.workloadEpochFingerprint !==
+      provenance.workloadEpochFingerprint ||
+    admission.runtimeContractVersion !== provenance.runtimeContractVersion ||
+    admission.capabilityActivationGeneration !==
+      provenance.capabilityActivationGeneration ||
+    admission.capabilityContractVersion !== provenance.capabilityContractVersion
+  ) {
+    throw new Error("Analytics ingestion durable provenance changed");
+  }
+  return provenance;
+}
 
 function receiptMatches(
   operation: AnalyticsIngestionOperation,
@@ -103,8 +214,117 @@ function receiptMatches(
     operation.canonicalizerVersion === input.canonicalizerVersion &&
     operation.schemaVersion === input.schemaVersion &&
     operation.recoverableUntil.getTime() === input.recoverableUntil.getTime() &&
-    operation.statusExpiresAt.getTime() === input.statusExpiresAt.getTime()
+    operation.statusExpiresAt.getTime() === input.statusExpiresAt.getTime() &&
+    operation.analyticsBackend ===
+      (input.producerProvenance?.analyticsBackend ?? null) &&
+    operation.deploymentGeneration ===
+      (input.producerProvenance?.deploymentGeneration ?? null) &&
+    operation.workloadEpochFingerprint ===
+      (input.producerProvenance?.workloadEpochFingerprint ?? null) &&
+    operation.runtimeContractVersion ===
+      (input.producerProvenance?.runtimeContractVersion ?? null) &&
+    operation.producerRuntimeLeaseId ===
+      (input.producerProvenance?.producerRuntimeLeaseId ?? null) &&
+    operation.capability ===
+      (input.producerProvenance?.capability
+        ? toPrismaAnalyticsCapability(input.producerProvenance.capability)
+        : null) &&
+    operation.capabilityActivationGeneration ===
+      (input.producerProvenance?.capabilityActivationGeneration ?? null) &&
+    operation.capabilityContractVersion ===
+      (input.producerProvenance?.capabilityContractVersion ?? null)
   );
+}
+
+function canReviveRawArtifactExpiry(
+  operation: AnalyticsIngestionOperation,
+  input: CreateAnalyticsIngestionReceiptInput,
+): boolean {
+  return (
+    input.rawArtifactVerified === true &&
+    operation.status === "UNRECOVERABLE" &&
+    operation.lastErrorCode === "RAW_ARTIFACT_UNAVAILABLE" &&
+    operation.terminalAt !== null &&
+    operation.manifestState === "PENDING" &&
+    operation.canonicalizationFence === 0n &&
+    operation.reservedCanonicalObjectKey === null &&
+    operation.canonicalObjectKey === null &&
+    operation.canonicalArtifactChecksum === null &&
+    operation.cancellationReasonCode === null &&
+    operation.visibleAt === null
+  );
+}
+
+async function activateExistingAnalyticsIngestionReceipt(input: {
+  readonly client: PrismaClient;
+  readonly operation: AnalyticsIngestionOperation;
+  readonly receipt: CreateAnalyticsIngestionReceiptInput;
+}): Promise<void> {
+  await input.client.$transaction(async (transaction) => {
+    await getActiveCheckpointGenerationForAcceptance({
+      transaction,
+      now: input.receipt.acceptedAt,
+    });
+    await lockIngestionProject({
+      transaction,
+      projectId: input.receipt.projectId,
+      allowProjectDeletion: true,
+    });
+    await lockIngestionReceiptAdmission(transaction, input.receipt);
+    const operation = await lockAnalyticsIngestionOperation(transaction, {
+      operationId: input.operation.id,
+      projectId: input.operation.projectId,
+    });
+    if (!receiptMatches(operation, input.receipt)) {
+      throw new AnalyticsIngestionReceiptConflictError();
+    }
+    if (operation.terminalAt !== null) {
+      if (!canReviveRawArtifactExpiry(operation, input.receipt)) {
+        throw new AnalyticsIngestionReceiptConflictError();
+      }
+      const now = await databaseClock(transaction);
+      if (now > operation.recoverableUntil) {
+        throw new AnalyticsIngestionReceiptConflictError();
+      }
+      // raw 已按 checksum 验证；仅复活 expiry 自己产生且尚未发布的 receipt。
+      const revived = await transaction.analyticsIngestionOperation.updateMany({
+        where: {
+          id: operation.id,
+          projectId: operation.projectId,
+          status: "UNRECOVERABLE",
+          lastErrorCode: "RAW_ARTIFACT_UNAVAILABLE",
+          terminalAt: operation.terminalAt,
+          recoverableUntil: { gte: now },
+          manifestState: "PENDING",
+          canonicalizationFence: 0n,
+          reservedCanonicalObjectKey: null,
+          canonicalObjectKey: null,
+          canonicalArtifactChecksum: null,
+          cancellationReasonCode: null,
+          visibleAt: null,
+          outbox: null,
+          outboxV2: null,
+        },
+        data: {
+          status: "ACCEPTED",
+          lastErrorCode: null,
+          terminalAt: null,
+        },
+      });
+      if (revived.count !== 1) {
+        throw new AnalyticsIngestionReceiptConflictError();
+      }
+    }
+    await transaction.analyticsIngestionOutboxV2.upsert({
+      where: { operationId: operation.id },
+      create: {
+        operationId: operation.id,
+        status: "PENDING",
+        nextAttemptAt: input.receipt.acceptedAt,
+      },
+      update: {},
+    });
+  });
 }
 
 export async function createAnalyticsIngestionReceipt(
@@ -131,6 +351,26 @@ export async function createAnalyticsIngestionReceipt(
   ) {
     throw new TypeError("Invalid analytics ingestion receipt");
   }
+  if (input.producerProvenance) {
+    serializeAnalyticsDurableProvenance(input.producerProvenance);
+  }
+
+  const existingBefore = await client.analyticsIngestionOperation.findFirst({
+    where: { id: input.operationId, projectId: input.projectId },
+  });
+  if (existingBefore) {
+    if (!receiptMatches(existingBefore, input)) {
+      throw new AnalyticsIngestionReceiptConflictError();
+    }
+    if (input.publishReady !== false) {
+      await activateExistingAnalyticsIngestionReceipt({
+        client,
+        operation: existingBefore,
+        receipt: input,
+      });
+    }
+    return { operation: existingBefore, created: false };
+  }
 
   try {
     const operation = await client.$transaction(async (transaction) => {
@@ -139,6 +379,16 @@ export async function createAnalyticsIngestionReceipt(
           transaction,
           now: input.acceptedAt,
         });
+      await lockIngestionProject({
+        transaction,
+        projectId: input.projectId,
+        allowProjectDeletion: false,
+      });
+      const createdAt = await databaseClock(transaction);
+      const producerProvenance = await lockIngestionReceiptAdmission(
+        transaction,
+        input,
+      );
       const created = await transaction.analyticsIngestionOperation.create({
         data: {
           id: input.operationId,
@@ -150,18 +400,37 @@ export async function createAnalyticsIngestionReceipt(
           acceptedAtNanos: input.acceptedAtNanos,
           canonicalizerVersion: input.canonicalizerVersion,
           schemaVersion: input.schemaVersion,
+          analyticsBackend: producerProvenance?.analyticsBackend ?? null,
+          deploymentGeneration:
+            producerProvenance?.deploymentGeneration ?? null,
+          workloadEpochFingerprint:
+            producerProvenance?.workloadEpochFingerprint ?? null,
+          runtimeContractVersion:
+            producerProvenance?.runtimeContractVersion ?? null,
+          producerRuntimeLeaseId:
+            producerProvenance?.producerRuntimeLeaseId ?? null,
+          capability: producerProvenance?.capability
+            ? toPrismaAnalyticsCapability(producerProvenance.capability)
+            : null,
+          capabilityActivationGeneration:
+            producerProvenance?.capabilityActivationGeneration ?? null,
+          capabilityContractVersion:
+            producerProvenance?.capabilityContractVersion ?? null,
           checkpointGeneration,
+          createdAt,
           recoverableUntil: input.recoverableUntil,
           statusExpiresAt: input.statusExpiresAt,
         },
       });
-      await transaction.analyticsIngestionOutboxV2.create({
-        data: {
-          operationId: created.id,
-          status: "PENDING",
-          nextAttemptAt: input.acceptedAt,
-        },
-      });
+      if (input.publishReady !== false) {
+        await transaction.analyticsIngestionOutboxV2.create({
+          data: {
+            operationId: created.id,
+            status: "PENDING",
+            nextAttemptAt: input.acceptedAt,
+          },
+        });
+      }
       return created;
     });
     return { operation, created: true };
@@ -176,8 +445,82 @@ export async function createAnalyticsIngestionReceipt(
     if (!operation || !receiptMatches(operation, input)) {
       throw new AnalyticsIngestionReceiptConflictError();
     }
+    if (input.publishReady !== false) {
+      await activateExistingAnalyticsIngestionReceipt({
+        client,
+        operation,
+        receipt: input,
+      });
+    }
     return { operation, created: false };
   }
+}
+
+export async function expireUnreadyAnalyticsIngestionReceipts(input: {
+  readonly client?: PrismaClient;
+  readonly limit?: number;
+  readonly graceMs?: number;
+  readonly rawArtifactExists: (rawObjectKey: string) => Promise<boolean>;
+}): Promise<number> {
+  const client = input.client ?? prisma;
+  const limit = input.limit ?? 100;
+  const graceMs = input.graceMs ?? RAW_UPLOAD_GRACE_MS;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 1_000 ||
+    !Number.isSafeInteger(graceMs) ||
+    graceMs < 60_000
+  ) {
+    throw new TypeError("Invalid unready analytics ingestion expiry");
+  }
+  const now = await databaseClock(client);
+  const createdBefore = new Date(now.getTime() - graceMs);
+  const candidates = await client.analyticsIngestionOperation.findMany({
+    where: {
+      terminalAt: null,
+      outboxV2: null,
+      createdAt: { lte: createdBefore },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true, projectId: true, rawObjectKey: true },
+    take: limit,
+  });
+  let expired = 0;
+  for (const candidate of candidates) {
+    const terminalized = await client.$transaction(async (transaction) => {
+      const operation = await lockAnalyticsIngestionOperation(transaction, {
+        operationId: candidate.id,
+        projectId: candidate.projectId,
+      });
+      if (
+        operation.terminalAt !== null ||
+        operation.createdAt > createdBefore ||
+        (await transaction.analyticsIngestionOutboxV2.count({
+          where: { operationId: operation.id },
+        })) !== 0
+      ) {
+        return false;
+      }
+      // 与 ready promotion 共用 operation 行锁；只有持锁复核 raw 仍不存在时才能过期。
+      if (await input.rawArtifactExists(operation.rawObjectKey)) return false;
+      const updated = await transaction.analyticsIngestionOperation.updateMany({
+        where: {
+          id: operation.id,
+          projectId: operation.projectId,
+          terminalAt: null,
+        },
+        data: {
+          status: "UNRECOVERABLE",
+          lastErrorCode: "RAW_ARTIFACT_UNAVAILABLE",
+          terminalAt: now,
+        },
+      });
+      return updated.count === 1;
+    });
+    if (terminalized) expired += 1;
+  }
+  return expired;
 }
 
 export type CanonicalizationFenceReservation =
@@ -573,11 +916,15 @@ export type AnalyticsIngestionCandidateInput = {
   readonly entityType: AnalyticsEntityType;
   readonly entityKey: string;
   readonly owningTraceId: string | null;
+  readonly owningDatasetId?: string | null;
+  readonly owningDatasetRunId?: string | null;
   readonly partitionDate: Date;
   readonly sourceVersion: bigint;
   readonly canonicalPayloadHash: string;
   readonly traceDeletionGeneration: bigint;
   readonly projectDeletionGeneration: bigint;
+  readonly datasetDeletionGeneration?: bigint;
+  readonly runDeletionGeneration?: bigint;
 };
 
 export async function publishCanonicalArtifact(input: {
@@ -610,7 +957,13 @@ export async function publishCanonicalArtifact(input: {
         !candidate.entityKey ||
         !SHA256_HEX.test(candidate.canonicalPayloadHash) ||
         candidate.traceDeletionGeneration < 0n ||
-        candidate.projectDeletionGeneration < 0n,
+        candidate.projectDeletionGeneration < 0n ||
+        (candidate.datasetDeletionGeneration ?? 0n) < 0n ||
+        (candidate.runDeletionGeneration ?? 0n) < 0n ||
+        (!candidate.owningDatasetId &&
+          (candidate.datasetDeletionGeneration ?? 0n) !== 0n) ||
+        (!candidate.owningDatasetRunId &&
+          (candidate.runDeletionGeneration ?? 0n) !== 0n),
     )
   ) {
     throw new TypeError("Invalid canonical artifact publication");
@@ -670,11 +1023,15 @@ export async function publishCanonicalArtifact(input: {
         entityType: candidate.entityType,
         entityKey: candidate.entityKey,
         owningTraceId: candidate.owningTraceId,
+        owningDatasetId: candidate.owningDatasetId ?? null,
+        owningDatasetRunId: candidate.owningDatasetRunId ?? null,
         partitionDate: candidate.partitionDate,
         sourceVersion: candidate.sourceVersion,
         canonicalPayloadHash: candidate.canonicalPayloadHash,
         traceDeletionGeneration: candidate.traceDeletionGeneration,
         projectDeletionGeneration: candidate.projectDeletionGeneration,
+        datasetDeletionGeneration: candidate.datasetDeletionGeneration ?? 0n,
+        runDeletionGeneration: candidate.runDeletionGeneration ?? 0n,
       })),
     });
 

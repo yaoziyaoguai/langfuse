@@ -11,6 +11,11 @@ export function resolveDorisNodeEnv(
   nodeEnv: DorisNodeEnv,
   localDevMode: string | undefined,
 ): DorisNodeEnv {
+  if (nodeEnv === "production" && localDevMode === "true") {
+    throw new Error(
+      "Doris local development mode cannot be enabled in production",
+    );
+  }
   return localDevMode === "true" ? "development" : nodeEnv;
 }
 
@@ -38,6 +43,8 @@ export interface DorisStreamLoadRuntimeConfig {
   readonly allowedFeAddresses: readonly string[];
   readonly allowedRedirectOrigins: readonly string[];
   readonly allowedRedirectAddresses: readonly string[];
+  readonly redirectOriginRewriteMap: Readonly<Record<string, string>>;
+  readonly allowedRewriteAddresses: readonly string[];
   readonly tlsCaPath?: string;
   readonly requestTimeoutMs: number;
   readonly maxBodyBytes: number;
@@ -59,6 +66,7 @@ const queryEnvSchema = z.object({
 });
 
 const streamLoadEnvSchema = z.object({
+  DORIS_LOCAL_DEV_MODE: z.enum(["true", "false"]).default("false"),
   DORIS_STREAM_LOAD_FE_URL: z.string().min(1),
   DORIS_STREAM_LOAD_USER: z.string().min(1),
   DORIS_STREAM_LOAD_PASSWORD: z.string().default(""),
@@ -66,6 +74,8 @@ const streamLoadEnvSchema = z.object({
   DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: z.string().default(""),
   DORIS_STREAM_LOAD_BE_ALLOWLIST: z.string().min(1),
   DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: z.string().default(""),
+  DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP: z.string().default(""),
+  DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: z.string().default(""),
   DORIS_STREAM_LOAD_TLS_CA_PATH: z.string().min(1).optional(),
   DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: z.coerce
     .number()
@@ -103,6 +113,7 @@ function parseOrigin(value: string, variableName: string): URL {
   if (
     !["http:", "https:"].includes(url.protocol) ||
     !url.hostname ||
+    url.hostname.includes("*") ||
     url.username ||
     url.password ||
     (url.pathname !== "/" && url.pathname !== "") ||
@@ -112,6 +123,64 @@ function parseOrigin(value: string, variableName: string): URL {
     throw new Error(`${variableName} must contain only an HTTP(S) origin`);
   }
   return url;
+}
+
+function parseRedirectOriginRewriteMap(
+  value: string,
+): Readonly<Record<string, string>> {
+  if (!value.trim()) return Object.freeze({});
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (_error) {
+    throw new Error(
+      "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP must be a JSON object of exact origins",
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP must be a JSON object of exact origins",
+    );
+  }
+
+  const rewriteMap: Record<string, string> = {};
+  for (const [sourceValue, targetValue] of Object.entries(parsed)) {
+    if (typeof targetValue !== "string") {
+      throw new Error(
+        "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP values must be exact HTTP(S) origins",
+      );
+    }
+    const source = parseOrigin(
+      sourceValue,
+      "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP source",
+    );
+    const target = parseOrigin(
+      targetValue,
+      "DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP target",
+    );
+    if (source.origin === target.origin) {
+      throw new Error("Doris redirect origin rewrite must change the origin");
+    }
+    if (source.protocol === "https:" && target.protocol !== "https:") {
+      throw new Error("Doris redirect origin rewrite cannot downgrade TLS");
+    }
+    if (
+      Object.hasOwn(rewriteMap, source.origin) &&
+      rewriteMap[source.origin] !== target.origin
+    ) {
+      throw new Error(
+        "Doris redirect origin rewrite contains conflicting normalized origins",
+      );
+    }
+    rewriteMap[source.origin] = target.origin;
+  }
+
+  const sources = new Set(Object.keys(rewriteMap));
+  if (Object.values(rewriteMap).some((target) => sources.has(target))) {
+    throw new Error("Doris redirect origin rewrite chains are not allowed");
+  }
+  return Object.freeze(rewriteMap);
 }
 
 function commaSeparated(value: string): string[] {
@@ -200,6 +269,47 @@ export function parseDorisStreamLoadConfig(
     parsed.DORIS_STREAM_LOAD_BE_IP_ALLOWLIST,
     "DORIS_STREAM_LOAD_BE_IP_ALLOWLIST",
   );
+  const redirectOriginRewriteMap = parseRedirectOriginRewriteMap(
+    parsed.DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP,
+  );
+  const allowedRewriteAddresses = parseIpAllowlist(
+    parsed.DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST,
+    "DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST",
+  );
+  const hasRedirectOriginRewrite =
+    Object.keys(redirectOriginRewriteMap).length > 0;
+
+  if (hasRedirectOriginRewrite) {
+    if (nodeEnv === "production") {
+      throw new Error(
+        "Doris redirect origin rewrite is forbidden in production",
+      );
+    }
+    if (parsed.DORIS_LOCAL_DEV_MODE !== "true") {
+      throw new Error(
+        "Doris redirect origin rewrite requires explicit local development mode",
+      );
+    }
+    if (
+      Object.keys(redirectOriginRewriteMap).some(
+        (origin) => !allowedRedirectOrigins.includes(origin),
+      )
+    ) {
+      throw new Error(
+        "Every Doris redirect origin rewrite source must be in DORIS_STREAM_LOAD_BE_ALLOWLIST",
+      );
+    }
+    if (allowedRedirectAddresses.length === 0) {
+      throw new Error(
+        "Doris redirect origin rewrite requires the original BE IP allowlist",
+      );
+    }
+    if (allowedRewriteAddresses.length === 0) {
+      throw new Error(
+        "Doris redirect origin rewrite requires an independent rewrite target IP allowlist",
+      );
+    }
+  }
 
   if (nodeEnv === "production") {
     if (fe.protocol !== "https:") {
@@ -254,6 +364,8 @@ export function parseDorisStreamLoadConfig(
     allowedFeAddresses,
     allowedRedirectOrigins,
     allowedRedirectAddresses,
+    redirectOriginRewriteMap,
+    allowedRewriteAddresses,
     tlsCaPath: parsed.DORIS_STREAM_LOAD_TLS_CA_PATH,
     requestTimeoutMs: parsed.DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS,
     maxBodyBytes: parsed.DORIS_STREAM_LOAD_MAX_BODY_BYTES,

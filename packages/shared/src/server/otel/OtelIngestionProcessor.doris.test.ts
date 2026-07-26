@@ -3,6 +3,33 @@ import { describe, expect, it, vi } from "vitest";
 import { OtelIngestionProcessor } from "./OtelIngestionProcessor";
 
 describe("OtelIngestionProcessor Doris acceptance", () => {
+  it("forwards managed runtime admission to Doris acceptance", async () => {
+    const acceptAnalytics = vi.fn().mockResolvedValue({
+      operationId: "operation-managed",
+      status: "ACCEPTED",
+    });
+    const analyticsAdmissionContext = {
+      runtimeLeaseId: "web-runtime-1",
+      backend: "doris" as const,
+      deploymentGeneration: 7n,
+    };
+    const processor = new OtelIngestionProcessor({
+      projectId: "project-1",
+      publicKey: "pk-lf-test",
+      sdkName: "python",
+      sdkVersion: "4.0.0",
+      analyticsAdmissionContext,
+      acceptAnalytics,
+      storageService: {} as never,
+    });
+
+    await processor.publishToAnalyticsIngestion([{ scopeSpans: [] }]);
+
+    expect(acceptAnalytics).toHaveBeenCalledWith(
+      expect.objectContaining({ admissionContext: analyticsAdmissionContext }),
+    );
+  });
+
   it("persists the canonical raw envelope before returning an operation id", async () => {
     const acceptAnalytics = vi.fn().mockResolvedValue({
       operationId: "operation-1",
@@ -24,6 +51,7 @@ describe("OtelIngestionProcessor Doris acceptance", () => {
     expect(acceptAnalytics).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "project-1",
+        admissionContext: null,
         canonicalizerVersion: "1",
         schemaVersion: 1,
         envelope: {

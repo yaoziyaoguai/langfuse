@@ -13,6 +13,7 @@
 // and cannot be substituted by a local run.
 
 import { performance } from "node:perf_hooks";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   DorisPoCMysqlClient,
   splitSqlStatements,
@@ -23,13 +24,18 @@ import {
 } from "../src/server/doris-poc/streamLoadClient";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  deriveDorisTestDatabaseName,
+  dropOwnedDorisTestDatabase,
+  parseDorisTestNamespace,
+  resetOwnedDorisTestDatabase,
+} from "../src/server/doris/testDatabase";
 
 // The package compiles to CommonJS, so __dirname is available directly.
 const SCHEMA_PATH = path.resolve(
   __dirname,
   "../doris/poc/candidate-schema.sql",
 );
-const DB = "langfuse_poc";
 
 interface GateResult {
   readonly gate: string;
@@ -62,25 +68,48 @@ async function main(): Promise<void> {
     );
     process.exit(1);
   }
-  const admin = new DorisPoCMysqlClient({
-    host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
-    port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
-    user: process.env.DORIS_POC_USER ?? "root",
-    password: process.env.DORIS_POC_PASSWORD ?? "",
+  const host = process.env.DORIS_POC_FE_HOST ?? "127.0.0.1";
+  const port = Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031");
+  const user = process.env.DORIS_POC_USER ?? "root";
+  const password = process.env.DORIS_POC_PASSWORD ?? "";
+  const runId = randomUUID();
+  const database = deriveDorisTestDatabaseName(runId);
+  const queryUrl = `mysql://${host}:${port}/${database}`;
+  const namespace = parseDorisTestNamespace({
+    ...process.env,
+    DORIS_TEST_RUN_ID: runId,
+    DORIS_TEST_OWNERSHIP_TOKEN: randomBytes(32).toString("hex"),
+    DORIS_POC_DATABASE: database,
+    DORIS_QUERY_URL: queryUrl,
+    DORIS_STREAM_LOAD_DATABASE: database,
+  });
+  const projectId = `benchmark-${runId.replaceAll("-", "")}`;
+  const connectionConfig = {
+    host,
+    port,
+    user,
+    password,
+  };
+  const admin = new DorisPoCMysqlClient(connectionConfig);
+  await resetOwnedDorisTestDatabase({
+    admin,
+    connectDatabase: (targetDatabase) =>
+      new DorisPoCMysqlClient({
+        ...connectionConfig,
+        database: targetDatabase,
+      }),
+    namespace,
   });
   const db = new DorisPoCMysqlClient({
-    host: process.env.DORIS_POC_FE_HOST ?? "127.0.0.1",
-    port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
-    user: process.env.DORIS_POC_USER ?? "root",
-    password: process.env.DORIS_POC_PASSWORD ?? "",
-    database: DB,
+    ...connectionConfig,
+    database,
   });
   const sl = new DorisPoCStreamLoadClient({
     feHttpOrigin:
       process.env.DORIS_POC_FE_HTTP_ORIGIN ?? "http://127.0.0.1:8031",
-    user: process.env.DORIS_POC_USER ?? "root",
-    password: process.env.DORIS_POC_PASSWORD ?? "",
-    defaultDatabase: DB,
+    user,
+    password,
+    defaultDatabase: database,
     beRedirectAllowlist: { "172.28.0.3:8040": "http://127.0.0.1:8041" },
   });
 
@@ -91,8 +120,6 @@ async function main(): Promise<void> {
     measured: version.trim(),
   });
 
-  await admin.query(`DROP DATABASE IF EXISTS ${DB}`);
-  await admin.query(`CREATE DATABASE ${DB}`);
   for (const stmt of splitSqlStatements(readFileSync(SCHEMA_PATH, "utf8"))) {
     await db.query(stmt);
   }
@@ -114,7 +141,7 @@ async function main(): Promise<void> {
       bytes += input.length;
       lines.push(
         JSON.stringify({
-          project_id: "p1",
+          project_id: projectId,
           partition_date: "2026-07-17",
           trace_id: `tbench-${idx % 50}`,
           span_id: `s${idx}`,
@@ -135,7 +162,7 @@ async function main(): Promise<void> {
     }
     const res = await sl.streamLoad({
       table: "events_current",
-      label: dorisLabel(["bench", String(++labelN)]),
+      label: dorisLabel(["bench", runId, String(++labelN)]),
       ndjsonBody: lines.join("\n"),
     });
     if (!res.committed || res.numberFilteredRows !== 0) {
@@ -161,7 +188,7 @@ async function main(): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt++) {
     const rows = await db.query<{ c: number }>(
       `SELECT COUNT(*) c FROM events_current WHERE project_id = ?`,
-      ["p1"],
+      [projectId],
     );
     visible = rows[0]?.c ?? 0;
     if (visible >= ROWS - BATCH) break;
@@ -179,7 +206,7 @@ async function main(): Promise<void> {
     const t = performance.now();
     await db.query<{ name: string }>(
       `SELECT name FROM events_current WHERE project_id = ? AND trace_id = ? AND span_id = ?`,
-      ["p1", `tbench-${i % 50}`, `s${i * 13}`],
+      [projectId, `tbench-${i % 50}`, `s${i * 13}`],
     );
     detailLat.push(performance.now() - t);
   }
@@ -188,7 +215,7 @@ async function main(): Promise<void> {
     const t = performance.now();
     await db.query<{ c: number }>(
       `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND partition_date >= ? AND partition_date < ?`,
-      ["p1", "2026-07-17", "2026-07-18"],
+      [projectId, "2026-07-17", "2026-07-18"],
     );
     listLat.push(performance.now() - t);
   }
@@ -200,9 +227,9 @@ async function main(): Promise<void> {
   });
 
   // --- Fault: duplicate label converges ---
-  const dupLabel = dorisLabel(["bench", "dup", "1"]);
+  const dupLabel = dorisLabel(["bench", runId, "dup", "1"]);
   const body = JSON.stringify({
-    project_id: "p1",
+    project_id: projectId,
     partition_date: "2026-07-17",
     trace_id: "tbench-dup",
     span_id: "sdup",
@@ -229,7 +256,7 @@ async function main(): Promise<void> {
   });
   const dupRows = await db.query<{ c: number }>(
     `SELECT COUNT(*) c FROM events_current WHERE project_id = ? AND trace_id = ? AND span_id = ?`,
-    ["p1", "tbench-dup", "sdup"],
+    [projectId, "tbench-dup", "sdup"],
   );
   record({
     gate: "fault-duplicate-label-converges",
@@ -241,15 +268,16 @@ async function main(): Promise<void> {
   const hostile = new DorisPoCStreamLoadClient({
     feHttpOrigin:
       process.env.DORIS_POC_FE_HTTP_ORIGIN ?? "http://127.0.0.1:8031",
-    user: "root",
-    defaultDatabase: DB,
+    user,
+    password,
+    defaultDatabase: database,
     beRedirectAllowlist: {}, // nothing allowlisted -> any redirect must be rejected
   });
   let rejected = false;
   try {
     await hostile.streamLoad({
       table: "events_current",
-      label: dorisLabel(["bench", "hostile"]),
+      label: dorisLabel(["bench", runId, "hostile"]),
       ndjsonBody: body,
     });
   } catch {
@@ -288,8 +316,17 @@ async function main(): Promise<void> {
     note: "local topology is non-HA; HA failover gate applies only if the operator freezes an HA target",
   });
 
-  await admin.end();
   await db.end();
+  await dropOwnedDorisTestDatabase({
+    admin,
+    connectDatabase: (targetDatabase) =>
+      new DorisPoCMysqlClient({
+        ...connectionConfig,
+        database: targetDatabase,
+      }),
+    namespace,
+  });
+  await admin.end();
 
   const failed = results.filter((r) => r.status === "FAIL");
   console.log(

@@ -106,6 +106,7 @@ describe.skipIf(!redisUrl && !redisHost)(
               },
             ]) as never,
             markPublished: markPublished as never,
+            withPublicationFence: async (_operation, run) => run(),
           }),
         ).resolves.toBe(1);
 

@@ -12,6 +12,8 @@ import {
   acceptAnalyticsIngestion,
   CURRENT_ANALYTICS_CANONICALIZER_VERSION,
   CURRENT_ANALYTICS_SCHEMA_VERSION,
+  NEXT_ANALYTICS_SCHEMA_VERSION,
+  type AnalyticsRuntimeAdmissionContext,
 } from "../analytics-persistence";
 import { isAnalyticsBackend } from "../analytics-persistence/analyticsBackend";
 import {
@@ -135,6 +137,12 @@ type ProcessEventBatchOptions = {
   isLangfuseInternal?: boolean;
   forwardToEventsTable?: boolean;
   attribution: IngestionAttribution;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
+  /**
+   * U4 只安装 schema-2 producer；U6 必须先通过 durable capability admission
+   * 才能打开这个 outer gate，默认关闭，避免混合版本期间提前写入新合同。
+   */
+  enableDorisDatasetRunIngestion?: boolean;
 };
 
 /**
@@ -478,6 +486,8 @@ async function processDorisEventBatch(
     options.isLangfuseInternal ?? false,
   );
   const scores: IngestionEventType[] = [];
+  const datasetRunScores: IngestionEventType[] = [];
+  const datasetRunItems: IngestionEventType[] = [];
   const legacyGroups = new Map<string, IngestionEventType[]>();
   const successes: AnalyticsEventBatchResult["successes"] = [];
   const errors: AnalyticsEventBatchResult["errors"] = [];
@@ -512,15 +522,32 @@ async function processDorisEventBatch(
       continue;
     }
     if (parsed.data.type === eventTypes.SCORE_CREATE) {
-      scores.push(parsed.data);
+      const requiresDatasetRunContract =
+        parsed.data.body.datasetRunId != null ||
+        parsed.data.body.executionTraceId != null;
+      if (!requiresDatasetRunContract) {
+        scores.push(parsed.data);
+      } else if (options.enableDorisDatasetRunIngestion === true) {
+        datasetRunScores.push(parsed.data);
+      } else {
+        errors.push({
+          id: parsed.data.id,
+          status: 501,
+          ...DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
+        });
+      }
       continue;
     }
     if (parsed.data.type === eventTypes.DATASET_RUN_ITEM_CREATE) {
-      errors.push({
-        id: parsed.data.id,
-        status: 501,
-        ...DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
-      });
+      if (options.enableDorisDatasetRunIngestion === true) {
+        datasetRunItems.push(parsed.data);
+      } else {
+        errors.push({
+          id: parsed.data.id,
+          status: 501,
+          ...DORIS_EXPERIMENT_INGESTION_UNAVAILABLE,
+        });
+      }
       continue;
     }
     const entityId = parsed.data.body.id;
@@ -556,8 +583,56 @@ async function processDorisEventBatch(
         env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
       ),
       rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+      admissionContext: options.analyticsAdmissionContext ?? null,
     });
     for (const { id } of scores) successes.push({ id, status: 201 });
+  }
+
+  if (datasetRunScores.length > 0) {
+    await acceptAnalyticsIngestion({
+      projectId: auth.scope.projectId,
+      envelope: {
+        formatVersion: 1,
+        source: "score",
+        payload: datasetRunScores,
+        attribution: options.attribution,
+      },
+      canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+      schemaVersion: NEXT_ANALYTICS_SCHEMA_VERSION,
+      storageService: getS3EventStorageClient(
+        env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+      ),
+      rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+      admissionContext: options.analyticsAdmissionContext ?? null,
+      capability: "datasetRunIngestion",
+    });
+    for (const { id } of datasetRunScores) {
+      successes.push({ id, status: 201 });
+    }
+  }
+
+  if (datasetRunItems.length > 0) {
+    await acceptAnalyticsIngestion({
+      projectId: auth.scope.projectId,
+      envelope: {
+        formatVersion: 1,
+        source: "dataset-run-item",
+        payload: datasetRunItems,
+        isLangfuseInternal: options.isLangfuseInternal === true,
+        attribution: options.attribution,
+      },
+      canonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+      schemaVersion: NEXT_ANALYTICS_SCHEMA_VERSION,
+      storageService: getS3EventStorageClient(
+        env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+      ),
+      rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+      admissionContext: options.analyticsAdmissionContext ?? null,
+      capability: "datasetRunIngestion",
+    });
+    for (const { id } of datasetRunItems) {
+      successes.push({ id, status: 201 });
+    }
   }
 
   for (const [groupKey, events] of legacyGroups) {
@@ -592,6 +667,7 @@ async function processDorisEventBatch(
         env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
       ),
       rawPrefix: env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+      admissionContext: options.analyticsAdmissionContext ?? null,
     });
     for (const { id } of orderedEvents) successes.push({ id, status: 201 });
   }

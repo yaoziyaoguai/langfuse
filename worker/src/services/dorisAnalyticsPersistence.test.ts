@@ -1,6 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import { LangfuseConflictError } from "@langfuse/shared";
 
+const reconcileRawAnalyticsIngestionReceipts = vi.hoisted(() =>
+  vi.fn(async () => ({
+    scanned: 0,
+    recovered: 0,
+    existing: 0,
+    invalid: 0,
+  })),
+);
+const expireUnreadyAnalyticsIngestionReceipts = vi.hoisted(() =>
+  vi.fn(async () => 0),
+);
+
+vi.mock("@langfuse/shared/src/server", async (importOriginal) => ({
+  ...(await importOriginal()),
+  reconcileRawAnalyticsIngestionReceipts,
+  expireUnreadyAnalyticsIngestionReceipts,
+}));
+
 import { EventCanonicalizer } from "./EventCanonicalizer";
 import { RawAnalyticsIngestionCanonicalizer } from "./RawAnalyticsIngestionCanonicalizer";
 import {
@@ -9,7 +27,16 @@ import {
 } from "./dorisAnalyticsPersistence";
 
 describe("createDorisAnalyticsPersistence", () => {
-  it("owns the raw canonicalizer and queue processor for the durable path", () => {
+  it("owns the raw canonicalizer and queue processor for the durable path", async () => {
+    const order: string[] = [];
+    reconcileRawAnalyticsIngestionReceipts.mockImplementationOnce(async () => {
+      order.push("reconcile");
+      return { scanned: 1, recovered: 1, existing: 0, invalid: 0 };
+    });
+    expireUnreadyAnalyticsIngestionReceipts.mockImplementationOnce(async () => {
+      order.push("expire");
+      return 0;
+    });
     const composition = createDorisAnalyticsPersistence({
       runtimeEnv: {
         LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "test-bucket",
@@ -17,6 +44,7 @@ describe("createDorisAnalyticsPersistence", () => {
       prismaClient: {} as never,
       storageService: {
         download: vi.fn(),
+        downloadIfExists: vi.fn(async () => "matching raw"),
       } as never,
       streamLoadTransport: {
         load: vi.fn(),
@@ -35,6 +63,19 @@ describe("createDorisAnalyticsPersistence", () => {
       RawAnalyticsIngestionCanonicalizer,
     );
     expect(composition.processor).toEqual(expect.any(Function));
+    await expect(composition.reconcileRaw(25, "page-2")).resolves.toEqual({
+      scanned: 1,
+      recovered: 1,
+      existing: 0,
+      invalid: 0,
+    });
+    expect(reconcileRawAnalyticsIngestionReceipts).toHaveBeenCalledWith(
+      expect.objectContaining({ cursor: "page-2", limit: 25 }),
+    );
+    expect(expireUnreadyAnalyticsIngestionReceipts).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 25 }),
+    );
+    expect(order).toEqual(["reconcile", "expire"]);
   });
 
   it("loads the entity head and visible Doris row as one legacy merge snapshot", async () => {

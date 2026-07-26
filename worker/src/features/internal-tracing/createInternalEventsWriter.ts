@@ -1,4 +1,5 @@
 import type {
+  AnalyticsRuntimeAdmissionContext,
   EventRecordInsertType,
   InternalEventsWriter,
   InternalTraceEventInput,
@@ -59,16 +60,21 @@ async function writeInternalEventInputs(params: {
  */
 export function createInternalEventsWriter(params?: {
   experimentContext?: InternalTraceExperimentContext;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
   onRootEventRecordReady?: (
     rootEventRecord: EventRecordInsertType,
   ) => Promise<void>;
 }): InternalEventsWriter {
   return {
     experimentContext: params?.experimentContext,
+    analyticsAdmissionContext: params?.analyticsAdmissionContext,
     write: async (writeParams: {
       rootSpanId: string;
       eventInputs: InternalTraceEventInput[];
     }) => {
+      if (env.LANGFUSE_ANALYTICS_BACKEND === "doris") {
+        return;
+      }
       const { rootSpanId, eventInputs } = writeParams;
       const { rootEventRecord } = await writeInternalEventInputs({
         rootSpanId,

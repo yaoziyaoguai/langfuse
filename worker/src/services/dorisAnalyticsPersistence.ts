@@ -15,10 +15,13 @@ import {
   PromptService,
   redis,
   parseDorisStreamLoadConfig,
+  reconcileRawAnalyticsIngestionReceipts,
+  expireUnreadyAnalyticsIngestionReceipts,
   resolveDorisNodeEnv,
   type ResourceSpan,
   type StorageService,
   type DorisObservation,
+  type AnalyticsRuntimeAdmissionContext,
 } from "@langfuse/shared/src/server";
 
 import { env } from "../env";
@@ -45,6 +48,7 @@ import {
   type LoadCurrentLegacyEvent,
 } from "./LegacyEventCanonicalizer";
 import { RedisLock } from "../utils/RedisLock";
+import { getWorkerAnalyticsAdmissionContext } from "../analyticsRuntime";
 
 type RuntimeEnvironment = {
   readonly NODE_ENV?: "development" | "test" | "production";
@@ -59,6 +63,8 @@ type RuntimeEnvironment = {
   readonly DORIS_STREAM_LOAD_FE_IP_ALLOWLIST?: string;
   readonly DORIS_STREAM_LOAD_BE_ALLOWLIST?: string;
   readonly DORIS_STREAM_LOAD_BE_IP_ALLOWLIST?: string;
+  readonly DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP?: string;
+  readonly DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST?: string;
   readonly DORIS_STREAM_LOAD_TLS_CA_PATH?: string;
   readonly DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS?: number | string;
   readonly DORIS_STREAM_LOAD_MAX_BODY_BYTES?: number | string;
@@ -74,6 +80,10 @@ export interface DorisAnalyticsPersistence {
   readonly processor: ReturnType<
     typeof analyticsIngestionQueueProcessorBuilder
   >;
+  readonly reconcileRaw: (
+    limit: number,
+    cursor?: string,
+  ) => ReturnType<typeof reconcileRawAnalyticsIngestionReceipts>;
   readonly workerId: string;
 }
 
@@ -246,6 +256,7 @@ export function createDorisAnalyticsPersistence(input: {
   readonly databaseName?: string;
   readonly workerId?: string;
   readonly eventCanonicalizer?: EventCanonicalizer;
+  readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
   readonly maskOtlp?: (input: {
     readonly projectId: string;
     readonly resourceSpans: ResourceSpan[];
@@ -258,6 +269,7 @@ export function createDorisAnalyticsPersistence(input: {
       ? null
       : parseDorisStreamLoadConfig(
           {
+            DORIS_LOCAL_DEV_MODE: runtimeEnv.DORIS_LOCAL_DEV_MODE,
             DORIS_QUERY_USER: runtimeEnv.DORIS_QUERY_USER,
             DORIS_STREAM_LOAD_FE_URL: runtimeEnv.DORIS_STREAM_LOAD_FE_URL,
             DORIS_STREAM_LOAD_USER: runtimeEnv.DORIS_STREAM_LOAD_USER,
@@ -269,6 +281,10 @@ export function createDorisAnalyticsPersistence(input: {
               runtimeEnv.DORIS_STREAM_LOAD_BE_ALLOWLIST,
             DORIS_STREAM_LOAD_BE_IP_ALLOWLIST:
               runtimeEnv.DORIS_STREAM_LOAD_BE_IP_ALLOWLIST,
+            DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP:
+              runtimeEnv.DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP,
+            DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST:
+              runtimeEnv.DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST,
             DORIS_STREAM_LOAD_TLS_CA_PATH:
               runtimeEnv.DORIS_STREAM_LOAD_TLS_CA_PATH,
             DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: optionalString(
@@ -292,6 +308,8 @@ export function createDorisAnalyticsPersistence(input: {
   const client = input.prismaClient ?? prisma;
   const eventCanonicalizer =
     input.eventCanonicalizer ?? createProductionEventCanonicalizer();
+  const getAdmissionContext =
+    input.getAdmissionContext ?? getWorkerAnalyticsAdmissionContext;
   const writer = new AnalyticsWriter({
     client,
     artifactStore: new CanonicalIngestionArtifactStore(
@@ -301,6 +319,7 @@ export function createDorisAnalyticsPersistence(input: {
     databaseName,
     canonicalPrefix: runtimeEnv.LANGFUSE_S3_EVENT_UPLOAD_PREFIX ?? "",
     workerId,
+    getAdmissionContext,
   });
   const canonicalizer = new RawAnalyticsIngestionCanonicalizer({
     client,
@@ -321,7 +340,25 @@ export function createDorisAnalyticsPersistence(input: {
         writer.reconcileUnresolvedOperation(operation),
       canonicalize: (operation) => canonicalizer.canonicalize(operation),
       withOperationLock: withLegacyOperationLock,
+      getAdmissionContext,
     }),
+    reconcileRaw: async (limit, cursor) => {
+      const result = await reconcileRawAnalyticsIngestionReceipts({
+        client,
+        storageService,
+        rawPrefix: runtimeEnv.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        admissionContext: getAdmissionContext(),
+      });
+      await expireUnreadyAnalyticsIngestionReceipts({
+        client,
+        limit,
+        rawArtifactExists: async (rawObjectKey) =>
+          (await storageService.downloadIfExists(rawObjectKey)) !== null,
+      });
+      return result;
+    },
     workerId,
   };
 }

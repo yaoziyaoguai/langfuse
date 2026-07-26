@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 describe("Doris analytics Postgres control state", () => {
-  it("exposes every R1A control model and no R1B retention model", () => {
+  it("exposes analytics control, retention, deployment, lease, and activation models", () => {
     const models = Prisma.dmmf.datamodel.models.map(({ name }) => name);
 
     expect(models).toEqual(
@@ -17,10 +17,17 @@ describe("Doris analytics Postgres control state", () => {
         "AnalyticsDeletionOperation",
         "AnalyticsCheckpointGeneration",
         "AnalyticsBackgroundMigrationRetirement",
+        "AnalyticsRetentionRun",
+        "AnalyticsRetentionState",
+        "AnalyticsBackendDeploymentState",
+        "AnalyticsRuntimeLease",
+        "AnalyticsRuntimeCapabilityContract",
+        "AnalyticsCapabilityActivation",
+        "AnalyticsBackendClaimLease",
+        "AnalyticsBackendDeploymentTransition",
         "TraceControlState",
       ]),
     );
-    expect(models).not.toContain("AnalyticsRetentionRun");
   });
 
   it("keeps project-deletion generation and status outside Project cascade", () => {

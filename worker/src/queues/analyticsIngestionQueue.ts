@@ -9,17 +9,28 @@ import {
   AnalyticsIngestionQueue,
   AnalyticsIngestionQueueEventSchema,
   AnalyticsPersistenceError,
+  analyticsDurableProvenanceFromRecord,
+  analyticsDurableProvenanceMatches,
   claimAnalyticsIngestionOutbox,
+  createAnalyticsBackendClaimLease,
+  deserializeAnalyticsDurableProvenance,
   findAnalyticsIngestionOperationForProject,
+  lockAnalyticsBackendClaimLeaseForIo,
+  lockLegacyAnalyticsAdmission,
   markAnalyticsIngestionOutboxPublished,
   markAnalyticsIngestionTerminalFailure,
+  releaseAnalyticsBackendClaimLease,
   resolveAnalyticsIngestionAttemptFailure,
+  serializeAnalyticsDurableProvenance,
   logger,
   QueueJobs,
   QueueName,
   recordIncrement,
   type AnalyticsBatchSink,
+  type AnalyticsBackend,
   type CanonicalAnalyticsBatch,
+  type AnalyticsDurableProvenance,
+  type AnalyticsRuntimeAdmissionContext,
   type TQueueJobTypes,
 } from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
@@ -33,6 +44,162 @@ interface AnalyticsIngestionQueueProducer {
     getState(): Promise<string>;
     retry(state: "failed"): Promise<void>;
   }>;
+}
+
+type AnalyticsIngestionProvenanceRecord = Pick<
+  AnalyticsIngestionOperation,
+  | "id"
+  | "analyticsBackend"
+  | "deploymentGeneration"
+  | "workloadEpochFingerprint"
+  | "runtimeContractVersion"
+  | "producerRuntimeLeaseId"
+  | "capability"
+  | "capabilityActivationGeneration"
+  | "capabilityContractVersion"
+  | "canonicalizerVersion"
+  | "schemaVersion"
+>;
+
+const ANALYTICS_INGESTION_CLAIM_MS = 30 * 60_000;
+const ANALYTICS_INGESTION_FENCE_TIMEOUT_MS = 35 * 60_000;
+
+function operationProvenance(
+  operation: AnalyticsIngestionProvenanceRecord,
+): AnalyticsDurableProvenance | null {
+  return analyticsDurableProvenanceFromRecord({
+    analyticsBackend: operation.analyticsBackend ?? null,
+    deploymentGeneration: operation.deploymentGeneration ?? null,
+    workloadEpochFingerprint: operation.workloadEpochFingerprint ?? null,
+    runtimeContractVersion: operation.runtimeContractVersion ?? null,
+    producerRuntimeLeaseId: operation.producerRuntimeLeaseId ?? null,
+    capability: operation.capability ?? null,
+    capabilityActivationGeneration:
+      operation.capabilityActivationGeneration ?? null,
+    capabilityContractVersion: operation.capabilityContractVersion ?? null,
+  });
+}
+
+function assertQueueProvenanceMatchesOperation(input: {
+  readonly operation: AnalyticsIngestionProvenanceRecord;
+  readonly serializedProvenance: unknown;
+}): void {
+  const authoritative = operationProvenance(input.operation);
+  const conflict = () =>
+    new AnalyticsPersistenceError("ANALYTICS_CONFLICT", false, {
+      tags: {
+        operationId: input.operation.id,
+        phase: "queue_provenance",
+      },
+    });
+  let delivered: AnalyticsDurableProvenance | null;
+  try {
+    delivered =
+      input.serializedProvenance === undefined
+        ? null
+        : deserializeAnalyticsDurableProvenance(input.serializedProvenance);
+  } catch {
+    throw conflict();
+  }
+  if (
+    (authoritative === null) !== (delivered === null) ||
+    (authoritative &&
+      delivered &&
+      !analyticsDurableProvenanceMatches(authoritative, delivered))
+  ) {
+    throw conflict();
+  }
+}
+
+async function withAnalyticsIngestionWorkFence(input: {
+  readonly client: PrismaClient;
+  readonly operation: AnalyticsIngestionProvenanceRecord;
+  readonly admissionContext: AnalyticsRuntimeAdmissionContext | null;
+  readonly claimKind:
+    | "analytics-ingestion-publish"
+    | "analytics-ingestion-process";
+  readonly run: () => Promise<void>;
+}): Promise<void> {
+  const provenance = operationProvenance(input.operation);
+  if (!provenance) {
+    await input.client.$transaction(
+      async (transaction) => {
+        await lockLegacyAnalyticsAdmission(transaction);
+        await input.run();
+      },
+      { timeout: ANALYTICS_INGESTION_FENCE_TIMEOUT_MS },
+    );
+    return;
+  }
+
+  const expectedBackend: AnalyticsBackend =
+    provenance.analyticsBackend === "DORIS" ? "doris" : "clickhouse";
+  if (
+    !input.admissionContext ||
+    input.admissionContext.backend !== expectedBackend ||
+    input.admissionContext.deploymentGeneration !==
+      provenance.deploymentGeneration
+  ) {
+    throw new Error("Analytics ingestion runtime is not admitted");
+  }
+  const fence = {
+    runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    expectedBackend,
+    expectedDeploymentGeneration: provenance.deploymentGeneration,
+    expectedWorkloadEpochFingerprint: provenance.workloadEpochFingerprint,
+    expectedRuntimeContractVersion: provenance.runtimeContractVersion,
+    requiredContract: {
+      canonicalizerVersion: input.operation.canonicalizerVersion,
+      schemaVersion: input.operation.schemaVersion,
+    },
+    ...(provenance.capability
+      ? {
+          capability: provenance.capability,
+          expectedCapabilityActivationGeneration:
+            provenance.capabilityActivationGeneration,
+          expectedCapabilityContractVersion:
+            provenance.capabilityContractVersion,
+          action:
+            input.claimKind === "analytics-ingestion-publish"
+              ? ("recovery" as const)
+              : ("claimExisting" as const),
+        }
+      : { action: "foundation" as const }),
+  };
+  const claim = await createAnalyticsBackendClaimLease({
+    client: input.client,
+    ...fence,
+    claimKind: input.claimKind,
+    resourceIdentity: input.operation.id,
+    leaseMs: ANALYTICS_INGESTION_CLAIM_MS,
+  });
+  if (!claim) {
+    throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+      tags: {
+        operationId: input.operation.id,
+        phase: "analytics_claim",
+      },
+    });
+  }
+  try {
+    await input.client.$transaction(
+      async (transaction) => {
+        await lockAnalyticsBackendClaimLeaseForIo({
+          transaction,
+          claimLeaseId: claim.id,
+          fence,
+        });
+        await input.run();
+      },
+      { timeout: ANALYTICS_INGESTION_FENCE_TIMEOUT_MS },
+    );
+  } finally {
+    await releaseAnalyticsBackendClaimLease({
+      client: input.client,
+      claimLeaseId: claim.id,
+      runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    });
+  }
 }
 
 function recordAttemptResolution(
@@ -57,6 +224,11 @@ export async function publishAnalyticsIngestionOutboxBatch(input: {
   readonly lockMs?: number;
   readonly claimOutbox?: typeof claimAnalyticsIngestionOutbox;
   readonly markPublished?: typeof markAnalyticsIngestionOutboxPublished;
+  readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
+  readonly withPublicationFence?: (
+    operation: AnalyticsIngestionProvenanceRecord,
+    run: () => Promise<void>,
+  ) => Promise<void>;
 }): Promise<number> {
   const queue = input.queue ?? AnalyticsIngestionQueue.getInstance();
   if (!queue) {
@@ -79,41 +251,60 @@ export async function publishAnalyticsIngestionOutboxBatch(input: {
 
   let published = 0;
   for (const outbox of claimed) {
-    const delivery = await queue.add(
-      QueueJobs.AnalyticsIngestionJob,
-      {
-        timestamp: now,
-        id: outbox.operationId,
-        payload: {
-          operationId: outbox.operationId,
-          projectId: outbox.operation.projectId,
-          generation: outbox.generation,
+    const provenance = operationProvenance(outbox.operation);
+    const withPublicationFence =
+      input.withPublicationFence ??
+      ((operation, run) =>
+        withAnalyticsIngestionWorkFence({
+          client,
+          operation,
+          admissionContext: input.getAdmissionContext?.() ?? null,
+          claimKind: "analytics-ingestion-publish",
+          run,
+        }));
+    await withPublicationFence(outbox.operation, async () => {
+      const delivery = await queue.add(
+        QueueJobs.AnalyticsIngestionJob,
+        {
+          timestamp: now,
+          id: outbox.operationId,
+          payload: {
+            operationId: outbox.operationId,
+            projectId: outbox.operation.projectId,
+            generation: outbox.generation,
+            ...(provenance
+              ? {
+                  analyticsProvenance:
+                    serializeAnalyticsDurableProvenance(provenance),
+                }
+              : {}),
+          },
+          name: QueueJobs.AnalyticsIngestionJob,
         },
-        name: QueueJobs.AnalyticsIngestionJob,
-      },
-      {
-        jobId: `${outbox.operationId}-g${outbox.generation}`,
-        attempts: 1,
-      },
-    );
-    if ((await delivery.getState()) === "failed") {
-      await delivery.retry("failed");
-    }
-    const marked = await markPublished({
-      client,
-      operationId: outbox.operationId,
-      generation: outbox.generation,
-      workerId: input.workerId,
-      now,
-    });
-    if (!marked) {
-      throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
-        tags: {
-          operationId: outbox.operationId,
-          phase: "outbox_publish_fence",
+        {
+          jobId: `${outbox.operationId}-g${outbox.generation}`,
+          attempts: 1,
         },
+      );
+      if ((await delivery.getState()) === "failed") {
+        await delivery.retry("failed");
+      }
+      const marked = await markPublished({
+        client,
+        operationId: outbox.operationId,
+        generation: outbox.generation,
+        workerId: input.workerId,
+        now,
       });
-    }
+      if (!marked) {
+        throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+          tags: {
+            operationId: outbox.operationId,
+            phase: "outbox_publish_fence",
+          },
+        });
+      }
+    });
     published += 1;
     recordIncrement("langfuse.analytics.ingestion.outbox", 1, {
       status: "published",
@@ -152,6 +343,11 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
     operation: CanonicalizationOperation,
     run: () => Promise<void>,
   ) => Promise<void>;
+  readonly getAdmissionContext?: () => AnalyticsRuntimeAdmissionContext | null;
+  readonly withAnalyticsWorkFence?: (
+    operation: AnalyticsIngestionProvenanceRecord,
+    run: () => Promise<void>,
+  ) => Promise<void>;
 }): Processor<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]> {
   return async (
     job: Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>,
@@ -188,8 +384,12 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
     }
 
     try {
-      await input.assertReady?.();
+      assertQueueProvenanceMatchesOperation({
+        operation,
+        serializedProvenance: payload.analyticsProvenance,
+      });
       const run = async () => {
+        await input.assertReady?.();
         if (
           await input.reconcileUnresolved?.({
             operationId: operation.id,
@@ -207,11 +407,23 @@ export function analyticsIngestionQueueProcessorBuilder(input: {
           status: "terminal",
         });
       };
-      if (input.withOperationLock) {
-        await input.withOperationLock(operation, run);
-      } else {
-        await run();
-      }
+      const withFence =
+        input.withAnalyticsWorkFence ??
+        ((fencedOperation, fencedRun) =>
+          withAnalyticsIngestionWorkFence({
+            client: input.client ?? prisma,
+            operation: fencedOperation,
+            admissionContext: input.getAdmissionContext?.() ?? null,
+            claimKind: "analytics-ingestion-process",
+            run: fencedRun,
+          }));
+      await withFence(operation, async () => {
+        if (input.withOperationLock) {
+          await input.withOperationLock(operation, run);
+        } else {
+          await run();
+        }
+      });
     } catch (error) {
       const persistenceError =
         error instanceof AnalyticsPersistenceError

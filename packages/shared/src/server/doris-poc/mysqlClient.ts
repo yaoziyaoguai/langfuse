@@ -26,7 +26,7 @@ const DEFAULT_TEST_CONFIG: DorisPoCMysqlConfig = {
   port: Number(process.env.DORIS_POC_FE_MYSQL_PORT ?? "9031"),
   user: process.env.DORIS_POC_USER ?? "root",
   password: process.env.DORIS_POC_PASSWORD ?? "",
-  database: process.env.DORIS_POC_DATABASE ?? "langfuse_poc",
+  database: process.env.DORIS_POC_DATABASE,
 };
 
 function toPoolOptions(config: DorisPoCMysqlConfig): PoolOptions {
@@ -65,7 +65,7 @@ export class DorisPoCMysqlClient {
   }
 
   /** Run a parameterized query and return typed rows. */
-  async query<T extends DorisPoCQueryRow = DorisPoCQueryRow>(
+  async query<T extends object = DorisPoCQueryRow>(
     sql: string,
     params: ReadonlyArray<unknown> = [],
   ): Promise<readonly T[]> {

@@ -15,13 +15,42 @@ import {
 } from "../analyticsIngestionQueue";
 
 const now = new Date("2026-07-18T13:00:00.000Z");
+const managedProvenance = {
+  analyticsBackend: "DORIS" as const,
+  deploymentGeneration: "7",
+  workloadEpochFingerprint: "a".repeat(64),
+  runtimeContractVersion: 2,
+  producerRuntimeLeaseId: "producer-lease",
+};
+const capabilityManagedProvenance = {
+  ...managedProvenance,
+  capability: "datasetRunIngestion" as const,
+  capabilityActivationGeneration: "3",
+  capabilityContractVersion: 1,
+};
 
-function queueJob(operationId: string, projectId: string) {
+const withAnalyticsWorkFence = async (
+  _operation: unknown,
+  run: () => Promise<void>,
+) => run();
+
+function queueJob(
+  operationId: string,
+  projectId: string,
+  analyticsProvenance?:
+    | typeof managedProvenance
+    | typeof capabilityManagedProvenance,
+) {
   return {
     data: {
       timestamp: now,
       id: operationId,
-      payload: { operationId, projectId, generation: 1 },
+      payload: {
+        operationId,
+        projectId,
+        generation: 1,
+        ...(analyticsProvenance ? { analyticsProvenance } : {}),
+      },
       name: QueueJobs.AnalyticsIngestionJob,
     },
   } as Job<TQueueJobTypes[QueueName.AnalyticsIngestionQueue]>;
@@ -57,6 +86,7 @@ describe("analytics ingestion durable queue", () => {
             operation: { projectId: "project-1" },
           },
         ]) as never,
+        withPublicationFence: async (_operation, run) => run(),
         markPublished: markPublished as never,
       }),
     ).resolves.toBe(1);
@@ -99,6 +129,7 @@ describe("analytics ingestion durable queue", () => {
             operation: { projectId: "project-1" },
           },
         ]) as never,
+        withPublicationFence: async (_operation, run) => run(),
         markPublished: markPublished as never,
       }),
     ).rejects.toThrow("redis unavailable");
@@ -126,6 +157,7 @@ describe("analytics ingestion durable queue", () => {
             operation: { projectId: "project-1" },
           },
         ]) as never,
+        withPublicationFence: async (_operation, run) => run(),
         markPublished: vi.fn(async () => true) as never,
       }),
     ).resolves.toBe(1);
@@ -138,6 +170,51 @@ describe("analytics ingestion durable queue", () => {
       { jobId: "operation-1-g3", attempts: 1 },
     );
     expect(delivery.retry).toHaveBeenCalledWith("failed");
+  });
+
+  it("copies authoritative managed provenance into the queue payload", async () => {
+    const add = vi.fn(async () => ({
+      getState: vi.fn(async () => "waiting"),
+      retry: vi.fn(),
+    }));
+    const operation = {
+      projectId: "project-1",
+      analyticsBackend: "DORIS",
+      deploymentGeneration: 7n,
+      workloadEpochFingerprint: "a".repeat(64),
+      runtimeContractVersion: 2,
+      producerRuntimeLeaseId: "producer-lease",
+      capability: "DATASET_RUN_INGESTION",
+      capabilityActivationGeneration: 3n,
+      capabilityContractVersion: 1,
+    };
+
+    await publishAnalyticsIngestionOutboxBatch({
+      client: {} as PrismaClient,
+      queue: { add },
+      workerId: "publisher-a",
+      now,
+      claimOutbox: vi.fn(async () => [
+        {
+          operationId: "operation-1",
+          generation: 1,
+          attempts: 1,
+          operation,
+        },
+      ]) as never,
+      withPublicationFence: async (_operation, run) => run(),
+      markPublished: vi.fn(async () => true) as never,
+    });
+
+    expect(add).toHaveBeenCalledWith(
+      QueueJobs.AnalyticsIngestionJob,
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          analyticsProvenance: capabilityManagedProvenance,
+        }),
+      }),
+      expect.anything(),
+    );
   });
 
   it("awaits canonical persistence and skips already-successful terminal jobs", async () => {
@@ -166,6 +243,7 @@ describe("analytics ingestion durable queue", () => {
       canonicalize,
       client: {} as PrismaClient,
       findOperation: findOperation as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -225,6 +303,7 @@ describe("analytics ingestion durable queue", () => {
         status: "QUEUED",
         outboxV2: { generation: 1 },
       })) as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -257,6 +336,7 @@ describe("analytics ingestion durable queue", () => {
         outboxV2: { generation: 1 },
       })) as never,
       markTerminalFailure: markTerminalFailure as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -289,6 +369,7 @@ describe("analytics ingestion durable queue", () => {
         outboxV2: { generation: 1 },
       })) as never,
       resolveAttemptFailure: resolveAttemptFailure as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -317,6 +398,7 @@ describe("analytics ingestion durable queue", () => {
         status: "PARTIAL_FAILED",
         outboxV2: { generation: 1 },
       })) as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -344,6 +426,7 @@ describe("analytics ingestion durable queue", () => {
         outboxV2: { generation: 1 },
       })) as never,
       resolveAttemptFailure: resolveAttemptFailure as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -370,6 +453,7 @@ describe("analytics ingestion durable queue", () => {
         outboxV2: { generation: 1 },
       })) as never,
       resolveAttemptFailure: resolveAttemptFailure as never,
+      withAnalyticsWorkFence,
     });
     const job = queueJob("operation-1", "project-1");
 
@@ -401,6 +485,7 @@ describe("analytics ingestion durable queue", () => {
         status: "RETRYING",
         outboxV2: { generation: 1 },
       })) as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -424,6 +509,7 @@ describe("analytics ingestion durable queue", () => {
         status: "RETRYING",
         outboxV2: { generation: 2 },
       })) as never,
+      withAnalyticsWorkFence,
     });
 
     await expect(
@@ -431,5 +517,117 @@ describe("analytics ingestion durable queue", () => {
     ).resolves.toBeUndefined();
     expect(canonicalize).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing or tampered managed provenance before analytics IO", async () => {
+    const canonicalize = vi.fn();
+    const persist = vi.fn();
+    const fence = vi.fn(withAnalyticsWorkFence);
+    const markTerminalFailure = vi.fn(async () => true);
+    const findOperation = vi.fn(async () => ({
+      id: "operation-1",
+      projectId: "project-1",
+      terminalAt: null,
+      status: "QUEUED",
+      outboxV2: { generation: 1 },
+      analyticsBackend: "DORIS",
+      deploymentGeneration: 7n,
+      workloadEpochFingerprint: "a".repeat(64),
+      runtimeContractVersion: 2,
+      producerRuntimeLeaseId: "producer-lease",
+    }));
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: { persist },
+      canonicalize,
+      client: {} as PrismaClient,
+      findOperation: findOperation as never,
+      markTerminalFailure: markTerminalFailure as never,
+      withAnalyticsWorkFence: fence,
+    });
+
+    await expect(
+      processor(queueJob("operation-1", "project-1"), "token"),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    await expect(
+      processor(
+        queueJob("operation-1", "project-1", {
+          ...managedProvenance,
+          deploymentGeneration: "8",
+        }),
+        "token",
+      ),
+    ).rejects.toMatchObject({ name: "UnrecoverableError" });
+    expect(fence).not.toHaveBeenCalled();
+    expect(canonicalize).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    expect(markTerminalFailure).toHaveBeenCalledTimes(2);
+    expect(markTerminalFailure).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        operationId: "operation-1",
+        projectId: "project-1",
+        status: "QUARANTINED",
+        reasonCode: "ANALYTICS_CONFLICT",
+        expectedGeneration: 1,
+      }),
+    );
+    expect(markTerminalFailure).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        operationId: "operation-1",
+        projectId: "project-1",
+        status: "QUARANTINED",
+        reasonCode: "ANALYTICS_CONFLICT",
+        expectedGeneration: 1,
+      }),
+    );
+  });
+
+  it("fences managed work before canonicalization and persistence", async () => {
+    const order: string[] = [];
+    const processor = analyticsIngestionQueueProcessorBuilder({
+      sink: {
+        persist: vi.fn(async () => {
+          order.push("persist");
+          return { operationId: "operation-1", status: "VISIBLE" as const };
+        }),
+      },
+      canonicalize: vi.fn(async () => {
+        order.push("canonicalize");
+        return {
+          operationId: "operation-1",
+          projectId: "project-1",
+        } as CanonicalAnalyticsBatch;
+      }),
+      client: {} as PrismaClient,
+      findOperation: vi.fn(async () => ({
+        id: "operation-1",
+        projectId: "project-1",
+        terminalAt: null,
+        status: "QUEUED",
+        outboxV2: { generation: 1 },
+        analyticsBackend: "DORIS",
+        deploymentGeneration: 7n,
+        workloadEpochFingerprint: "a".repeat(64),
+        runtimeContractVersion: 2,
+        producerRuntimeLeaseId: "producer-lease",
+      })) as never,
+      withAnalyticsWorkFence: async (_operation, run) => {
+        order.push("fence-start");
+        await run();
+        order.push("fence-end");
+      },
+    });
+
+    await processor(
+      queueJob("operation-1", "project-1", managedProvenance),
+      "token",
+    );
+    expect(order).toEqual([
+      "fence-start",
+      "canonicalize",
+      "persist",
+      "fence-end",
+    ]);
   });
 });

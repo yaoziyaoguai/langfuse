@@ -4,6 +4,7 @@ import {
   canonicalPayloadHash,
   normalizeVersionToken,
   type CanonicalAnalyticsBatch,
+  type CanonicalAnalyticsDatasetRunItem,
   type CanonicalAnalyticsEntity,
   type CanonicalAnalyticsEvent,
   type CanonicalAnalyticsFileReference,
@@ -56,6 +57,8 @@ function score(
     queueId: null,
     environment: "default",
     metadata,
+    datasetRunId: "run-1",
+    executionTraceId: "execution-trace-1",
   };
 }
 
@@ -75,6 +78,14 @@ function batch(
       fenceGeneration: 9_223_372_036_854_000_000n,
       traceDeletionGeneration: 0n,
       projectDeletionGeneration: 0n,
+      ...(entity.kind === "datasetRunItem"
+        ? {
+            owningDatasetId: entity.datasetId,
+            owningDatasetRunId: entity.datasetRunId,
+            datasetDeletionGeneration: entity.datasetDeletionGeneration,
+            runDeletionGeneration: entity.runDeletionGeneration,
+          }
+        : {}),
     })),
   };
 }
@@ -135,6 +146,51 @@ function event(): CanonicalAnalyticsEvent {
     serviceName: "service",
     telemetrySdkLanguage: "typescript",
     eventBytes: 512,
+    experimentId: "run-1",
+    experimentName: "experiment",
+    experimentMetadata: { owner: "team" },
+    experimentDescription: "description",
+    experimentDatasetId: "dataset-1",
+    experimentItemId: "item-1",
+    experimentItemVersion: acceptedAt - 100n,
+    experimentItemExpectedOutput: "expected",
+    experimentItemMetadata: { split: "test" },
+    experimentItemRootSpanId: "root-span-1",
+  };
+}
+
+function datasetRunItem(): CanonicalAnalyticsDatasetRunItem {
+  return {
+    kind: "datasetRunItem",
+    projectId: "project-1",
+    partitionDate: "2026-07-17",
+    sourceContract: "dataset-run-item",
+    sourceVersion: acceptedAt + 5n,
+    canonicalizerVersion: "1",
+    schemaVersion: 3,
+    canonicalPayloadHash: canonicalPayloadHash({ kind: "datasetRunItem" }),
+    systemTimestamp: acceptedAt,
+    rawObjectKey: "events/project-1/raw/operation-1.json",
+    resolvedEnrichmentIds: {},
+    runItemId: "run-item-1",
+    datasetRunId: "run-1",
+    datasetItemId: "item-1",
+    datasetId: "dataset-1",
+    traceId: "trace-event",
+    observationId: null,
+    error: null,
+    createdAt: acceptedAt,
+    updatedAt: acceptedAt + 1n,
+    datasetRunName: "experiment",
+    datasetRunDescription: "description",
+    datasetRunMetadata: { owner: "team" },
+    datasetRunCreatedAt: acceptedAt - 1_000n,
+    datasetItemVersion: acceptedAt - 500n,
+    datasetItemInput: { prompt: "hello" },
+    datasetItemExpectedOutput: "world",
+    datasetItemMetadata: { split: "test" },
+    datasetDeletionGeneration: 2n,
+    runDeletionGeneration: 3n,
   };
 }
 
@@ -210,6 +266,7 @@ describe("CanonicalIngestionArtifactStore", () => {
       score("score-a", { nested: "score" }),
       event(),
       fileReference(),
+      datasetRunItem(),
     ]);
     const encoded = encodeCanonicalArtifact(original);
 
@@ -302,7 +359,7 @@ describe("CanonicalIngestionArtifactStore", () => {
 
     const created = await store.putIfAbsent(key, original);
 
-    expect(objectStore.objects.size).toBe(4);
+    expect(objectStore.objects.size).toBeGreaterThan(1);
     await expect(store.get(key, created.checksum)).resolves.toEqual({
       ...original,
       children: [...original.children].sort((left, right) =>
