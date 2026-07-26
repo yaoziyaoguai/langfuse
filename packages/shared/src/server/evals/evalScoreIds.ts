@@ -1,21 +1,45 @@
-import { v5 } from "uuid";
+import { createHash } from "node:crypto";
 import type { CodeEvalScoreWithName } from "./codeEvalDispatcherTypes";
 
-const EVAL_SCORE_ID_NAMESPACE = "52b93de0-1d6c-4fb3-9f65-e5173184b1cb";
+const EVAL_SCORE_ID_NAMESPACE = Buffer.from(
+  "52b93de01d6c4fb39f65e5173184b1cb",
+  "hex",
+);
+
+function createUuidV5(name: string): string {
+  // shared 的 CommonJS 产物会把 uuid 转成 require("uuid")，与 ESM-only
+  // uuid 包不兼容；这里直接实现 RFC 9562 UUIDv5，保持既有 ID 完全不变。
+  const bytes = createHash("sha1")
+    .update(EVAL_SCORE_ID_NAMESPACE)
+    .update(name, "utf8")
+    .digest()
+    .subarray(0, 16);
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+}
 
 export function createDeterministicEvalScoreId(params: {
   jobExecutionId: string;
   scoreName: string;
   occurrenceIndex: number;
 }): string {
-  return v5(
+  return createUuidV5(
     JSON.stringify([
       "eval-score",
       params.jobExecutionId,
       params.scoreName,
       params.occurrenceIndex,
     ]),
-    EVAL_SCORE_ID_NAMESPACE,
   );
 }
 

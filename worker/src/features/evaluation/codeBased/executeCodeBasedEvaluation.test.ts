@@ -18,6 +18,10 @@ const mocks = vi.hoisted(() => ({
   },
   writeInternalTrace: vi.fn(),
   createW3CTraceId: vi.fn(() => "execution-trace-1"),
+  instrumentOptions: [] as Array<{
+    name: string;
+    recordException?: boolean;
+  }>,
   span: {
     setAttribute: vi.fn(),
   },
@@ -34,7 +38,10 @@ vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
     CodeEvalExecutionError,
     INTERNAL_TRACE_EVENT_SOURCE: "test-source",
     LangfuseInternalTraceEnvironment: { CodeEval: "langfuse-code-eval" },
-    instrumentAsync: vi.fn(async (_options, fn) => fn(mocks.span)),
+    instrumentAsync: vi.fn(async (options, fn) => {
+      mocks.instrumentOptions.push(options);
+      return fn(mocks.span);
+    }),
     logger: { debug: vi.fn(), warn: vi.fn() },
     createW3CTraceId: mocks.createW3CTraceId,
     runCodeBasedEvaluationDispatch,
@@ -48,6 +55,7 @@ import { executeCodeBasedEvaluation } from "./executeCodeBasedEvaluation";
 describe("executeCodeBasedEvaluation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.instrumentOptions.length = 0;
     mocks.writeInternalTrace.mockResolvedValue(undefined);
   });
 
@@ -111,6 +119,12 @@ describe("executeCodeBasedEvaluation", () => {
       executionMetadata: { job_execution_id: "job-1" },
     });
 
+    expect(mocks.instrumentOptions).toEqual([
+      {
+        name: "eval.execute-code-based-eval",
+        recordException: false,
+      },
+    ]);
     expect(result.scores).toMatchObject([
       {
         name: "primary-score",

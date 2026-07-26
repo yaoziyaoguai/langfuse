@@ -592,6 +592,32 @@ describe("evaluation helpers", () => {
   });
 
   describe("buildEvalScoreWritePayloads", () => {
+    it("builds retry-stable event IDs and timestamps", () => {
+      const params = {
+        scores: [
+          {
+            dataType: ScoreDataTypeEnum.NUMERIC,
+            value: 0.9,
+            name: "accuracy",
+          },
+        ],
+        jobExecutionId: "job-1",
+        traceId: "trace-456",
+        observationId: "obs-789",
+        environment: "production",
+        executionTraceId: "exec-trace-789",
+        executionMetadata: { job_execution_id: "job-1" },
+        timestamp: new Date("2026-07-23T10:00:00.000Z"),
+      };
+
+      expect(buildEvalScoreWritePayloads(params)).toEqual(
+        buildEvalScoreWritePayloads(params),
+      );
+      const [payload] = buildEvalScoreWritePayloads(params);
+      expect(payload?.eventId).toBe(payload?.scoreId);
+      expect(payload?.event.timestamp).toBe("2026-07-23T10:00:00.000Z");
+    });
+
     it("should build stable code eval score IDs when different score names reorder", () => {
       const originalPayloads = buildEvalScoreWritePayloads({
         scores: [

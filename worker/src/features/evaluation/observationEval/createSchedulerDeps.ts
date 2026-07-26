@@ -6,6 +6,7 @@ import {
   QueueName,
   safeBlobFilenameStem,
   safeBlobKeySegment,
+  type AnalyticsEvaluationDispatchEventType,
 } from "@langfuse/shared/src/server";
 import { env } from "../../../env";
 import { getEvalS3StorageClient } from "../s3StorageClient";
@@ -15,7 +16,9 @@ import { type ObservationEvalSchedulerDeps } from "./types";
  * Creates production dependencies for the observation eval scheduler.
  * Wires up real implementations for Prisma, S3, and BullMQ.
  */
-export function createObservationEvalSchedulerDeps(): ObservationEvalSchedulerDeps {
+export function createObservationEvalSchedulerDeps(options?: {
+  readonly analyticsEvaluationDispatch?: AnalyticsEvaluationDispatchEventType;
+}): ObservationEvalSchedulerDeps {
   return {
     upsertJobExecution: async (params) => {
       const {
@@ -42,9 +45,21 @@ export function createObservationEvalSchedulerDeps(): ObservationEvalSchedulerDe
           jobTemplateId,
           status,
           startTime: new Date(),
+          ...(options?.analyticsEvaluationDispatch
+            ? {
+                analyticsEvaluationDispatchId:
+                  options.analyticsEvaluationDispatch.dispatchId,
+              }
+            : {}),
         },
         update: {
           status,
+          ...(options?.analyticsEvaluationDispatch
+            ? {
+                analyticsEvaluationDispatchId:
+                  options.analyticsEvaluationDispatch.dispatchId,
+              }
+            : {}),
         },
       });
 
@@ -78,6 +93,11 @@ export function createObservationEvalSchedulerDeps(): ObservationEvalSchedulerDe
         ...(params.executionMode
           ? { executionMode: params.executionMode }
           : {}),
+        ...(options?.analyticsEvaluationDispatch
+          ? {
+              analyticsEvaluationDispatch: options.analyticsEvaluationDispatch,
+            }
+          : {}),
       };
 
       if (params.evalTemplateType === EvalTemplateType.CODE) {
@@ -94,7 +114,12 @@ export function createObservationEvalSchedulerDeps(): ObservationEvalSchedulerDe
             timestamp: new Date(),
             payload,
           },
-          { delay: params.delay },
+          {
+            delay: params.delay,
+            ...(options?.analyticsEvaluationDispatch
+              ? { jobId: `${params.jobExecutionId}-managed` }
+              : {}),
+          },
         );
         return;
       }
@@ -112,7 +137,12 @@ export function createObservationEvalSchedulerDeps(): ObservationEvalSchedulerDe
           timestamp: new Date(),
           payload,
         },
-        { delay: params.delay },
+        {
+          delay: params.delay,
+          ...(options?.analyticsEvaluationDispatch
+            ? { jobId: `${params.jobExecutionId}-managed` }
+            : {}),
+        },
       );
     },
   };

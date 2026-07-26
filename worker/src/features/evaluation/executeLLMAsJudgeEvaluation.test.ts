@@ -5,6 +5,7 @@ import z from "zod";
 const observabilityMocks = vi.hoisted(() => ({
   spans: [] as Array<{
     name: string;
+    recordException: boolean | undefined;
     attributes: Record<string, unknown>;
   }>,
   blockEvaluatorConfigs: vi.fn().mockResolvedValue(undefined),
@@ -19,13 +20,17 @@ vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
     blockEvaluatorConfigs: observabilityMocks.blockEvaluatorConfigs,
     instrumentAsync: vi.fn(
       async (
-        { name }: { name: string },
+        { name, recordException }: { name: string; recordException?: boolean },
         callback: (span: {
           setAttribute: (key: string, value: unknown) => unknown;
           setAttributes: (attributes: Record<string, unknown>) => unknown;
         }) => Promise<unknown>,
       ) => {
-        const captured = { name, attributes: {} as Record<string, unknown> };
+        const captured = {
+          name,
+          recordException,
+          attributes: {} as Record<string, unknown>,
+        };
         const span = {
           setAttribute(key: string, value: unknown) {
             captured.attributes[key] = value;
@@ -366,16 +371,21 @@ describe("executeLLMAsJudgeEvaluation", () => {
 
   describe("configuration errors", () => {
     it("should throw UnrecoverableError if model config invalid", async () => {
+      const secret =
+        "postgresql://admin:password@db Authorization=Bearer token";
       const deps = createMockEvalExecutionDeps({
         fetchModelConfig: vi.fn().mockResolvedValue({
           valid: false,
-          error: "No API key configured",
+          error: secret,
         }),
       });
 
-      await expect(
-        executeLLMAsJudgeEvaluation(createExecutionParams({ deps })),
-      ).rejects.toThrow(UnrecoverableError);
+      const execution = executeLLMAsJudgeEvaluation(
+        createExecutionParams({ deps }),
+      );
+      await expect(execution).rejects.toThrow(UnrecoverableError);
+      await expect(execution).rejects.not.toThrow(secret);
+      expect(observabilityMocks.spans[0]?.recordException).toBe(false);
     });
 
     it("should throw UnrecoverableError if output definition is invalid", async () => {
@@ -435,7 +445,7 @@ describe("executeLLMAsJudgeEvaluation", () => {
 
       await expect(
         executeLLMAsJudgeEvaluation(createExecutionParams({ deps })),
-      ).rejects.toThrow("Failed to write score");
+      ).rejects.toThrow("visible in analytics storage");
     });
 
     it("should throw error if score ingestion queue fails", async () => {
@@ -450,7 +460,7 @@ describe("executeLLMAsJudgeEvaluation", () => {
 
       await expect(
         executeLLMAsJudgeEvaluation(createExecutionParams({ deps })),
-      ).rejects.toThrow("Failed to write score");
+      ).rejects.toThrow("visible in analytics storage");
     });
   });
 
@@ -1306,6 +1316,11 @@ describe("executeLLMAsJudgeEvaluation", () => {
       });
       expect(callSpan?.attributes).not.toHaveProperty(
         "http.response.status_code",
+      );
+      expect(callSpan?.recordException).toBe(false);
+      expect(executeSpan?.recordException).toBe(false);
+      expect(JSON.stringify(observabilityMocks.spans)).not.toContain(
+        "custom endpoint",
       );
       expect(observabilityMocks.blockEvaluatorConfigs).toHaveBeenCalledTimes(1);
     });

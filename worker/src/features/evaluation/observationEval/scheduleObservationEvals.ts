@@ -24,6 +24,12 @@ interface ScheduleObservationEvalsParams {
   configs: ObservationEvalConfig[];
   schedulerDeps: ObservationEvalSchedulerDeps;
   executionMode?: JobConfigExecutionMode;
+  jobIdentitySeed?: string;
+  /**
+   * Doris 的 durable dispatch 必须看到单个 config 的失败，才能让外层重试；
+   * legacy ingestion 保持逐 config 隔离，避免改变 ClickHouse 行为。
+   */
+  failOnConfigError?: boolean;
 }
 
 /**
@@ -79,7 +85,14 @@ export function isObservationAllowedForQueuedObservationEvals(
 export async function scheduleObservationEvals(
   params: ScheduleObservationEvalsParams,
 ): Promise<void> {
-  const { observation, configs, schedulerDeps, executionMode } = params;
+  const {
+    observation,
+    configs,
+    schedulerDeps,
+    executionMode,
+    failOnConfigError,
+    jobIdentitySeed,
+  } = params;
 
   // Early return if no configs
   if (configs.length === 0) {
@@ -143,13 +156,15 @@ export async function scheduleObservationEvals(
         observationS3Path,
         schedulerDeps,
         executionMode,
+        jobIdentitySeed,
       }).catch((error) => {
         logger.error("Failed to process observation eval config", {
           configId: matchingConfig.id,
           observationId: observation.span_id,
           projectId: observation.project_id,
-          error,
+          errorType: error instanceof Error ? error.name : "UnknownError",
         });
+        if (failOnConfigError) throw error;
       }),
     ),
   );
@@ -161,6 +176,7 @@ interface ProcessConfigParams {
   observationS3Path: string;
   schedulerDeps: ObservationEvalSchedulerDeps;
   executionMode?: JobConfigExecutionMode;
+  jobIdentitySeed?: string;
 }
 
 async function processMatchingConfig(
@@ -172,6 +188,7 @@ async function processMatchingConfig(
     observationS3Path,
     schedulerDeps,
     executionMode,
+    jobIdentitySeed,
   } = params;
 
   const jobExecutionId = createW3CTraceId(
@@ -180,6 +197,7 @@ async function processMatchingConfig(
       matchingConfig.id,
       observation.trace_id,
       observation.span_id,
+      ...(jobIdentitySeed ? [jobIdentitySeed] : []),
     ]),
   );
 

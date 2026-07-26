@@ -20,6 +20,107 @@ import { isUnrecoverableError } from "../errors/UnrecoverableError";
 import { retryObservationNotFound } from "../features/evaluation/retryObservationNotFound";
 import { isObservationNotFoundError } from "../errors/ObservationNotFoundError";
 import { env } from "../env";
+import { resolveAnalyticsBackend } from "@langfuse/shared/analytics-backend";
+import { assertEvaluationExecutionAdmission } from "../features/evaluation/evaluationExecutionAdmission";
+
+type SafeEvaluationFailure = {
+  readonly code:
+    | "EVALUATION_MODEL_AUTH_INVALID"
+    | "EVALUATION_MODEL_BILLING_EXHAUSTED"
+    | "EVALUATION_MODEL_UNAVAILABLE"
+    | "EVALUATION_MODEL_ENDPOINT_UNREACHABLE"
+    | "EVALUATION_MODEL_ACCOUNT_NOT_READY"
+    | "EVALUATION_MODEL_RATE_LIMITED"
+    | "EVALUATION_MODEL_TEMPORARY_FAILURE"
+    | "EVALUATION_MODEL_REQUEST_FAILED"
+    | "EVALUATION_INVALID_REQUEST"
+    | "EVALUATION_INTERNAL_ERROR";
+  readonly message: string;
+  readonly retryable: boolean;
+};
+
+function safeEvaluationFailure(
+  error: unknown,
+  classification: ReturnType<typeof classifyEvaluatorLlmError>,
+): SafeEvaluationFailure {
+  switch (classification?.blockReason) {
+    case "LLM_CONNECTION_AUTH_INVALID":
+      return {
+        code: "EVALUATION_MODEL_AUTH_INVALID",
+        message: "The evaluation model credentials are invalid.",
+        retryable: false,
+      };
+    case "LLM_CONNECTION_BILLING_EXHAUSTED":
+      return {
+        code: "EVALUATION_MODEL_BILLING_EXHAUSTED",
+        message: "The evaluation model account has no available credits.",
+        retryable: false,
+      };
+    case "EVAL_MODEL_UNAVAILABLE":
+      return {
+        code: "EVALUATION_MODEL_UNAVAILABLE",
+        message: "The configured evaluation model is unavailable.",
+        retryable: false,
+      };
+    case "LLM_CONNECTION_ENDPOINT_UNREACHABLE":
+      return {
+        code: "EVALUATION_MODEL_ENDPOINT_UNREACHABLE",
+        message: "The evaluation model endpoint is unreachable.",
+        retryable: false,
+      };
+    case "PROVIDER_ACCOUNT_NOT_READY":
+      return {
+        code: "EVALUATION_MODEL_ACCOUNT_NOT_READY",
+        message: "The evaluation model account is not ready.",
+        retryable: false,
+      };
+  }
+  if (classification?.statusCode === 429) {
+    return {
+      code: "EVALUATION_MODEL_RATE_LIMITED",
+      message: "The evaluation model is temporarily rate limited.",
+      retryable: true,
+    };
+  }
+  if (classification?.isRetryable) {
+    return {
+      code: "EVALUATION_MODEL_TEMPORARY_FAILURE",
+      message: "The evaluation model is temporarily unavailable.",
+      retryable: true,
+    };
+  }
+  if (classification) {
+    return {
+      code: "EVALUATION_MODEL_REQUEST_FAILED",
+      message: "The evaluation model request failed.",
+      retryable: false,
+    };
+  }
+  if (isUnrecoverableError(error)) {
+    return {
+      code: "EVALUATION_INVALID_REQUEST",
+      message: "The evaluation could not be completed.",
+      retryable: false,
+    };
+  }
+  return {
+    code: "EVALUATION_INTERNAL_ERROR",
+    message: "An internal error occurred",
+    retryable: true,
+  };
+}
+
+function safeEvaluationException(failure: SafeEvaluationFailure): Error {
+  const error = new Error(failure.message);
+  error.name = "EvaluationExecutionError";
+  return error;
+}
+
+function safeEvaluationSchedulingException(): Error {
+  const error = new Error("Evaluation scheduling failed");
+  error.name = "EvaluationSchedulingError";
+  return error;
+}
 
 export const evalJobTraceCreatorQueueProcessor = async (
   job: Job<TQueueJobTypes[QueueName.TraceUpsert]>,
@@ -32,13 +133,15 @@ export const evalJobTraceCreatorQueueProcessor = async (
       enforcedJobTimeScope: "NEW", // we must not execute evals which are intended for existing data only.
     });
     return true;
-  } catch (e) {
-    logger.error(
-      `Failed job Evaluation for traceId ${job.data.payload.traceId}`,
-      e,
-    );
-    traceException(e);
-    throw e;
+  } catch {
+    const safeError = safeEvaluationSchedulingException();
+    logger.error("Failed to schedule trace evaluation", {
+      projectId: job.data.payload.projectId,
+      traceId: job.data.payload.traceId,
+      errorCode: "EVALUATION_SCHEDULING_FAILED",
+    });
+    traceException(safeError, undefined, "EVALUATION_SCHEDULING_FAILED");
+    throw safeError;
   }
 };
 
@@ -85,12 +188,16 @@ export const evalJobDatasetCreatorQueueProcessor = async (
     }
 
     // All other errors should be logged and propagated for BullMQ retry
-    logger.error(
-      `Failed job Evaluation for dataset item: ${job.data.payload.datasetItemId}`,
-      e,
-    );
-    traceException(e);
-    throw e;
+    const safeError = safeEvaluationSchedulingException();
+    logger.error("Failed to schedule dataset item evaluation", {
+      projectId: job.data.payload.projectId,
+      datasetItemId: job.data.payload.datasetItemId,
+      traceId: job.data.payload.traceId,
+      observationId: job.data.payload.observationId,
+      errorCode: "EVALUATION_SCHEDULING_FAILED",
+    });
+    traceException(safeError, undefined, "EVALUATION_SCHEDULING_FAILED");
+    throw safeError;
   }
 };
 
@@ -104,13 +211,16 @@ export const evalJobCreatorQueueProcessor = async (
       jobTimestamp: job.data.timestamp,
     });
     return true;
-  } catch (e) {
-    logger.error(
-      `Failed to create evaluation jobs: ${JSON.stringify(job.data.payload)}`,
-      e,
-    );
-    traceException(e);
-    throw e;
+  } catch {
+    const safeError = safeEvaluationSchedulingException();
+    logger.error("Failed to create historical evaluation jobs", {
+      projectId: job.data.payload.projectId,
+      traceId: job.data.payload.traceId,
+      configId: job.data.payload.configId,
+      errorCode: "EVALUATION_SCHEDULING_FAILED",
+    });
+    traceException(safeError, undefined, "EVALUATION_SCHEDULING_FAILED");
+    throw safeError;
   }
 };
 
@@ -125,7 +235,17 @@ export const evalJobExecutorQueueProcessorBuilder = (
 
   return async (job: Job<TQueueJobTypes[QueueName.EvaluationExecution]>) => {
     try {
-      logger.info("Executing Evaluation Execution Job", job.data);
+      await assertEvaluationExecutionAdmission({
+        backend: resolveAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND),
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        analyticsEvaluationDispatch:
+          job.data.payload.analyticsEvaluationDispatch,
+      });
+      logger.info("Executing Evaluation Execution Job", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+      });
 
       // Redirect selected projects to the secondary queue from the primary consumer.
       if (enableRedirectToSecondaryQueue) {
@@ -176,6 +296,7 @@ export const evalJobExecutorQueueProcessorBuilder = (
       return true;
     } catch (e) {
       const llmError = classifyEvaluatorLlmError(e);
+      const safeFailure = safeEvaluationFailure(e, llmError);
       // ┌─────────────────────────┐
       // │   Job Fails with Error  │
       // └───────────┬─────────────┘
@@ -248,24 +369,24 @@ export const evalJobExecutorQueueProcessorBuilder = (
           status: JobExecutionStatus.ERROR,
           endTime: new Date(),
           // Show user-facing error messages (LLM and config errors)
-          error:
-            llmError || isUnrecoverableError(e)
-              ? (llmError?.message ?? (e as Error).message)
-              : "An internal error occurred",
+          error: safeFailure.message,
           executionTraceId,
         },
       });
 
+      logger.error("Evaluation execution failed", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        errorCode: safeFailure.code,
+        retryable: safeFailure.retryable,
+      });
       if (llmError || isUnrecoverableError(e)) return;
 
-      traceException(e);
-      logger.error(
-        `Failed ${queueName} job for id ${job.data.payload.jobExecutionId}`,
-        e,
-      );
+      const safeError = safeEvaluationException(safeFailure);
+      traceException(safeError, undefined, safeFailure.code);
 
       // Retry job by rethrowing error
-      throw e;
+      throw safeError;
     }
   };
 };
@@ -274,10 +395,17 @@ export const llmAsJudgeExecutionQueueProcessorBuilder =
   (queueName: string): Processor =>
   async (job: Job<TQueueJobTypes[QueueName.LLMAsJudgeExecution]>) => {
     try {
-      logger.debug(
-        "Executing LLM-as-Judge Observation Evaluation Job",
-        job.data,
-      );
+      await assertEvaluationExecutionAdmission({
+        backend: resolveAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND),
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        analyticsEvaluationDispatch:
+          job.data.payload.analyticsEvaluationDispatch,
+      });
+      logger.debug("Executing LLM-as-Judge Observation Evaluation Job", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+      });
 
       const span = getCurrentSpan();
 
@@ -303,6 +431,7 @@ export const llmAsJudgeExecutionQueueProcessorBuilder =
       return true;
     } catch (e) {
       const llmError = classifyEvaluatorLlmError(e);
+      const safeFailure = safeEvaluationFailure(e, llmError);
       const executionTraceId = createW3CTraceId(
         job.data.payload.jobExecutionId,
       );
@@ -343,22 +472,22 @@ export const llmAsJudgeExecutionQueueProcessorBuilder =
         data: {
           status: JobExecutionStatus.ERROR,
           endTime: new Date(),
-          error:
-            llmError || isUnrecoverableError(e)
-              ? (llmError?.message ?? (e as Error).message)
-              : "An internal error occurred",
+          error: safeFailure.message,
           executionTraceId,
         },
       });
 
+      logger.error("LLM-as-Judge execution failed", {
+        projectId: job.data.payload.projectId,
+        jobExecutionId: job.data.payload.jobExecutionId,
+        errorCode: safeFailure.code,
+        retryable: safeFailure.retryable,
+      });
       if (llmError || isUnrecoverableError(e)) return;
 
-      traceException(e);
-      logger.error(
-        `Failed LLM-as-Judge execution job for id ${job.data.payload.jobExecutionId}`,
-        e,
-      );
+      const safeError = safeEvaluationException(safeFailure);
+      traceException(safeError, undefined, safeFailure.code);
 
-      throw e;
+      throw safeError;
     }
   };

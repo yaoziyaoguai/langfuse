@@ -13,6 +13,7 @@ import {
   JobExecutionStatus,
 } from "@langfuse/shared";
 import { createW3CTraceId } from "../../../utils";
+import { logger } from "@langfuse/shared/src/server";
 
 describe("scheduleObservationEvals", () => {
   const createMockObservation = (
@@ -478,6 +479,33 @@ describe("scheduleObservationEvals", () => {
         }),
       );
     });
+
+    it("includes the managed dispatch seed in the job execution identity", async () => {
+      const schedulerDeps = createMockSchedulerDeps();
+      const observation = createMockObservation();
+      const config = createMockConfig();
+
+      await scheduleObservationEvals({
+        observation,
+        configs: [config],
+        schedulerDeps,
+        jobIdentitySeed: "dispatch-1",
+      });
+
+      expect(schedulerDeps.upsertJobExecution).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: createW3CTraceId(
+            JSON.stringify([
+              "observation-eval",
+              config.id,
+              observation.trace_id,
+              observation.span_id,
+              "dispatch-1",
+            ]),
+          ),
+        }),
+      );
+    });
   });
 
   describe("multiple configs", () => {
@@ -548,6 +576,47 @@ describe("scheduleObservationEvals", () => {
       // Should create jobs for config-1 and config-3, but not config-2
       expect(schedulerDeps.upsertJobExecution).toHaveBeenCalledTimes(2);
       expect(schedulerDeps.enqueueEvalJob).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not log scheduler dependency error details", async () => {
+      const errorLog = vi.spyOn(logger, "error").mockImplementation(() => {});
+      const schedulerDeps = createMockSchedulerDeps();
+      schedulerDeps.enqueueEvalJob = vi
+        .fn<ObservationEvalSchedulerDeps["enqueueEvalJob"]>()
+        .mockRejectedValue(
+          new Error(
+            "redis://admin:password@cache Authorization=Bearer token prompt=secret",
+          ),
+        );
+
+      await scheduleObservationEvals({
+        observation: createMockObservation(),
+        configs: [createMockConfig()],
+        schedulerDeps,
+      });
+
+      const logs = JSON.stringify(errorLog.mock.calls);
+      expect(logs).toContain("errorType");
+      expect(logs).not.toContain("password");
+      expect(logs).not.toContain("Bearer token");
+      expect(logs).not.toContain("prompt=secret");
+      errorLog.mockRestore();
+    });
+
+    it("propagates scheduler failures for authoritative managed dispatches", async () => {
+      const schedulerDeps = createMockSchedulerDeps();
+      schedulerDeps.enqueueEvalJob = vi
+        .fn<ObservationEvalSchedulerDeps["enqueueEvalJob"]>()
+        .mockRejectedValue(new Error("queue unavailable"));
+
+      await expect(
+        scheduleObservationEvals({
+          observation: createMockObservation(),
+          configs: [createMockConfig()],
+          schedulerDeps,
+          failOnConfigError: true,
+        }),
+      ).rejects.toThrow("queue unavailable");
     });
   });
 });

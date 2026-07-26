@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
+
 import { extractVariables } from "@langfuse/shared";
 import {
   invalidateProjectEvalConfigCaches,
   type ApiAccessScope,
 } from "@langfuse/shared/src/server";
-import { Prisma, prisma } from "@langfuse/shared/src/db";
+import { Prisma } from "@langfuse/shared/src/db";
 import { type PostUnstableEvaluatorBodyParsedType } from "@/src/features/public-api/types/unstable-evaluators";
 import {
   type PUBLIC_EVALUATOR_TYPE_CODE,
@@ -32,6 +34,7 @@ import { assertEvaluatorDefinitionCanRunForPublicApi } from "./validation";
 import { createUnstablePublicApiError } from "@/src/features/public-api/server/unstable-public-api-error-contract";
 import type { StoredPublicEvaluatorTemplate } from "./types";
 import { prepareVariableMappingForEvaluatorUpgrade } from "@/src/features/evals/server/evaluatorUpgrade";
+import { withAnalyticsEvaluationMutationAdmission } from "@/src/features/evals/server/evaluationMutationAdmission";
 
 function assertCodeEvaluatorDefinitionCanRunForPublicApi(
   input: Extract<
@@ -132,145 +135,150 @@ export async function createPublicEvaluator(params: {
   }
 
   try {
-    const { template, upgradedConfigCount } = await prisma.$transaction(
-      async (tx) => {
-        const conflictingTemplate = await tx.evalTemplate.findFirst({
-          where: {
-            projectId: params.projectId,
-            name: input.name,
-            type: {
-              not: storedEvalTemplateType,
-            },
-          },
-          select: {
-            type: true,
-          },
-        });
-
-        if (conflictingTemplate) {
-          throw createUnstablePublicApiError({
-            httpCode: 409,
-            code: "name_conflict",
-            message: `An evaluator named "${input.name}" already exists with a different type in this project. Use a different name for the ${input.type} evaluator.`,
-            details: {
-              field: "name",
-            },
-          });
-        }
-
-        const existingProjectTemplates = await tx.evalTemplate.findMany({
-          where: {
-            projectId: params.projectId,
-            name: input.name,
-            type: storedEvalTemplateType,
-          },
-          orderBy: [
-            {
-              version: "desc",
-            },
-            {
-              createdAt: "desc",
-            },
-            {
-              id: "desc",
-            },
-          ],
-          select: {
-            id: true,
-            version: true,
-          },
-        });
-        const configsToUpgrade =
-          existingProjectTemplates.length > 0
-            ? await tx.jobConfiguration.findMany({
-                where: {
-                  projectId: params.projectId,
-                  evalTemplateId: {
-                    in: existingProjectTemplates.map(
-                      (existingTemplate) => existingTemplate.id,
-                    ),
-                  },
-                  evalTemplate: {
-                    is: {
-                      type: storedEvalTemplateType,
-                    },
-                  },
+    const { template, upgradedConfigCount } =
+      await withAnalyticsEvaluationMutationAdmission({
+        resourceIdentity: `public-template-create:${randomUUID()}`,
+        mutate: (guard) =>
+          guard.withIoFence(async (tx) => {
+            const conflictingTemplate = await tx.evalTemplate.findFirst({
+              where: {
+                projectId: params.projectId,
+                name: input.name,
+                type: {
+                  not: storedEvalTemplateType,
                 },
-                select: {
-                  id: true,
-                  scoreName: true,
-                  targetObject: true,
-                  variableMapping: true,
-                },
-              })
-            : [];
-        const upgradedConfigs = configsToUpgrade.map((config) => {
-          const preparedMapping = prepareVariableMappingForEvaluatorUpgrade({
-            templateType: storedEvalTemplateType,
-            targetObject: config.targetObject,
-            variableMapping: config.variableMapping,
-            nextVariables,
-          });
-
-          if (preparedMapping.missingVariables.length > 0) {
-            throw createUnstablePublicApiError({
-              httpCode: 409,
-              code: "conflict",
-              message: `Creating a new evaluator version would invalidate the evaluation rule "${config.scoreName}" because it is missing mappings for new evaluator variables: ${preparedMapping.missingVariables.join(", ")}.`,
-              details: {
-                field: "mapping",
-                variables: preparedMapping.missingVariables,
+              },
+              select: {
+                type: true,
               },
             });
-          }
 
-          return {
-            id: config.id,
-            variableMapping: preparedMapping.variableMapping,
-          };
-        });
-        const latestProjectTemplate = existingProjectTemplates[0];
-
-        const template = await tx.evalTemplate.create({
-          data: {
-            projectId: params.projectId,
-            name: input.name,
-            version: (latestProjectTemplate?.version ?? 0) + 1,
-            type: storedEvalTemplateType,
-            prompt: input.prompt ?? null,
-            provider: input.modelConfig?.provider ?? null,
-            model: input.modelConfig?.model ?? null,
-            modelParams: undefined,
-            vars: nextVariables,
-            outputDefinition: storedOutputDefinition,
-            sourceCode: input.sourceCode ?? null,
-            sourceCodeLanguage: input.sourceCodeLanguage ?? null,
-          },
-        });
-
-        if (upgradedConfigs.length > 0) {
-          await Promise.all(
-            upgradedConfigs.map((config) =>
-              tx.jobConfiguration.update({
-                where: {
-                  id: config.id,
-                  projectId: params.projectId,
+            if (conflictingTemplate) {
+              throw createUnstablePublicApiError({
+                httpCode: 409,
+                code: "name_conflict",
+                message: `An evaluator named "${input.name}" already exists with a different type in this project. Use a different name for the ${input.type} evaluator.`,
+                details: {
+                  field: "name",
                 },
-                data: {
-                  evalTemplateId: template.id,
+              });
+            }
+
+            const existingProjectTemplates = await tx.evalTemplate.findMany({
+              where: {
+                projectId: params.projectId,
+                name: input.name,
+                type: storedEvalTemplateType,
+              },
+              orderBy: [
+                {
+                  version: "desc",
+                },
+                {
+                  createdAt: "desc",
+                },
+                {
+                  id: "desc",
+                },
+              ],
+              select: {
+                id: true,
+                version: true,
+              },
+            });
+            const configsToUpgrade =
+              existingProjectTemplates.length > 0
+                ? await tx.jobConfiguration.findMany({
+                    where: {
+                      projectId: params.projectId,
+                      evalTemplateId: {
+                        in: existingProjectTemplates.map(
+                          (existingTemplate) => existingTemplate.id,
+                        ),
+                      },
+                      evalTemplate: {
+                        is: {
+                          type: storedEvalTemplateType,
+                        },
+                      },
+                    },
+                    select: {
+                      id: true,
+                      scoreName: true,
+                      targetObject: true,
+                      variableMapping: true,
+                    },
+                  })
+                : [];
+            const upgradedConfigs = configsToUpgrade.map((config) => {
+              const preparedMapping = prepareVariableMappingForEvaluatorUpgrade(
+                {
+                  templateType: storedEvalTemplateType,
+                  targetObject: config.targetObject,
                   variableMapping: config.variableMapping,
+                  nextVariables,
                 },
-              }),
-            ),
-          );
-        }
+              );
 
-        return {
-          template,
-          upgradedConfigCount: upgradedConfigs.length,
-        };
-      },
-    );
+              if (preparedMapping.missingVariables.length > 0) {
+                throw createUnstablePublicApiError({
+                  httpCode: 409,
+                  code: "conflict",
+                  message: `Creating a new evaluator version would invalidate the evaluation rule "${config.scoreName}" because it is missing mappings for new evaluator variables: ${preparedMapping.missingVariables.join(", ")}.`,
+                  details: {
+                    field: "mapping",
+                    variables: preparedMapping.missingVariables,
+                  },
+                });
+              }
+
+              return {
+                id: config.id,
+                variableMapping: preparedMapping.variableMapping,
+              };
+            });
+            const latestProjectTemplate = existingProjectTemplates[0];
+
+            const template = await tx.evalTemplate.create({
+              data: {
+                projectId: params.projectId,
+                name: input.name,
+                version: (latestProjectTemplate?.version ?? 0) + 1,
+                type: storedEvalTemplateType,
+                prompt: input.prompt ?? null,
+                provider: input.modelConfig?.provider ?? null,
+                model: input.modelConfig?.model ?? null,
+                modelParams: undefined,
+                vars: nextVariables,
+                outputDefinition: storedOutputDefinition,
+                sourceCode: input.sourceCode ?? null,
+                sourceCodeLanguage: input.sourceCodeLanguage ?? null,
+              },
+            });
+
+            if (upgradedConfigs.length > 0) {
+              await Promise.all(
+                upgradedConfigs.map((config) =>
+                  tx.jobConfiguration.update({
+                    where: {
+                      id: config.id,
+                      projectId: params.projectId,
+                    },
+                    data: {
+                      evalTemplateId: template.id,
+                      variableMapping: config.variableMapping,
+                    },
+                  }),
+                ),
+              );
+            }
+
+            return {
+              template,
+              upgradedConfigCount: upgradedConfigs.length,
+            };
+          }),
+      });
 
     if (upgradedConfigCount > 0) {
       await invalidateProjectEvalConfigCaches(params.projectId);
@@ -323,11 +331,17 @@ export async function deletePublicEvaluator(params: {
 }) {
   // an evaluator in the public contract is the whole family; deleting it
   // removes all stored versions
-  await deleteEvalTemplateFamily({
-    prisma,
-    projectId: params.projectId,
-    evalTemplateId: params.evaluatorId,
-    auditScope: params.auditScope,
-    referencingEntityName: "evaluation rule",
+  await withAnalyticsEvaluationMutationAdmission({
+    resourceIdentity: `public-template-delete:${params.evaluatorId}`,
+    mutate: (guard) =>
+      guard.withIoFence((tx) =>
+        deleteEvalTemplateFamily({
+          prisma: tx,
+          projectId: params.projectId,
+          evalTemplateId: params.evaluatorId,
+          auditScope: params.auditScope,
+          referencingEntityName: "evaluation rule",
+        }),
+      ),
   });
 }

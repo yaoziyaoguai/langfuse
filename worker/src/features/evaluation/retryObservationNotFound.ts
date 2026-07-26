@@ -132,7 +132,7 @@ export async function retryObservationNotFound(
     logger.error(
       `Failed to handle observation-not-found retry for observation ${error.observationId}. Job will fail.`,
       {
-        error: innerErr,
+        errorType: innerErr instanceof Error ? innerErr.name : "UnknownError",
         projectId: job.data.projectId,
         datasetItemId: job.data.datasetItemId,
         observationId: error.observationId,

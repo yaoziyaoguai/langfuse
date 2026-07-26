@@ -79,7 +79,7 @@ export const buildEvalExecutionSpanAttributes = ({
 /**
  * Low-cardinality evaluator policy attributes derived from native AI SDK
  * errors. Provider messages and response bodies intentionally stay out of
- * span attributes; instrumentAsync records the propagated exception.
+ * span attributes and evaluator spans disable automatic exception recording.
  */
 export const buildEvaluatorLlmErrorSpanAttributes = (
   classification: EvaluatorLlmErrorClassification | null,

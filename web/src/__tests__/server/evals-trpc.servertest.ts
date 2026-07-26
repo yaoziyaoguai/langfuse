@@ -28,6 +28,24 @@ vi.mock("@/src/features/evals/server/codeEvalTestRun", () => ({
   runCodeEvalTestForJobConfig: runCodeEvalTestForJobConfigMock,
 }));
 
+vi.mock("@/src/features/evals/server/evaluationMutationAdmission", () => ({
+  withAnalyticsEvaluationMutationAdmission: async <T>(input: {
+    mutate: (guard: {
+      assertActive: () => Promise<void>;
+      withIoFence: <R>(
+        execute: (transaction: unknown) => Promise<R>,
+      ) => Promise<R>;
+    }) => Promise<T>;
+  }) => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    return input.mutate({
+      assertActive: async () => undefined,
+      withIoFence: (execute) =>
+        prisma.$transaction((transaction) => execute(transaction)),
+    });
+  },
+}));
+
 import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import {
