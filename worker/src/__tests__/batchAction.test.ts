@@ -8,7 +8,7 @@ import {
 } from "@langfuse/shared";
 import { expect, describe, it } from "vitest";
 import { v4 as uuidv4 } from "uuid";
-import { handleBatchActionJob } from "../features/batchAction/handleBatchActionJob";
+import { handleClickhouseBatchActionJob as handleBatchActionJob } from "../features/batchAction/handleClickhouseBatchActionJob";
 import {
   getDatabaseReadStreamPaginated,
   getTraceIdentifierStream,

@@ -8,6 +8,8 @@
 
 export type ScenarioFlagType = "string" | "number" | "boolean";
 
+export type AnalyticsBackend = "clickhouse" | "doris";
+
 export type ScenarioFlag = {
   /** kebab-case CLI flag name, e.g. "observations-per-trace" */
   flag: string;
@@ -16,9 +18,17 @@ export type ScenarioFlag = {
   description: string;
 };
 
+export const ANALYTICS_SMOKE_FIXTURE_DATE_FLAG = {
+  flag: "fixture-date",
+  type: "string",
+  default: new Date().toISOString().slice(0, 10),
+  description:
+    "UTC date (YYYY-MM-DD) anchoring the canonical smoke fixture at noon",
+} satisfies ScenarioFlag;
+
 export type SeedSummary = {
   scenario: string;
-  target: "clickhouse";
+  target: AnalyticsBackend;
   params: Record<string, string | number | boolean>;
   projectId: string;
   environment: string;
@@ -26,12 +36,20 @@ export type SeedSummary = {
   sessionIds: string[];
   /** rows written per logical entity, e.g. { traces: 1, observations: 5000 } */
   counts: Record<string, number>;
-  /** post-write readback counts from ClickHouse; mismatches fail the run */
+  /** post-write readback counts from the selected backend; mismatches fail */
   verified: Record<string, number>;
   /** UI deep links to inspect the seeded state */
   links: string[];
   dryRun: boolean;
   durationMs: number;
+  /** versioned evidence contract emitted by backend-comparable smoke seeds */
+  evidenceContractVersion?: number;
+  /** SHA-256 of the canonical write fixture with runtime IDs replaced */
+  fixtureHash?: string;
+  /** SHA-256 of normalized public readback semantics; null for dry-runs */
+  semanticHash?: string | null;
+  /** durable Doris ingestion operation; null for ClickHouse and dry-runs */
+  operationId?: string | null;
 };
 
 export type ScenarioContext = {
@@ -41,6 +59,7 @@ export type ScenarioContext = {
   idPrefix: string;
   dryRun: boolean;
   baseUrl: string;
+  backend: AnalyticsBackend;
   log: (message: string) => void;
 };
 
@@ -54,6 +73,15 @@ export type ScenarioDefinition = {
     ctx: ScenarioContext,
     params: Record<string, string | number | boolean>,
   ) => Promise<SeedSummary>;
+};
+
+export type ScenarioRegistration = Omit<ScenarioDefinition, "run"> & {
+  supportedBackends: readonly AnalyticsBackend[];
+  /** true when the scenario requires a running web app for ingestion */
+  needsWeb: boolean;
+  /** legacy scenarios load shared DB/Redis clients that need explicit cleanup */
+  loadsSharedClients: boolean;
+  load: () => Promise<ScenarioDefinition>;
 };
 
 export class SeedError extends Error {

@@ -101,8 +101,8 @@ import { resolveTraceAccess } from "@/src/features/traces/server/traceAccessPoli
 import {
   capabilityForTrpcPath,
   CommunityCapabilityUnavailableError,
-  isCommunityCapabilityAvailable,
 } from "@/src/features/capabilities/communityAvailability";
+import { isCommunityCapabilityRuntimeAvailable } from "@/src/server/communityCapabilityRuntime";
 
 setUpSuperjson();
 
@@ -219,6 +219,12 @@ const withErrorHandling = t.middleware(async ({ ctx, next }) => {
         // Keep the original error, it will be removed by `errorFormatter`
         cause: res.error.cause,
       });
+    } else if (res.error.cause instanceof CommunityCapabilityUnavailableError) {
+      res.error = new TRPCError({
+        code: "NOT_IMPLEMENTED",
+        message: res.error.cause.body.message,
+        cause: res.error.cause,
+      });
     } else {
       // Throw a new TRPC error with:
       // - The same error code as the original error
@@ -266,11 +272,14 @@ const withOtelInstrumentation = t.middleware(async (opts) => {
   return opentelemetry.context.with(baggageCtx, () => opts.next());
 });
 
-const withAnalyticsCapabilityGate = t.middleware(({ path, next }) => {
+const withAnalyticsCapabilityGate = t.middleware(async ({ path, next }) => {
   const capability = capabilityForTrpcPath(path);
   if (
     capability &&
-    !isCommunityCapabilityAvailable(capability, env.LANGFUSE_ANALYTICS_BACKEND)
+    !(await isCommunityCapabilityRuntimeAvailable(
+      capability,
+      env.LANGFUSE_ANALYTICS_BACKEND,
+    ))
   ) {
     const unavailable = new CommunityCapabilityUnavailableError(capability);
     throw new TRPCError({

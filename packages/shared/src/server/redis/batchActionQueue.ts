@@ -1,6 +1,9 @@
 import { Queue } from "bullmq";
 import { QueueName, TQueueJobTypes } from "../queues";
-import { createBullMQQueueOptionsWithRedis } from "./redis";
+import {
+  createAnalyticsQueuePublisherOptionsWithRedis,
+  redisErrorForLogging,
+} from "./redis";
 import { logger } from "../logger";
 
 export class BatchActionQueue {
@@ -13,10 +16,10 @@ export class BatchActionQueue {
   > | null {
     if (BatchActionQueue.instance) return BatchActionQueue.instance;
 
-    const queueOptionsWithRedis = createBullMQQueueOptionsWithRedis(
+    const queueOptionsWithRedis = createAnalyticsQueuePublisherOptionsWithRedis(
       QueueName.BatchActionQueue,
     );
-    BatchActionQueue.instance = queueOptionsWithRedis
+    const queue = queueOptionsWithRedis
       ? new Queue<TQueueJobTypes[QueueName.BatchActionQueue]>(
           QueueName.BatchActionQueue,
           {
@@ -33,11 +36,20 @@ export class BatchActionQueue {
           },
         )
       : null;
+    BatchActionQueue.instance = queue;
 
-    BatchActionQueue.instance?.on("error", (err) => {
-      logger.error("BatchActionQueue error", err);
+    queue?.on("error", (err) => {
+      logger.error("BatchActionQueue error", redisErrorForLogging(err));
     });
 
-    return BatchActionQueue.instance;
+    if (queue && queueOptionsWithRedis) {
+      queueOptionsWithRedis.connection.on("end", () => {
+        if (BatchActionQueue.instance === queue) {
+          BatchActionQueue.instance = null;
+        }
+      });
+    }
+
+    return queue;
   }
 }

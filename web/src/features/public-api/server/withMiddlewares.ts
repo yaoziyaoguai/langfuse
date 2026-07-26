@@ -26,10 +26,10 @@ import {
 import { clickHouseRouteForRequest } from "@/src/features/public-api/server/clickHouseRequestTags";
 import {
   COMMUNITY_CAPABILITIES,
-  capabilityForPublicApiPath,
-  isCommunityCapabilityAvailable,
+  resolvePublicApiCapability,
 } from "@/src/features/capabilities/communityAvailability";
 import { env } from "@/src/env.mjs";
+import { isCommunityCapabilityRuntimeAvailable } from "@/src/server/communityCapabilityRuntime";
 
 // Exported to silence @typescript-eslint/no-unused-vars v8 warning
 // (used for type extraction via typeof, which is a legitimate pattern)
@@ -55,6 +55,11 @@ const DEFAULT_DORIS_RESOURCE_ERROR_MESSAGE = [
   "Analytics storage is temporarily unavailable. Please retry the request.",
   "See https://langfuse.com/docs/api-and-data-platform/features/public-api for more details.",
 ].join("\n");
+
+const INVALID_REQUEST_URL_RESPONSE = {
+  message: "Invalid request URL",
+  error: "InvalidRequestError",
+} as const;
 
 export const LEGACY_PUBLIC_API_OBSERVATIONS_CLICKHOUSE_RESOURCE_ERROR_MESSAGE =
   [
@@ -99,13 +104,21 @@ export function withMiddlewares(
   options?: MiddlewareOptions,
 ) {
   return async (req: NextApiRequest, res: NextApiResponse) => {
-    const capability = capabilityForPublicApiPath(req.url ?? "");
+    const capabilityResolution = resolvePublicApiCapability(req.url ?? "");
+    if (
+      env.LANGFUSE_ANALYTICS_BACKEND === "doris" &&
+      !capabilityResolution.isValidRequestUrl
+    ) {
+      return res.status(400).json(INVALID_REQUEST_URL_RESPONSE);
+    }
+
+    const { capability } = capabilityResolution;
     if (
       capability &&
-      !isCommunityCapabilityAvailable(
+      !(await isCommunityCapabilityRuntimeAvailable(
         capability,
         env.LANGFUSE_ANALYTICS_BACKEND,
-      )
+      ))
     ) {
       return res.status(501).json(COMMUNITY_CAPABILITIES[capability]);
     }

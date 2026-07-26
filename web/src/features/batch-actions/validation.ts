@@ -3,8 +3,39 @@ import {
   AddToDatasetMappingSchema,
   ObservationAddToDatasetConfigSchema,
   BatchActionQuerySchema,
+  BatchEvalSourceTable,
   BatchEvalSourceTableSchema,
+  type BatchActionQuery,
 } from "@langfuse/shared";
+
+export function scopeBatchEvaluationQuery(
+  query: BatchActionQuery,
+  sourceTable: BatchEvalSourceTable,
+): BatchActionQuery {
+  if (sourceTable === BatchEvalSourceTable.EVENTS) return query;
+
+  const filters = query.filter ?? [];
+  const alreadyScoped = filters.some(
+    (filter) =>
+      filter.column === "isExperimentItemRootSpan" &&
+      filter.operator === "=" &&
+      filter.value === true,
+  );
+  if (alreadyScoped) return query;
+
+  return {
+    ...query,
+    filter: [
+      ...filters,
+      {
+        column: "isExperimentItemRootSpan",
+        operator: "=",
+        value: true,
+        type: "boolean",
+      },
+    ],
+  };
+}
 
 export const CreateObservationAddToDatasetActionSchema = z.object({
   projectId: z.string(),

@@ -255,6 +255,8 @@ export function createAiSdkTelemetryCapture(params: {
         spans: matchingSpans,
         projectId: traceSinkParams.targetProjectId,
         sdkName: INTERNAL_SDK_NAME,
+        analyticsAdmissionContext:
+          traceSinkParams.eventsWriter?.analyticsAdmissionContext,
       });
     } catch (e) {
       traceException(e);

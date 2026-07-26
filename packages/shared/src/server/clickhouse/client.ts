@@ -8,6 +8,8 @@ import { ClickHouseLogger, mapLogLevel } from "./clickhouse-logger";
 import { getClickHouseCompatibilitySettings } from "./compatibility";
 import { isAnalyticsBackend } from "../analytics-persistence/analyticsBackend";
 import { AnalyticsPersistenceError } from "../analytics-persistence/errors";
+import { assertAnalyticsRuntimeIoAllowed } from "../analytics-persistence/analyticsRuntimeIoFence";
+import { guardClickHouseClient } from "./runtimeIoGuard";
 
 export { EXCEPTION_TAG_HEADER_NAME } from "@clickhouse/client";
 
@@ -169,6 +171,7 @@ export class ClickHouseClientManager {
     opts: NodeClickHouseClientConfigOptions,
     preferredClickhouseService: PreferredClickhouseService = "ReadWrite",
   ): ClickhouseClientType {
+    assertAnalyticsRuntimeIoAllowed();
     if (isAnalyticsBackend(env.LANGFUSE_ANALYTICS_BACKEND, "doris")) {
       throw new AnalyticsPersistenceError(
         "ANALYTICS_UNSUPPORTED_FEATURE",
@@ -203,58 +206,64 @@ export class ClickHouseClientManager {
         opts.request_timeout !== undefined &&
         opts.request_timeout > CLICKHOUSE_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS;
 
-      const client = createClient({
-        ...opts,
-        ...settings,
-        application: `langfuse/${VERSION.replace("v", "")}`,
-        keep_alive: {
-          idle_socket_ttl: env.CLICKHOUSE_KEEP_ALIVE_IDLE_SOCKET_TTL,
-        },
-        max_open_connections: env.CLICKHOUSE_MAX_OPEN_CONNECTIONS,
-        log: {
-          LoggerClass: ClickHouseLogger,
-          level: mapLogLevel(env.LANGFUSE_LOG_LEVEL ?? "info"),
-        },
-        clickhouse_settings: {
-          // Overwrite async insert settings to tune throughput
-          ...(env.CLICKHOUSE_ASYNC_INSERT_MAX_DATA_SIZE
-            ? {
-                async_insert_max_data_size:
-                  env.CLICKHOUSE_ASYNC_INSERT_MAX_DATA_SIZE,
-              }
-            : {}),
-          ...(env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MS
-            ? {
-                async_insert_busy_timeout_ms:
-                  env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MS,
-              }
-            : {}),
-          ...(env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MIN_MS
-            ? {
-                async_insert_busy_timeout_min_ms:
-                  env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MIN_MS,
-              }
-            : {}),
-          ...(env.CLICKHOUSE_LIGHTWEIGHT_DELETE_MODE !== "alter_update"
-            ? {
-                lightweight_delete_mode: env.CLICKHOUSE_LIGHTWEIGHT_DELETE_MODE,
-                update_parallel_mode: env.CLICKHOUSE_UPDATE_PARALLEL_MODE,
-              }
-            : {}),
-          ...cloudOptions,
-          ...serviceClickhouseSettings,
-          ...this.getRequestTimeoutClickHouseSettings(clickHouseRequestTimeout),
-          ...opts.clickhouse_settings,
-          async_insert: 1,
-          wait_for_async_insert: 1, // if disabled, we won't get errors from clickhouse
-          ...(shouldSendProgressInHttpHeaders
-            ? {
-                send_progress_in_http_headers: 1,
-                http_headers_progress_interval_ms: "10000", // UInt64, should be passed as a string
-              }
-            : {}),
-        },
-      });
+      const client = guardClickHouseClient(
+        createClient({
+          ...opts,
+          ...settings,
+          application: `langfuse/${VERSION.replace("v", "")}`,
+          keep_alive: {
+            idle_socket_ttl: env.CLICKHOUSE_KEEP_ALIVE_IDLE_SOCKET_TTL,
+          },
+          max_open_connections: env.CLICKHOUSE_MAX_OPEN_CONNECTIONS,
+          log: {
+            LoggerClass: ClickHouseLogger,
+            level: mapLogLevel(env.LANGFUSE_LOG_LEVEL ?? "info"),
+          },
+          clickhouse_settings: {
+            // Overwrite async insert settings to tune throughput
+            ...(env.CLICKHOUSE_ASYNC_INSERT_MAX_DATA_SIZE
+              ? {
+                  async_insert_max_data_size:
+                    env.CLICKHOUSE_ASYNC_INSERT_MAX_DATA_SIZE,
+                }
+              : {}),
+            ...(env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MS
+              ? {
+                  async_insert_busy_timeout_ms:
+                    env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MS,
+                }
+              : {}),
+            ...(env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MIN_MS
+              ? {
+                  async_insert_busy_timeout_min_ms:
+                    env.CLICKHOUSE_ASYNC_INSERT_BUSY_TIMEOUT_MIN_MS,
+                }
+              : {}),
+            ...(env.CLICKHOUSE_LIGHTWEIGHT_DELETE_MODE !== "alter_update"
+              ? {
+                  lightweight_delete_mode:
+                    env.CLICKHOUSE_LIGHTWEIGHT_DELETE_MODE,
+                  update_parallel_mode: env.CLICKHOUSE_UPDATE_PARALLEL_MODE,
+                }
+              : {}),
+            ...cloudOptions,
+            ...serviceClickhouseSettings,
+            ...this.getRequestTimeoutClickHouseSettings(
+              clickHouseRequestTimeout,
+            ),
+            ...opts.clickhouse_settings,
+            async_insert: 1,
+            wait_for_async_insert: 1, // if disabled, we won't get errors from clickhouse
+            ...(shouldSendProgressInHttpHeaders
+              ? {
+                  send_progress_in_http_headers: 1,
+                  http_headers_progress_interval_ms: "10000", // UInt64, should be passed as a string
+                }
+              : {}),
+          },
+        }),
+        clickHouseRequestTimeout,
+      );
 
       this.clientMap.set(key, client);
     }

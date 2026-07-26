@@ -119,6 +119,24 @@ const EnvSchema = z.object({
   LANGFUSE_ANALYTICS_BACKEND: z
     .enum(["clickhouse", "doris"])
     .default("clickhouse"),
+  LANGFUSE_ANALYTICS_WORKLOAD_EPOCH: z.string().min(1).optional(),
+  LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_FILE: z.string().min(1).optional(),
+  LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID: z.string().min(1).optional(),
+  LANGFUSE_DORIS_PARQUET_SCRATCH_ROOT: z.string().min(1).optional(),
+  LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(2 * 1024 * 1024 * 1024),
+  LANGFUSE_DORIS_PARQUET_SCRATCH_CLEANUP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .default(60_000),
   // Doris credentials are injected per workload. Web never receives load auth.
   DORIS_LOCAL_DEV_MODE: z.enum(["true", "false"]).default("false"),
   DORIS_QUERY_URL: z.string().optional(),
@@ -140,6 +158,8 @@ const EnvSchema = z.object({
   DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: z.string().optional(),
   DORIS_STREAM_LOAD_BE_ALLOWLIST: z.string().optional(),
   DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: z.string().optional(),
+  DORIS_STREAM_LOAD_REDIRECT_ORIGIN_REWRITE_MAP: z.string().optional(),
+  DORIS_STREAM_LOAD_REDIRECT_REWRITE_IP_ALLOWLIST: z.string().optional(),
   DORIS_STREAM_LOAD_TLS_CA_PATH: z.string().optional(),
   DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: z.coerce
     .number()
@@ -181,6 +201,14 @@ const EnvSchema = z.object({
     .min(1)
     .max(1_000)
     .default(100),
+  LANGFUSE_ANALYTICS_CONTROL_STATE_CLEANER_ENABLED: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_ANALYTICS_CONTROL_STATE_CLEANER_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .default(6 * 60 * 60_000),
   LANGFUSE_EVAL_CREATOR_LIMITER_DURATION: z.coerce
     .number()
     .positive()

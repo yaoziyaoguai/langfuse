@@ -55,6 +55,7 @@ describe("ClickhouseWriter", () => {
     vi.useRealTimers();
 
     // Reset singleton instance
+    clickhouseClientMock.insert.mockResolvedValue(undefined);
     await writer.shutdown();
 
     ClickhouseWriter.instance = null;
@@ -203,6 +204,19 @@ describe("ClickhouseWriter", () => {
     expect(logger.info).toHaveBeenCalledWith(
       "ClickhouseWriter shutdown complete.",
     );
+  });
+
+  it("rejects shutdown when the final flush leaves records in memory", async () => {
+    writer.addToQueue(TableName.Traces, { id: "1", name: "test" });
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockRejectedValueOnce(new Error("ClickHouse unavailable"))
+      .mockResolvedValue(undefined);
+
+    await expect(writer.shutdown()).rejects.toThrow(/did not drain/i);
+
+    expect(mockInsert).toHaveBeenCalledOnce();
+    expect(writer["queue"][TableName.Traces]).toHaveLength(1);
   });
 
   it("should handle multiple table types", async () => {

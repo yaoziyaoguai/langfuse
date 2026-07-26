@@ -1,6 +1,6 @@
-import { context } from "@opentelemetry/api";
+import { context, trace, type Span } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { normalizeAnalyticsQueryTags } from "../analyticsQueryTags";
 import { normalizeClickHouseQueryTags } from "../clickhouse/queryTags";
 import { contextWithLangfuseProps } from "../headerPropagation";
@@ -80,5 +80,62 @@ describe("instrumentation baggage propagation", () => {
       route: "langfuse.queue.clickhouse",
       projectId: "project-1",
     });
+  });
+
+  it("can suppress automatic exception recording for an async span", async () => {
+    const recordException = vi.fn();
+    const span = {
+      end: vi.fn(),
+      recordException,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+    } as unknown as Span;
+    const getTracer = vi.spyOn(trace, "getTracer").mockReturnValue({
+      startActiveSpan: vi.fn((...args: unknown[]) =>
+        (args.at(-1) as (activeSpan: Span) => Promise<unknown>)(span),
+      ),
+    } as never);
+    const secretError = new Error(
+      "postgresql://admin:password@db Authorization=Bearer token",
+    );
+
+    await expect(
+      instrumentAsync(
+        { name: "redacted-async", recordException: false },
+        async () => {
+          throw secretError;
+        },
+      ),
+    ).rejects.toBe(secretError);
+
+    expect(recordException).not.toHaveBeenCalled();
+    getTracer.mockRestore();
+  });
+
+  it("can suppress automatic exception recording for a sync span", () => {
+    const recordException = vi.fn();
+    const span = {
+      end: vi.fn(),
+      recordException,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+    } as unknown as Span;
+    const getTracer = vi.spyOn(trace, "getTracer").mockReturnValue({
+      startActiveSpan: vi.fn((...args: unknown[]) =>
+        (args.at(-1) as (activeSpan: Span) => unknown)(span),
+      ),
+    } as never);
+    const secretError = new Error("prompt=secret input=private");
+
+    expect(() =>
+      instrumentSync({ name: "redacted-sync", recordException: false }, () => {
+        throw secretError;
+      }),
+    ).toThrow(secretError);
+
+    expect(recordException).not.toHaveBeenCalled();
+    getTracer.mockRestore();
   });
 });

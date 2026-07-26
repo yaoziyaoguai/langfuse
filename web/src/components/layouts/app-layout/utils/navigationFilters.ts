@@ -26,7 +26,12 @@ export const filters = {
     ctx: NavigationFilterContext,
   ): Route | null => {
     const backend = ctx.session?.environment?.analyticsBackend;
-    return backend && !isCommunityPageAvailable(route.pathname, backend)
+    return backend &&
+      !isCommunityPageAvailable(
+        route.pathname,
+        backend,
+        ctx.session?.environment?.activeAnalyticsCapabilities,
+      )
       ? null
       : route;
   },

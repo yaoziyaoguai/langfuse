@@ -19,6 +19,11 @@ import {
 import { getDisplaySecretKey, hashSecretKey, logger } from "../../src/server";
 import { redis } from "../../src/server/redis/redis";
 import {
+  DEFAULT_SEED_PROJECT_ID,
+  DEFAULT_SEED_PUBLIC_KEY,
+  DEFAULT_SEED_SECRET_KEY,
+} from "./defaults";
+import {
   EVAL_TRACE_COUNT,
   FAILED_EVAL_TRACE_INTERVAL,
   SEED_CHAT_ML_PROMPTS,
@@ -70,7 +75,7 @@ async function main() {
   }).values.environment;
 
   const seedOrgId = "seed-org-id";
-  const seedProjectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
+  const seedProjectId = DEFAULT_SEED_PROJECT_ID;
   const seedUserId1 = "user-1"; // Owner of org
   const seedUserId2 = "user-2"; // Member of org, admin of project
 
@@ -216,8 +221,8 @@ async function main() {
 
   const seedApiKey = {
     id: "seed-api-key",
-    secret: process.env.SEED_SECRET_KEY ?? "sk-lf-1234567890", // eslint-disable-line turbo/no-undeclared-env-vars
-    public: "pk-lf-1234567890",
+    secret: process.env.SEED_SECRET_KEY ?? DEFAULT_SEED_SECRET_KEY, // eslint-disable-line turbo/no-undeclared-env-vars
+    public: DEFAULT_SEED_PUBLIC_KEY,
     note: "seeded key",
   };
 

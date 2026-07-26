@@ -1,28 +1,34 @@
 /**
  * Langfuse seed CLI — one-shot local test data for humans and coding agents.
  *
- * Usage:
- *   pnpm run seed -- doctor [--json]
- *   pnpm run seed -- list [--json]
- *   pnpm run seed -- <scenario> [flags]
- *
- * Scenario names, flag names, and JSON output keys are a stable, additive-only
- * contract. See ./README.md and ./AGENTS.md.
+ * Scenario names, flag names, and JSON output keys are a stable,
+ * additive-only contract. See ./README.md and ./AGENTS.md.
  */
 import { parseArgs } from "node:util";
-import { prisma } from "../../src/db";
-import { logger, redis } from "../../src/server";
-import { preflight, runDoctor } from "./doctor";
-import { scenarios } from "./scenarios";
-import { ScenarioContext, ScenarioFlag, SeedError } from "./scenarios/types";
 
-const DEFAULT_PROJECT_ID = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
+import { resolveSeederAnalyticsBackend } from "./backend";
+import { DEFAULT_SEED_PROJECT_ID } from "./defaults";
+import { preflight, runDoctor } from "./doctor";
+import {
+  listScenarioRegistrations,
+  loadScenarioDefinition,
+  resolveScenarioRegistration,
+  scenarioRegistry,
+} from "./scenarios";
+import type {
+  AnalyticsBackend,
+  ScenarioContext,
+  ScenarioFlag,
+} from "./scenarios/types";
+import { SeedError } from "./scenarios/types";
+
+const cliEnv = process.env as Record<string, string | undefined>;
 
 const COMMON_FLAGS: ScenarioFlag[] = [
   {
     flag: "project",
     type: "string",
-    default: DEFAULT_PROJECT_ID,
+    default: DEFAULT_SEED_PROJECT_ID,
     description: "target project id (default: seed project)",
   },
   {
@@ -57,27 +63,24 @@ const COMMON_FLAGS: ScenarioFlag[] = [
   },
 ];
 
-// CLI script, not a turbo task — reads the dev env directly.
-// eslint-disable-next-line turbo/no-undeclared-env-vars
-const baseUrl = (process.env.NEXTAUTH_URL ?? "http://localhost:3000").replace(
-  /\/$/,
-  "",
-);
+const getBaseUrl = (): string =>
+  (cliEnv["NEXTAUTH_URL"] ?? "http://localhost:3000").replace(/\/$/, "");
 
-const usage = (): string => {
+const usage = (backend: AnalyticsBackend): string => {
   const lines = [
     "Langfuse seed CLI — one-shot local test data.",
+    `Selected analytics backend: ${backend}`,
     "",
     "Usage:",
     "  pnpm run seed -- doctor [--json] [--project <id>]   check the local stack, print fixes",
-    "  pnpm run seed -- list [--json]          list scenarios and flags",
+    "  pnpm run seed -- list [--json]          list scenarios and backend availability",
     "  pnpm run seed -- <scenario> [flags]     seed one scenario",
     "",
     "Scenarios:",
   ];
-  for (const scenario of Object.values(scenarios)) {
+  for (const scenario of listScenarioRegistrations(backend)) {
     lines.push(
-      `  ${scenario.name.padEnd(14)} ${scenario.description.split(":")[0]}`,
+      `  ${scenario.name.padEnd(18)} ${scenario.availability.padEnd(11)} ${scenario.description.split(":")[0]}`,
     );
   }
   lines.push("");
@@ -87,13 +90,13 @@ const usage = (): string => {
   }
   lines.push("");
   lines.push("Examples:");
+  lines.push("  pnpm run seed -- analytics-smoke");
   lines.push(
     "  pnpm run seed -- trace-tree --observations 5000 --breadth 500 --v4",
   );
   lines.push(
     "  pnpm run seed -- long-session --traces 300 --observations-per-trace 8",
   );
-  lines.push("  pnpm run seed -- many-traces --count 100000 --days 14");
   return lines.join("\n");
 };
 
@@ -161,14 +164,27 @@ const printDoctor = (
   );
 };
 
-const main = async (): Promise<number> => {
-  // winston's console transport writes to stdout; --json promises a pure
-  // stdout (only the final summary line), so silence it in machine mode.
-  if (process.argv.includes("--json")) {
-    logger.transports.forEach((transport) => {
-      transport.silent = true;
-    });
+let closeSharedClientsAfterRun = false;
+
+const closeLoadedSharedClients = async (): Promise<void> => {
+  if (!closeSharedClientsAfterRun) return;
+  try {
+    const [{ prisma }, { redis }] = await Promise.all([
+      import("../../src/db.js"),
+      import("../../src/server/redis/redis.js"),
+    ]);
+    await prisma.$disconnect().catch(() => undefined);
+    redis?.disconnect();
+  } catch {
+    // The original startup/run failure is more actionable than cleanup noise.
   }
+};
+
+const main = async (): Promise<number> => {
+  const backend = resolveSeederAnalyticsBackend(
+    cliEnv["LANGFUSE_ANALYTICS_BACKEND"],
+  );
+  const baseUrl = getBaseUrl();
 
   // pnpm forwards the "--" separator itself; strip leading occurrences.
   let argv = process.argv.slice(2);
@@ -181,7 +197,7 @@ const main = async (): Promise<number> => {
     command === "--help" ||
     command === "-h"
   ) {
-    console.log(usage());
+    console.log(usage(backend));
     return 0;
   }
 
@@ -200,7 +216,8 @@ const main = async (): Promise<number> => {
     }
     const result = await runDoctor(
       baseUrl,
-      values.project ?? DEFAULT_PROJECT_ID,
+      values.project ?? DEFAULT_SEED_PROJECT_ID,
+      backend,
     );
     printDoctor(result, values.json === true);
     return result.ok ? 0 : 1;
@@ -219,17 +236,18 @@ const main = async (): Promise<number> => {
         "supported usage: list [--json]",
       );
     }
-    const listed = Object.values(scenarios).map((scenario) => ({
-      name: scenario.name,
-      description: scenario.description,
-      supportsV4: scenario.supportsV4,
+    const listed = listScenarioRegistrations(backend).map((scenario) => ({
+      ...scenario,
       flags: [...scenario.flags, ...COMMON_FLAGS],
     }));
     if (values.json) {
-      console.log(JSON.stringify({ scenarios: listed }));
+      console.log(JSON.stringify({ backend, scenarios: listed }));
     } else {
+      console.log(`Selected analytics backend: ${backend}\n`);
       for (const scenario of listed) {
-        console.log(`${scenario.name}\n  ${scenario.description}`);
+        console.log(
+          `${scenario.name} [${scenario.availability}; supported: ${scenario.supportedBackends.join(", ")}]\n  ${scenario.description}`,
+        );
         for (const flag of scenario.flags) {
           console.log(
             `    --${flag.flag.padEnd(24)} default: ${String(flag.default) || '""'}  ${flag.description}`,
@@ -241,17 +259,12 @@ const main = async (): Promise<number> => {
     return 0;
   }
 
-  const scenario = Object.hasOwn(scenarios, command)
-    ? scenarios[command]
-    : undefined;
-  if (!scenario) {
-    throw new SeedError(
-      `unknown scenario "${command}" — available: ${Object.keys(scenarios).join(", ")}, doctor, list`,
-      "run `pnpm run seed -- list` to see scenarios and flags",
-    );
-  }
-
-  const allFlags = [...scenario.flags, ...COMMON_FLAGS];
+  const registration = resolveScenarioRegistration(
+    command,
+    backend,
+    scenarioRegistry,
+  );
+  const allFlags = [...registration.flags, ...COMMON_FLAGS];
   let params: Record<string, string | number | boolean>;
   try {
     const { values } = parseArgs({
@@ -273,22 +286,29 @@ const main = async (): Promise<number> => {
     projectId: params["project"] as string,
     environment: params["environment"] as string,
     seed,
-    idPrefix: (params["id-prefix"] as string) || `${scenario.name}-s${seed}`,
+    idPrefix:
+      (params["id-prefix"] as string) || `${registration.name}-s${seed}`,
     dryRun: params["dry-run"] === true,
     baseUrl,
+    backend,
     log: (message) => {
-      if (!jsonOnly) console.error(`[seed:${scenario.name}] ${message}`);
+      if (!jsonOnly) console.error(`[seed:${registration.name}] ${message}`);
     },
   };
 
   if (!ctx.dryRun) {
     await preflight({
       projectId: ctx.projectId,
-      needV4: scenario.supportsV4 && params["v4"] === true,
+      backend,
+      baseUrl,
+      needV4: registration.supportsV4 && params["v4"] === true,
+      needWeb: registration.needsWeb,
       log: ctx.log,
     });
   }
 
+  closeSharedClientsAfterRun = registration.loadsSharedClients;
+  const scenario = await loadScenarioDefinition(registration);
   const summary = await scenario.run(ctx, params);
   console.log(JSON.stringify(summary));
   if (!jsonOnly) {
@@ -304,18 +324,17 @@ const main = async (): Promise<number> => {
 
 export const run = async (): Promise<void> => {
   try {
-    const code = await main();
-    process.exitCode = code;
+    process.exitCode = await main();
   } catch (error) {
     if (error instanceof SeedError) {
       console.error(`error: ${error.message}`);
       if (error.fix) console.error(`fix:   ${error.fix}`);
     } else {
-      console.error(error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`error: ${message}`);
     }
     process.exitCode = 1;
   } finally {
-    await prisma.$disconnect().catch(() => {});
-    redis?.disconnect();
+    await closeLoadedSharedClients();
   }
 };

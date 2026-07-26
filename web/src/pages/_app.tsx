@@ -99,7 +99,11 @@ function AnalyticsCapabilityPageGate({ children }: { children: ReactNode }) {
   if (
     capability &&
     session?.environment?.analyticsBackend === "doris" &&
-    !isCommunityPageAvailable(router.pathname, "doris")
+    !isCommunityPageAvailable(
+      router.pathname,
+      "doris",
+      session.environment.activeAnalyticsCapabilities,
+    )
   ) {
     return <UnavailableFeaturePage capability={capability} />;
   }

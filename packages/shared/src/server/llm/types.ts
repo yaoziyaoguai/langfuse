@@ -10,6 +10,7 @@ import type {
   InternalTraceEventInput,
   InternalTraceExperimentContext,
 } from "./internalTraceEvents";
+import type { AnalyticsRuntimeAdmissionContext } from "../analytics-persistence/analyticsBackendAdmission";
 
 // disable lint as this is exported and used in web/worker
 
@@ -520,6 +521,7 @@ export type InternalTraceWriter = (
  */
 export type InternalEventsWriter = {
   experimentContext?: InternalTraceExperimentContext;
+  analyticsAdmissionContext?: AnalyticsRuntimeAdmissionContext | null;
   write: InternalTraceWriter;
 };
 

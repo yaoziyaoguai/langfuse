@@ -41,6 +41,8 @@ export class ClickhouseWriter {
 
   isIntervalFlushInProgress: boolean;
   intervalId: NodeJS.Timeout | null = null;
+  private acceptingWrites = true;
+  private readonly activeFlushes = new Set<Promise<unknown>>();
 
   private constructor() {
     this.batchSize = env.LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE;
@@ -91,44 +93,94 @@ export class ClickhouseWriter {
 
       logger.debug("Flush interval elapsed, flushing all queues...");
 
-      this.flushAll().finally(() => {
-        this.isIntervalFlushInProgress = false;
-      });
+      const flush = this.trackFlush(this.flushAll());
+      flush.then(
+        () => {
+          this.isIntervalFlushInProgress = false;
+        },
+        () => {
+          this.isIntervalFlushInProgress = false;
+        },
+      );
     }, this.writeInterval);
   }
 
   public async shutdown(): Promise<void> {
     logger.info("Shutting down ClickhouseWriter...");
+    this.acceptingWrites = false;
 
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
 
-    await this.flushAll(true);
+    await this.drainActiveFlushes();
+    let remainingRecords = this.getQueueSize();
+    let flushed = true;
+    while (remainingRecords > 0) {
+      const previousRemainingRecords = remainingRecords;
+      const passFlushed = await this.flushAll(true);
+      const nextRemainingRecords = this.getQueueSize();
+      flushed = flushed && passFlushed;
+      remainingRecords = nextRemainingRecords;
+      if (!passFlushed || nextRemainingRecords >= previousRemainingRecords) {
+        break;
+      }
+    }
+    if (!flushed || remainingRecords > 0) {
+      throw new Error(
+        `ClickhouseWriter did not drain (${remainingRecords} records remain)`,
+      );
+    }
 
     logger.info("ClickhouseWriter shutdown complete.");
   }
 
-  public async flushAll(fullQueue = false) {
+  private trackFlush<T>(flush: Promise<T>): Promise<T> {
+    this.activeFlushes.add(flush);
+    flush.then(
+      () => this.activeFlushes.delete(flush),
+      () => this.activeFlushes.delete(flush),
+    );
+    return flush;
+  }
+
+  private getQueueSize(): number {
+    return Object.values(this.queue).reduce(
+      (total, records) => total + records.length,
+      0,
+    );
+  }
+
+  private async drainActiveFlushes(): Promise<void> {
+    while (this.activeFlushes.size > 0) {
+      await Promise.allSettled([...this.activeFlushes]);
+    }
+  }
+
+  public async flushAll(fullQueue = false): Promise<boolean> {
     return instrumentAsync(
       {
         name: "write-to-clickhouse",
       },
       async () => {
         recordIncrement("langfuse.queue.clickhouse_writer.request");
-        await Promise.all([
-          this.flush(TableName.Traces, fullQueue),
-          this.flush(TableName.TracesNull, fullQueue),
-          this.flush(TableName.Scores, fullQueue),
-          this.flush(TableName.Observations, fullQueue),
-          this.flush(TableName.ObservationsBatchStaging, fullQueue),
-          this.flush(TableName.BlobStorageFileLog, fullQueue),
-          this.flush(TableName.DatasetRunItems, fullQueue),
-          this.flush(TableName.EventsFull, fullQueue),
-        ]).catch((err) => {
+        try {
+          const results = await Promise.all([
+            this.flush(TableName.Traces, fullQueue),
+            this.flush(TableName.TracesNull, fullQueue),
+            this.flush(TableName.Scores, fullQueue),
+            this.flush(TableName.Observations, fullQueue),
+            this.flush(TableName.ObservationsBatchStaging, fullQueue),
+            this.flush(TableName.BlobStorageFileLog, fullQueue),
+            this.flush(TableName.DatasetRunItems, fullQueue),
+            this.flush(TableName.EventsFull, fullQueue),
+          ]);
+          return results.every(Boolean);
+        } catch (err) {
           logger.error("ClickhouseWriter.flushAll", err);
-        });
+          return false;
+        }
       },
     );
   }
@@ -355,9 +407,12 @@ export class ClickhouseWriter {
     return record;
   }
 
-  private async flush<T extends TableName>(tableName: T, fullQueue = false) {
+  private async flush<T extends TableName>(
+    tableName: T,
+    fullQueue = false,
+  ): Promise<boolean> {
     const entityQueue = this.queue[tableName];
-    if (entityQueue.length === 0) return;
+    if (entityQueue.length === 0) return true;
 
     let queueItems = entityQueue.splice(
       0,
@@ -503,6 +558,7 @@ export class ClickhouseWriter {
           entityType: tableName,
         },
       );
+      return true;
     } catch (err) {
       logger.error(`ClickhouseWriter.flush ${tableName}`, err);
 
@@ -544,6 +600,7 @@ export class ClickhouseWriter {
           { droppedIds },
         );
       }
+      return false;
     }
   }
 
@@ -551,6 +608,9 @@ export class ClickhouseWriter {
     tableName: T,
     data: RecordInsertType<T>,
   ) {
+    if (!this.acceptingWrites) {
+      throw new Error("ClickhouseWriter is shutting down");
+    }
     const entityQueue = this.queue[tableName];
     entityQueue.push({
       createdAt: Date.now(),
@@ -561,7 +621,7 @@ export class ClickhouseWriter {
     if (entityQueue.length >= this.batchSize) {
       logger.debug(`Queue is full. Flushing ${tableName}...`);
 
-      this.flush(tableName).catch((err) => {
+      this.trackFlush(this.flush(tableName)).catch((err) => {
         logger.error("ClickhouseWriter.addToQueue flush", err);
       });
     }

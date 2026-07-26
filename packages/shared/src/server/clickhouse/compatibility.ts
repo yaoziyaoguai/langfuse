@@ -10,6 +10,7 @@ import {
   type ParsedVersion,
 } from "../utils/compareVersions";
 import { ClickHouseLogger, mapLogLevel } from "./clickhouse-logger";
+import { guardClickHouseClient } from "./runtimeIoGuard";
 
 export type ClickHouseVersion = ParsedVersion;
 
@@ -205,7 +206,10 @@ export const initializeClickhouseCompatibility = async (): Promise<void> => {
 };
 
 const fetchClickHouseVersion = async (): Promise<string> => {
-  const client = createClient(getClickHouseVersionClientConfig());
+  const client = guardClickHouseClient(
+    createClient(getClickHouseVersionClientConfig()),
+    10_000,
+  );
 
   try {
     const result = await client.query({

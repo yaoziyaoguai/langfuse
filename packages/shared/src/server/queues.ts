@@ -9,7 +9,11 @@ import { BatchTableNames } from "../interfaces/tableNames";
 import { EventActionSchema } from "../domain";
 import { PromptDomainSchema } from "../domain/prompts";
 import { ObservationAddToDatasetConfigSchema } from "../features/batchAction/addToDatasetTypes";
-import { EvalTargetObjectSchema } from "../features/evals/types";
+import {
+  BatchEvalSourceTable,
+  BatchEvalSourceTableSchema,
+  EvalTargetObjectSchema,
+} from "../features/evals/types";
 import { JobConfigExecutionMode } from "../features/evals/evalConfigBlocking";
 import {
   type MonitorQueueEvent,
@@ -17,6 +21,7 @@ import {
   MonitorWebhookQueueEventSchema,
 } from "../features/monitors/scheduler/types";
 import { ProjectNotificationWebhookQueueEventSchema } from "./notifications/types";
+import { ANALYTICS_CAPABILITY_NAMES } from "./analytics-persistence/analyticsCapabilities";
 
 export type { MonitorQueueEvent, MonitorQueueEventInput };
 
@@ -77,16 +82,120 @@ export const OtelIngestionEvent = z.object({
   isLangfuseInternal: z.boolean().optional(),
 });
 
-export const AnalyticsIngestionQueueEventSchema = z.object({
-  operationId: z.string().min(1),
-  projectId: z.string().min(1),
-  generation: z.number().int().positive(),
-});
+const AnalyticsFoundationProvenanceFields = {
+  analyticsBackend: z.enum(["CLICKHOUSE", "DORIS"]),
+  deploymentGeneration: z.string().regex(/^[1-9][0-9]*$/),
+  workloadEpochFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  runtimeContractVersion: z.number().int().positive(),
+  producerRuntimeLeaseId: z.string().min(1),
+};
 
-export const BatchExportJobSchema = z.object({
-  projectId: z.string(),
-  batchExportId: z.string(),
-});
+export const AnalyticsDurableProvenanceSchema = z.union([
+  z
+    .object({
+      ...AnalyticsFoundationProvenanceFields,
+      capability: z.enum(ANALYTICS_CAPABILITY_NAMES),
+      capabilityActivationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+      capabilityContractVersion: z.number().int().positive(),
+    })
+    .strict(),
+  z.object(AnalyticsFoundationProvenanceFields).strict(),
+]);
+
+export const AnalyticsIngestionQueueEventSchema = z
+  .object({
+    operationId: z.string().min(1),
+    projectId: z.string().min(1),
+    generation: z.number().int().positive(),
+    analyticsProvenance: AnalyticsDurableProvenanceSchema.optional(),
+  })
+  .strict();
+export const AnalyticsEvaluationDispatchEventSchema = z
+  .object({
+    dispatchId: z.string().min(1),
+    dispatchGeneration: z.number().int().positive(),
+    projectId: z.string().min(1),
+    operationId: z.string().min(1),
+    targetType: z.enum([
+      "TRACE_UPSERT",
+      "OBSERVATION_UPSERT",
+      "DATASET_RUN_ITEM_UPSERT",
+      "HISTORICAL",
+    ]),
+    targetId: z.string().min(1),
+    analyticsBackend: z.literal("DORIS"),
+    deploymentGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    workloadEpochFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    runtimeContractVersion: z.number().int().positive(),
+    capabilityActivationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    capabilityContractVersion: z.number().int().positive(),
+  })
+  .strict();
+
+const AnalyticsDeletionOperationReferenceSchema = z
+  .object({
+    operationId: z.string().min(1),
+    traceId: z.string().min(1),
+    generation: z.string().regex(/^[1-9][0-9]*$/),
+    analyticsProvenance: AnalyticsDurableProvenanceSchema.optional(),
+  })
+  .strict();
+
+const ManagedScoreDeletionReferenceFields = {
+  deletionOperationId: z.string().min(1).optional(),
+  deletionGeneration: z
+    .string()
+    .regex(/^[1-9][0-9]*$/)
+    .optional(),
+  analyticsProvenance: AnalyticsDurableProvenanceSchema.optional(),
+};
+
+function requireCompleteManagedScoreDeletionReference(
+  value: {
+    deletionOperationId?: string;
+    deletionGeneration?: string;
+    analyticsProvenance?: z.infer<typeof AnalyticsDurableProvenanceSchema>;
+  },
+  context: z.RefinementCtx,
+): void {
+  const fields = [
+    value.deletionOperationId,
+    value.deletionGeneration,
+    value.analyticsProvenance,
+  ];
+  const present = fields.filter((field) => field !== undefined).length;
+  if (present !== 0 && present !== fields.length) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "Managed score deletion requires operation, generation, and provenance",
+    });
+  }
+}
+
+const LegacyBatchExportJobSchema = z
+  .object({
+    projectId: z.string().min(1),
+    batchExportId: z.string().min(1),
+  })
+  .strict();
+const ManagedBatchExportJobSchema = z
+  .object({
+    projectId: z.string().min(1),
+    batchExportId: z.string().min(1),
+    dispatchGeneration: z.number().int().positive(),
+    analyticsBackend: z.literal("DORIS"),
+    deploymentGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    workloadEpochFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    runtimeContractVersion: z.number().int().positive(),
+    capabilityActivationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    capabilityContractVersion: z.number().int().positive(),
+  })
+  .strict();
+export const BatchExportJobSchema = z.union([
+  ManagedBatchExportJobSchema,
+  LegacyBatchExportJobSchema,
+]);
 export const CloudSpendAlertJobSchema = z.object({
   orgId: z.string(),
 });
@@ -96,38 +205,45 @@ export const TraceQueueEventSchema = z.object({
   exactTimestamp: z.date().optional(),
   traceEnvironment: z.string().optional(), // Optional to maintain backward compatibility with existing jobs in queue during deployment. 'optional()' can be removed after queue was exhausted
   deletionOperations: z
-    .array(
-      z.object({
-        operationId: z.string().min(1),
-        traceId: z.string().min(1),
-        generation: z.string().regex(/^\d+$/),
-      }),
-    )
+    .array(AnalyticsDeletionOperationReferenceSchema)
+    .min(1)
     .optional(),
 });
 export const TracesQueueEventSchema = z.object({
   projectId: z.string(),
   traceIds: z.array(z.string()),
   deletionOperations: z
-    .array(
-      z.object({
-        operationId: z.string().min(1),
-        traceId: z.string().min(1),
-        generation: z.string().regex(/^\d+$/),
-      }),
-    )
+    .array(AnalyticsDeletionOperationReferenceSchema)
+    .min(1)
     .optional(),
 });
-export const ScoresQueueEventSchema = z.object({
-  projectId: z.string(),
-  scoreIds: z.array(z.string()),
-});
+export const ScoresQueueEventSchema = z
+  .object({
+    projectId: z.string().min(1),
+    scoreIds: z.array(z.string().min(1)).min(1),
+    ...ManagedScoreDeletionReferenceFields,
+  })
+  .superRefine(requireCompleteManagedScoreDeletionReference);
+const AnalyticsDatasetDeletionReferenceSchema = z
+  .object({
+    operationId: z.string().min(1),
+    datasetGeneration: z
+      .string()
+      .regex(/^[1-9][0-9]*$/)
+      .nullable(),
+    runGenerations: z.record(
+      z.string().min(1),
+      z.string().regex(/^[1-9][0-9]*$/),
+    ),
+  })
+  .strict();
 export const DatasetQueueEventSchema = z.discriminatedUnion("deletionType", [
   // Delete all run items for a specific dataset
   z.object({
     deletionType: z.literal("dataset"),
     projectId: z.string(),
     datasetId: z.string(),
+    analyticsDeletion: AnalyticsDatasetDeletionReferenceSchema.optional(),
   }),
   // Delete all run items for multiple dataset runs (also used for single run deletion)
   z.object({
@@ -135,13 +251,18 @@ export const DatasetQueueEventSchema = z.discriminatedUnion("deletionType", [
     projectId: z.string(),
     datasetId: z.string(),
     datasetRunIds: z.array(z.string()),
+    analyticsDeletion: AnalyticsDatasetDeletionReferenceSchema.optional(),
   }),
 ]);
 export const ProjectQueueEventSchema = z.object({
   projectId: z.string(),
   orgId: z.string(),
   deletionOperationId: z.string().min(1).optional(),
-  deletionGeneration: z.string().regex(/^\d+$/).optional(),
+  deletionGeneration: z
+    .string()
+    .regex(/^[1-9][0-9]*$/)
+    .optional(),
+  analyticsProvenance: AnalyticsDurableProvenanceSchema.optional(),
 });
 export const DatasetRunItemUpsertEventSchema = z.object({
   projectId: z.string(),
@@ -154,6 +275,8 @@ export const EvalExecutionEvent = z.object({
   projectId: z.string(),
   jobExecutionId: z.string(),
   delay: z.number().nullish(),
+  analyticsEvaluationDispatch:
+    AnalyticsEvaluationDispatchEventSchema.optional(),
 });
 
 // Observation-based eval execution payload shared by LLM-as-judge and code eval queues.
@@ -162,22 +285,70 @@ export const ObservationEvalExecutionEventSchema = z.object({
   jobExecutionId: z.string(),
   observationS3Path: z.string(),
   executionMode: JobConfigExecutionMode.optional(),
+  analyticsEvaluationDispatch:
+    AnalyticsEvaluationDispatchEventSchema.optional(),
 });
-export const PostHogIntegrationProcessingEventSchema = z.object({
-  projectId: z.string(),
-});
-export const MixpanelIntegrationProcessingEventSchema = z.object({
-  projectId: z.string(),
-});
-export const BlobStorageIntegrationProcessingEventSchema = z.object({
-  projectId: z.string(),
-});
-export const ExperimentCreateEventSchema = z.object({
-  projectId: z.string(),
-  datasetId: z.string(),
-  runId: z.string(),
-  description: z.string().optional(),
-});
+const LegacyAnalyticsIntegrationProcessingEventSchema = z
+  .object({
+    projectId: z.string(),
+  })
+  .strict();
+
+const managedAnalyticsIntegrationProcessingEventSchema = <
+  T extends "POSTHOG" | "MIXPANEL" | "BLOB_STORAGE",
+>(
+  integrationType: T,
+) =>
+  z
+    .object({
+      projectId: z.string().min(1),
+      executionId: z.string().min(1),
+      integrationType: z.literal(integrationType),
+      integrationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+      analyticsBackend: z.literal("DORIS"),
+      deploymentGeneration: z.string().regex(/^[1-9][0-9]*$/),
+      workloadEpochFingerprint: z.string().length(64),
+      runtimeContractVersion: z.number().int().positive(),
+      capabilityActivationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+      capabilityContractVersion: z.number().int().positive(),
+      manifestChecksum: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict();
+
+export const PostHogIntegrationProcessingEventSchema = z.union([
+  managedAnalyticsIntegrationProcessingEventSchema("POSTHOG"),
+  LegacyAnalyticsIntegrationProcessingEventSchema,
+]);
+export const MixpanelIntegrationProcessingEventSchema = z.union([
+  managedAnalyticsIntegrationProcessingEventSchema("MIXPANEL"),
+  LegacyAnalyticsIntegrationProcessingEventSchema,
+]);
+export const BlobStorageIntegrationProcessingEventSchema = z.union([
+  managedAnalyticsIntegrationProcessingEventSchema("BLOB_STORAGE"),
+  LegacyAnalyticsIntegrationProcessingEventSchema,
+]);
+const LegacyExperimentCreateEventSchema = z
+  .object({
+    projectId: z.string().min(1),
+    datasetId: z.string().min(1),
+    runId: z.string().min(1),
+    description: z.string().optional(),
+  })
+  .strict();
+const ManagedExperimentCreateEventSchema =
+  LegacyExperimentCreateEventSchema.extend({
+    dispatchGeneration: z.number().int().positive(),
+    analyticsBackend: z.literal("DORIS"),
+    deploymentGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    workloadEpochFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    runtimeContractVersion: z.number().int().positive(),
+    capabilityActivationGeneration: z.string().regex(/^[1-9][0-9]*$/),
+    capabilityContractVersion: z.number().int().positive(),
+  }).strict();
+export const ExperimentCreateEventSchema = z.union([
+  ManagedExperimentCreateEventSchema,
+  LegacyExperimentCreateEventSchema,
+]);
 export const DataRetentionProcessingEventSchema = z.object({
   projectId: z.string(),
   retention: z.number(),
@@ -185,15 +356,18 @@ export const DataRetentionProcessingEventSchema = z.object({
 export const BatchActionProcessingEventSchema = z.discriminatedUnion(
   "actionId",
   [
-    z.object({
-      actionId: z.literal("score-delete"),
-      projectId: z.string(),
-      query: BatchActionQuerySchema,
-      tableName: z.enum(BatchTableNames),
-      cutoffCreatedAt: z.date(),
-      targetId: z.string().optional(),
-      type: z.enum(BatchActionType),
-    }),
+    z
+      .object({
+        actionId: z.literal("score-delete"),
+        projectId: z.string(),
+        query: BatchActionQuerySchema,
+        tableName: z.enum(BatchTableNames),
+        cutoffCreatedAt: z.date(),
+        targetId: z.string().optional(),
+        type: z.enum(BatchActionType),
+        ...ManagedScoreDeletionReferenceFields,
+      })
+      .superRefine(requireCompleteManagedScoreDeletionReference),
     z.object({
       actionId: z.literal("dataset-delete"),
       projectId: z.string(),
@@ -264,6 +438,11 @@ export const BatchActionProcessingEventSchema = z.discriminatedUnion(
       cutoffCreatedAt: z.date(),
       batchActionId: z.string(),
       evaluatorIds: z.array(z.string()),
+      // Default preserves in-flight jobs created before experiment evaluation
+      // source provenance was added to the durable envelope.
+      sourceTable: BatchEvalSourceTableSchema.default(
+        BatchEvalSourceTable.EVENTS,
+      ),
     }),
   ],
 );
@@ -366,6 +545,9 @@ export type OtelIngestionEventQueueType = z.infer<typeof OtelIngestionEvent>;
 export type AnalyticsIngestionQueueEventType = z.infer<
   typeof AnalyticsIngestionQueueEventSchema
 >;
+export type AnalyticsEvaluationDispatchEventType = z.infer<
+  typeof AnalyticsEvaluationDispatchEventSchema
+>;
 export type ExperimentCreateEventType = z.infer<
   typeof ExperimentCreateEventSchema
 >;
@@ -413,6 +595,7 @@ export enum QueueName {
   // V2 is paired with analytics_ingestion_outbox_v2. During rollout, legacy
   // workers drain the old queue while new workers cannot consume its jobs.
   AnalyticsIngestionQueue = "analytics-ingestion-v2-queue",
+  AnalyticsEvaluationDispatch = "analytics-evaluation-dispatch-queue",
   CloudUsageMeteringQueue = "cloud-usage-metering-queue",
   CloudSpendAlertQueue = "cloud-spend-alert-queue",
   CloudFreeTierUsageThresholdQueue = "cloud-free-tier-usage-threshold-queue",
@@ -454,6 +637,7 @@ export enum QueueJobs {
   OtelIngestionJob = "otel-ingestion-job",
   IngestionJob = "ingestion-job",
   AnalyticsIngestionJob = "analytics-ingestion-job",
+  AnalyticsEvaluationDispatch = "analytics-evaluation-dispatch-job",
   ExperimentCreateJob = "experiment-create-job",
   PostHogIntegrationJob = "posthog-integration-job",
   PostHogIntegrationProcessingJob = "posthog-integration-processing-job",
@@ -578,6 +762,12 @@ export type TQueueJobTypes = {
     id: string;
     payload: AnalyticsIngestionQueueEventType;
     name: QueueJobs.AnalyticsIngestionJob;
+  };
+  [QueueName.AnalyticsEvaluationDispatch]: {
+    timestamp: Date;
+    id: string;
+    payload: AnalyticsEvaluationDispatchEventType;
+    name: QueueJobs.AnalyticsEvaluationDispatch;
   };
   [QueueName.ExperimentCreate]: {
     timestamp: Date;

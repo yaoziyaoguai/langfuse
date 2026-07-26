@@ -8,6 +8,7 @@ import {
   queryClickhouse,
   traceException,
 } from "@langfuse/shared/src/server";
+import { isWebAnalyticsRuntimeFenced } from "@/src/server/analyticsRuntime";
 
 type HealthCheckInput = {
   failIfDatabaseUnavailable: boolean;
@@ -25,6 +26,14 @@ export const runHealthCheck = async ({
   failIfNoRecentEvents,
 }: HealthCheckInput): Promise<HealthCheckResult> => {
   const version = VERSION.replace("v", "");
+
+  if (isWebAnalyticsRuntimeFenced()) {
+    return {
+      isHealthy: false,
+      status: "Analytics runtime lease fenced",
+      version,
+    };
+  }
 
   try {
     try {

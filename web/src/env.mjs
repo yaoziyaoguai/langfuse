@@ -323,6 +323,12 @@ export const env = createEnv({
     LANGFUSE_ANALYTICS_BACKEND: z
       .enum(["clickhouse", "doris"])
       .default("clickhouse"),
+    LANGFUSE_ANALYTICS_WORKLOAD_EPOCH: z.string().min(1).optional(),
+    LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_FILE: z.string().min(1).optional(),
+    LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION: z
+      .enum(["true", "false"])
+      .default("false"),
+    LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID: z.string().min(1).optional(),
 
     // Doris query-only identity. Stream Load credentials are worker-only.
     DORIS_LOCAL_DEV_MODE: z.enum(["true", "false"]).default("false"),
@@ -846,6 +852,14 @@ export const env = createEnv({
     CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
     CLICKHOUSE_CLUSTER_ENABLED: process.env.CLICKHOUSE_CLUSTER_ENABLED,
     LANGFUSE_ANALYTICS_BACKEND: process.env.LANGFUSE_ANALYTICS_BACKEND,
+    LANGFUSE_ANALYTICS_WORKLOAD_EPOCH:
+      process.env.LANGFUSE_ANALYTICS_WORKLOAD_EPOCH,
+    LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_FILE:
+      process.env.LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_FILE,
+    LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION:
+      process.env.LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION,
+    LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID:
+      process.env.LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID,
     DORIS_LOCAL_DEV_MODE: process.env.DORIS_LOCAL_DEV_MODE,
     DORIS_QUERY_URL: process.env.DORIS_QUERY_URL,
     DORIS_QUERY_USER: process.env.DORIS_QUERY_USER,

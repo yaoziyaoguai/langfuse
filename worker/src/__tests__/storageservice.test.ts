@@ -135,6 +135,25 @@ describe("StorageService", () => {
     ).resolves.toBeNull();
   });
 
+  test("downloadStreamIfExists streams an object without buffering it", async () => {
+    const fileName = `${s3Prefix}${randomUUID()}.txt`;
+    const data = "streamed manifest body";
+    await storageService.uploadFile({
+      fileName,
+      fileType: "text/plain",
+      data,
+    });
+
+    const stream = await storageService.downloadStreamIfExists(fileName);
+    expect(stream).not.toBeNull();
+    let received = "";
+    for await (const chunk of stream!) received += chunk.toString();
+    expect(received).toBe(data);
+    await expect(
+      storageService.downloadStreamIfExists(`${s3Prefix}missing-stream.txt`),
+    ).resolves.toBeNull();
+  });
+
   test("listFiles should list files in the bucket", async () => {
     // Setup
     const fileName1 = `${s3Prefix}${randomUUID()}.txt`;
