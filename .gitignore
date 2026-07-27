@@ -35,6 +35,8 @@ next-env.d.ts
 # misc
 .DS_Store
 *.pem
+runtime-secrets/
+runtime-data/
 
 # debug
 npm-debug.log*

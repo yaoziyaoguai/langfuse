@@ -1,0 +1,283 @@
+# Doris-only single-host reference deployment for this fork.
+#
+# This file builds the forked Web and Worker images, uses an external Doris
+# cluster, and intentionally defines no ClickHouse service or CLICKHOUSE_*
+# variables. The bundled Postgres, Redis, and MinIO services are convenient
+# single-node dependencies, not a high-availability production topology.
+
+name: ${COMPOSE_PROJECT_NAME:-langfuse-doris}
+
+x-langfuse-web-build: &langfuse-web-build
+  context: .
+  dockerfile: ./web/Dockerfile
+
+x-langfuse-worker-build: &langfuse-worker-build
+  context: .
+  dockerfile: ./worker/Dockerfile
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+x-langfuse-common-environment: &langfuse-common-environment
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in the Doris environment file}
+  NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL in the Doris environment file}
+  SALT: ${SALT:?Set SALT in the Doris environment file}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in the Doris environment file}
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
+
+  # This manifest is Doris-only. Do not make the selector configurable here.
+  LANGFUSE_ANALYTICS_BACKEND: doris
+  LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_FILE: /run/secrets/analytics-workload-epoch
+  LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION: ${LANGFUSE_ANALYTICS_ALLOW_FRESH_INITIALIZATION:-false}
+
+  # Query credentials are overridden per workload below.
+  DORIS_LOCAL_DEV_MODE: "false"
+  DORIS_QUERY_URL: ${DORIS_QUERY_URL:?Set the TLS Doris FE MySQL URL}
+  DORIS_QUERY_TLS_ENABLED: "true"
+  DORIS_QUERY_TLS_CA_PATH: /run/secrets/doris-query-ca.pem
+  DORIS_QUERY_MAX_CONNECTIONS: ${DORIS_QUERY_MAX_CONNECTIONS:-25}
+  DORIS_QUERY_CONNECT_TIMEOUT_MS: ${DORIS_QUERY_CONNECT_TIMEOUT_MS:-10000}
+  DORIS_QUERY_TIMEOUT_MS: ${DORIS_QUERY_TIMEOUT_MS:-30000}
+
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_AUTH:?Set REDIS_AUTH in the Doris environment file}
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: "false"
+
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
+
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
+
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: ${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-true}
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_S3_BATCH_EXPORT_BUCKET:-langfuse}
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: ${LANGFUSE_S3_BATCH_EXPORT_PREFIX:-exports/}
+  LANGFUSE_S3_BATCH_EXPORT_REGION: ${LANGFUSE_S3_BATCH_EXPORT_REGION:-auto}
+  LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT:-http://localhost:9090}
+  LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+  LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+
+services:
+  # One-shot Doris schema migrator. It uses the Web image only because that
+  # image contains the compiled, checksummed migration runner. Its entrypoint
+  # is replaced so Web/Postgres startup logic is not executed.
+  langfuse-doris-migrator:
+    profiles: ["migrate"]
+    image: ${LANGFUSE_WEB_IMAGE:-langfuse-doris-web:local}
+    build: *langfuse-web-build
+    restart: "no"
+    entrypoint: ["dumb-init", "--"]
+    command: ["node", "packages/shared/dist/doris/scripts/migrate.js"]
+    environment:
+      NODE_ENV: production
+      DORIS_MIGRATION_URL: ${DORIS_MIGRATION_URL:?Set the TLS Doris migration URL}
+      DORIS_MIGRATION_USER: ${DORIS_MIGRATION_USER:?Set the Doris migrator user}
+      DORIS_MIGRATION_PASSWORD: ${DORIS_MIGRATION_PASSWORD:?Set the Doris migrator password}
+      DORIS_MIGRATION_TLS_ENABLED: "true"
+      DORIS_MIGRATION_TLS_CA_PATH: /run/secrets/doris-migration-ca.pem
+      DORIS_MIGRATION_CONNECT_TIMEOUT_MS: ${DORIS_MIGRATION_CONNECT_TIMEOUT_MS:-10000}
+      DORIS_MIGRATION_QUERY_TIMEOUT_MS: ${DORIS_MIGRATION_QUERY_TIMEOUT_MS:-120000}
+    secrets:
+      - source: doris_migration_ca
+        target: doris-migration-ca.pem
+
+  langfuse-web:
+    image: ${LANGFUSE_WEB_IMAGE:-langfuse-doris-web:local}
+    build: *langfuse-web-build
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      - "${LANGFUSE_BIND_ADDRESS:-0.0.0.0}:${LANGFUSE_WEB_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-common-environment
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the Doris environment file}
+      LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID: ${LANGFUSE_WEB_RUNTIME_INSTANCE_ID:-web-compose-1}
+      DORIS_QUERY_USER: ${DORIS_WEB_QUERY_USER:?Set the SELECT-only Web Doris user}
+      DORIS_QUERY_PASSWORD: ${DORIS_WEB_QUERY_PASSWORD:?Set the Web Doris password}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    secrets:
+      - source: analytics_workload_epoch
+        target: analytics-workload-epoch
+      - source: doris_query_ca
+        target: doris-query-ca.pem
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3000/api/public/ready",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  langfuse-worker:
+    image: ${LANGFUSE_WORKER_IMAGE:-langfuse-doris-worker:local}
+    build: *langfuse-worker-build
+    restart: always
+    depends_on:
+      <<: *langfuse-depends-on
+      langfuse-web:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${LANGFUSE_WORKER_PORT:-3030}:3030"
+    environment:
+      <<: *langfuse-common-environment
+      LANGFUSE_ANALYTICS_RUNTIME_INSTANCE_ID: ${LANGFUSE_WORKER_RUNTIME_INSTANCE_ID:-worker-compose-1}
+      DORIS_QUERY_USER: ${DORIS_WORKER_QUERY_USER:?Set the SELECT-only Worker Doris user}
+      DORIS_QUERY_PASSWORD: ${DORIS_WORKER_QUERY_PASSWORD:?Set the Worker query password}
+      DORIS_STREAM_LOAD_FE_URL: ${DORIS_STREAM_LOAD_FE_URL:?Set the HTTPS Doris FE Stream Load origin}
+      DORIS_STREAM_LOAD_DATABASE: ${DORIS_STREAM_LOAD_DATABASE:-langfuse}
+      DORIS_STREAM_LOAD_USER: ${DORIS_STREAM_LOAD_USER:?Set the table-scoped Doris load user}
+      DORIS_STREAM_LOAD_PASSWORD: ${DORIS_STREAM_LOAD_PASSWORD:?Set the Doris load password}
+      DORIS_STREAM_LOAD_FE_IP_ALLOWLIST: ${DORIS_STREAM_LOAD_FE_IP_ALLOWLIST:?Set the resolved FE IP allowlist}
+      DORIS_STREAM_LOAD_BE_ALLOWLIST: ${DORIS_STREAM_LOAD_BE_ALLOWLIST:?Set the HTTPS BE redirect origin allowlist}
+      DORIS_STREAM_LOAD_BE_IP_ALLOWLIST: ${DORIS_STREAM_LOAD_BE_IP_ALLOWLIST:?Set the resolved BE IP allowlist}
+      DORIS_STREAM_LOAD_TLS_CA_PATH: /run/secrets/doris-stream-load-ca.pem
+      DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS: ${DORIS_STREAM_LOAD_REQUEST_TIMEOUT_MS:-30000}
+      DORIS_STREAM_LOAD_MAX_BODY_BYTES: ${DORIS_STREAM_LOAD_MAX_BODY_BYTES:-104857600}
+      LANGFUSE_DORIS_PARQUET_SCRATCH_ROOT: /var/lib/langfuse/doris-parquet-scratch
+      LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES: ${LANGFUSE_DORIS_PARQUET_SCRATCH_MAX_BYTES:-2147483648}
+      LANGFUSE_DORIS_PARQUET_SCRATCH_CLEANUP_INTERVAL_MS: ${LANGFUSE_DORIS_PARQUET_SCRATCH_CLEANUP_INTERVAL_MS:-60000}
+      LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS: ${LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS:-}
+      LANGFUSE_DORIS_GLOBAL_RETENTION_INTERVAL_MS: ${LANGFUSE_DORIS_GLOBAL_RETENTION_INTERVAL_MS:-60000}
+      LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS: ${LANGFUSE_DORIS_GLOBAL_RETENTION_DRAIN_MS:-120000}
+      LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE: ${LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE:-1000}
+    secrets:
+      - source: analytics_workload_epoch
+        target: analytics-workload-epoch
+      - source: doris_query_ca
+        target: doris-query-ca.pem
+      - source: doris_stream_load_ca
+        target: doris-stream-load-ca.pem
+    volumes:
+      - type: bind
+        source: ${LANGFUSE_DORIS_PARQUET_SCRATCH_HOST_PATH:?Set the Worker scratch host path}
+        target: /var/lib/langfuse/doris-parquet-scratch
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3030/api/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    command:
+      - -c
+      - 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_BIND_ADDRESS:-0.0.0.0}:${MINIO_API_PORT:-9090}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9091}:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+
+  redis:
+    image: docker.io/redis:7
+    restart: always
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_AUTH:?Set REDIS_AUTH}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      REDIS_AUTH: ${REDIS_AUTH:?Set REDIS_AUTH}
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'REDISCLI_AUTH="$${REDIS_AUTH}" redis-cli ping | grep -q PONG',
+        ]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: docker.io/postgres:${POSTGRES_VERSION:-17}
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+secrets:
+  analytics_workload_epoch:
+    file: ${LANGFUSE_ANALYTICS_WORKLOAD_EPOCH_HOST_PATH:?Set the workload epoch file path}
+  doris_query_ca:
+    file: ${DORIS_QUERY_TLS_CA_HOST_PATH:?Set the Doris query CA file path}
+  doris_stream_load_ca:
+    file: ${DORIS_STREAM_LOAD_TLS_CA_HOST_PATH:?Set the Doris Stream Load CA file path}
+  doris_migration_ca:
+    file: ${DORIS_MIGRATION_TLS_CA_HOST_PATH:?Set the Doris migration CA file path}
+
+volumes:
+  langfuse_postgres_data:
+  langfuse_redis_data:
+  langfuse_minio_data:
