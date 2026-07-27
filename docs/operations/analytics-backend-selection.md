@@ -148,6 +148,12 @@ builder and never add `FINAL` to the events table.
 Doris uses the canonical ingestion pipeline, Doris query adapters, fenced
 deletion lifecycle, and schema readiness checks. Configure:
 
+For a fresh deployment that intentionally runs only Doris and an external Doris
+cluster, follow the end-to-end
+[Doris-only deployment guide](./doris-only-deployment.md). It includes the
+dedicated Compose manifest, environment template, migration order, first-boot
+marker, readiness checks, smoke test, and capability activation order.
+
 - web: `DORIS_QUERY_*` with a SELECT-only identity (the root Compose maps
   `DORIS_WEB_QUERY_USER/PASSWORD` into these runtime names);
 - worker: its own `DORIS_QUERY_*` plus `DORIS_STREAM_LOAD_*` (the root Compose

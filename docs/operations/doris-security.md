@@ -24,6 +24,13 @@ must never be present in either runtime image. The application rejects root,
 empty passwords, cleartext production endpoints, query/load identity reuse,
 and unpinned Stream Load FE/BE addresses.
 
+For a company-managed Doris cluster, the platform team may create and inject
+these identities or run the one-shot migrator on the application's behalf.
+Providing one shared username and password does not replace the workload
+identity contract. See
+[`doris-managed-cluster-onboarding.md`](./doris-managed-cluster-onboarding.md)
+for the handoff checklist and DBA-run migration flow.
+
 ### Application grant contract
 
 The tested application grant contract is owned by

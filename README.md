@@ -122,6 +122,11 @@ Run Langfuse on your own infrastructure:
 
 See [self-hosting documentation](https://langfuse.com/self-hosting) to learn more about architecture and configuration options.
 
+This fork also includes a
+[Doris-only deployment guide](docs/operations/doris-only-deployment.md) and a
+Compose manifest that builds the forked Web/Worker images without starting a
+ClickHouse service.
+
 ## 🔌 Integrations
 
 <img width="2400" alt="integrations" src="https://github.com/user-attachments/assets/b85c9a45-68f0-4f76-b545-0e8632abef9f" />
