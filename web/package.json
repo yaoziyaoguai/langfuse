@@ -23,6 +23,7 @@
     "test:watch": "vitest --project client --project server --project server-isolated --project server-unit --project in-source",
     "test-storybook": "vitest run --project storybook",
     "test:e2e": "dotenv -e ../.env.test -e ../.env -- playwright test --reporter=line",
+    "test:e2e:doris": "DORIS_E2E_ENABLED=1 DORIS_E2E_EXTERNAL_SERVER=1 playwright test src/__e2e__/doris-smoke.spec.ts --reporter=line",
     "test:e2e:server": "vitest run --project e2e-server",
     "build-trace": "dotenv -e ../.env -- next internal trace .next/trace-turbopack",
     "storybook": "dotenv -e ../.env -- storybook dev -p 6006",
