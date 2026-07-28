@@ -279,88 +279,105 @@ export async function createDorisBatchExportIntent(input: {
   readonly format: string;
   readonly query: Prisma.InputJsonValue;
 }): Promise<BatchExport & { dispatchOutbox: BatchExportDispatchOutbox }> {
+  return input.client.$transaction(
+    (transaction) =>
+      createDorisBatchExportIntentInTransaction({
+        transaction,
+        admissionContext: input.admissionContext,
+        projectId: input.projectId,
+        userId: input.userId,
+        name: input.name,
+        format: input.format,
+        query: input.query,
+      }),
+    { isolationLevel: "Serializable" },
+  );
+}
+
+export async function createDorisBatchExportIntentInTransaction(input: {
+  readonly transaction: Prisma.TransactionClient;
+  readonly admissionContext: AnalyticsRuntimeAdmissionContext;
+  readonly projectId: string;
+  readonly userId: string;
+  readonly name: string;
+  readonly format: string;
+  readonly query: Prisma.InputJsonValue;
+}): Promise<BatchExport & { dispatchOutbox: BatchExportDispatchOutbox }> {
   if (!input.projectId || !input.userId || !input.name || !input.format) {
     throw new TypeError("Invalid Doris batch export intent");
   }
-  return input.client.$transaction(
-    async (transaction) => {
-      const now = await databaseClock(transaction);
-      const admission = await lockAnalyticsAdmission({
-        transaction,
-        runtimeLeaseId: input.admissionContext.runtimeLeaseId,
-        expectedBackend: input.admissionContext.backend,
-        expectedDeploymentGeneration:
-          input.admissionContext.deploymentGeneration,
-        capability: "coreBatchExports",
+  const now = await databaseClock(input.transaction);
+  const admission = await lockAnalyticsAdmission({
+    transaction: input.transaction,
+    runtimeLeaseId: input.admissionContext.runtimeLeaseId,
+    expectedBackend: input.admissionContext.backend,
+    expectedDeploymentGeneration: input.admissionContext.deploymentGeneration,
+    capability: "coreBatchExports",
+    action: "externalProducer",
+    now,
+  });
+  if (
+    admission.analyticsBackend !== "DORIS" ||
+    admission.capabilityActivationGeneration === undefined ||
+    admission.capabilityContractVersion === undefined
+  ) {
+    throw new BatchExportProvenanceError(
+      "Doris batch export admission did not include capability provenance",
+    );
+  }
+  const datasetRunAdmission = isDatasetRunItemsExport(input.query)
+    ? await lockDatasetRunExportAdmission({
+        transaction: input.transaction,
+        admissionContext: input.admissionContext,
         action: "externalProducer",
         now,
-      });
-      if (
-        admission.analyticsBackend !== "DORIS" ||
-        admission.capabilityActivationGeneration === undefined ||
-        admission.capabilityContractVersion === undefined
-      ) {
-        throw new BatchExportProvenanceError(
-          "Doris batch export admission did not include capability provenance",
-        );
-      }
-      const datasetRunAdmission = isDatasetRunItemsExport(input.query)
-        ? await lockDatasetRunExportAdmission({
-            transaction,
-            admissionContext: input.admissionContext,
-            action: "externalProducer",
-            now,
-          })
-        : null;
-      if (
-        datasetRunAdmission &&
-        (datasetRunAdmission.capabilityActivationGeneration === undefined ||
-          datasetRunAdmission.capabilityContractVersion === undefined)
-      ) {
-        throw new BatchExportProvenanceError(
-          "Dataset-run export admission did not include capability provenance",
-        );
-      }
-      const filterHash = batchExportFilterHash({
-        projectId: input.projectId,
-        query: input.query,
-        cutoffCreatedAt: now,
-      });
-      const created = await transaction.batchExport.create({
-        data: {
-          projectId: input.projectId,
-          userId: input.userId,
-          createdAt: now,
-          status: "QUEUED",
-          name: input.name,
-          format: input.format,
-          query: input.query,
-          analyticsBackend: "DORIS",
-          deploymentGeneration: admission.deploymentGeneration,
-          workloadEpochFingerprint: admission.workloadEpochFingerprint,
-          runtimeContractVersion: admission.runtimeContractVersion,
-          producerRuntimeLeaseId: admission.admittingRuntimeLeaseId,
-          capabilityActivationGeneration:
-            admission.capabilityActivationGeneration,
-          capabilityContractVersion: admission.capabilityContractVersion,
-          datasetRunExportActivationGeneration:
-            datasetRunAdmission?.capabilityActivationGeneration,
-          datasetRunExportContractVersion:
-            datasetRunAdmission?.capabilityContractVersion,
-          manifestState: "PREPARING",
-          manifestFilterHash: filterHash,
-          executionState: "PENDING",
-          dispatchOutbox: { create: {} },
-        },
-        include: { dispatchOutbox: true },
-      });
-      if (!created.dispatchOutbox) {
-        throw new Error("Batch export dispatch outbox was not created");
-      }
-      return { ...created, dispatchOutbox: created.dispatchOutbox };
+      })
+    : null;
+  if (
+    datasetRunAdmission &&
+    (datasetRunAdmission.capabilityActivationGeneration === undefined ||
+      datasetRunAdmission.capabilityContractVersion === undefined)
+  ) {
+    throw new BatchExportProvenanceError(
+      "Dataset-run export admission did not include capability provenance",
+    );
+  }
+  const filterHash = batchExportFilterHash({
+    projectId: input.projectId,
+    query: input.query,
+    cutoffCreatedAt: now,
+  });
+  const created = await input.transaction.batchExport.create({
+    data: {
+      projectId: input.projectId,
+      userId: input.userId,
+      createdAt: now,
+      status: "QUEUED",
+      name: input.name,
+      format: input.format,
+      query: input.query,
+      analyticsBackend: "DORIS",
+      deploymentGeneration: admission.deploymentGeneration,
+      workloadEpochFingerprint: admission.workloadEpochFingerprint,
+      runtimeContractVersion: admission.runtimeContractVersion,
+      producerRuntimeLeaseId: admission.admittingRuntimeLeaseId,
+      capabilityActivationGeneration: admission.capabilityActivationGeneration,
+      capabilityContractVersion: admission.capabilityContractVersion,
+      datasetRunExportActivationGeneration:
+        datasetRunAdmission?.capabilityActivationGeneration,
+      datasetRunExportContractVersion:
+        datasetRunAdmission?.capabilityContractVersion,
+      manifestState: "PREPARING",
+      manifestFilterHash: filterHash,
+      executionState: "PENDING",
+      dispatchOutbox: { create: {} },
     },
-    { isolationLevel: "Serializable" },
-  );
+    include: { dispatchOutbox: true },
+  });
+  if (!created.dispatchOutbox) {
+    throw new Error("Batch export dispatch outbox was not created");
+  }
+  return { ...created, dispatchOutbox: created.dispatchOutbox };
 }
 
 export async function findPendingBatchExportDispatchIds(input: {

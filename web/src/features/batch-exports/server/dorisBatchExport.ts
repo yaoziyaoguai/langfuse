@@ -6,7 +6,7 @@ import type {
 } from "@langfuse/shared/src/db";
 import {
   BatchExportQueue,
-  createDorisBatchExportIntent,
+  createDorisBatchExportIntentInTransaction,
   logger,
   publishBatchExportDispatch,
   QueueJobs,
@@ -27,31 +27,42 @@ export async function createAdmittedDorisBatchExport(input: {
   readonly name: string;
   readonly format: string;
   readonly query: Prisma.InputJsonValue;
+  readonly audit: (
+    transaction: Prisma.TransactionClient,
+    batchExport: ManagedBatchExport,
+  ) => Promise<void>;
 }): Promise<ManagedBatchExport> {
-  const activation =
-    await input.client.analyticsCapabilityActivation.findUnique({
-      where: { capability: "CORE_BATCH_EXPORTS" },
-    });
-  if (
-    !input.admissionContext ||
-    !activation ||
-    activation.status !== "ACTIVE" ||
-    activation.backend !== "DORIS" ||
-    activation.deploymentGeneration !==
-      input.admissionContext.deploymentGeneration
-  ) {
-    throw new CommunityCapabilityUnavailableError("batchExports");
-  }
+  return input.client.$transaction(
+    async (transaction) => {
+      const activation =
+        await transaction.analyticsCapabilityActivation.findUnique({
+          where: { capability: "CORE_BATCH_EXPORTS" },
+        });
+      if (
+        !input.admissionContext ||
+        !activation ||
+        activation.status !== "ACTIVE" ||
+        activation.backend !== "DORIS" ||
+        activation.deploymentGeneration !==
+          input.admissionContext.deploymentGeneration
+      ) {
+        throw new CommunityCapabilityUnavailableError("batchExports");
+      }
 
-  return createDorisBatchExportIntent({
-    client: input.client,
-    admissionContext: input.admissionContext,
-    projectId: input.projectId,
-    userId: input.userId,
-    name: input.name,
-    format: input.format,
-    query: input.query,
-  });
+      const batchExport = await createDorisBatchExportIntentInTransaction({
+        transaction,
+        admissionContext: input.admissionContext,
+        projectId: input.projectId,
+        userId: input.userId,
+        name: input.name,
+        format: input.format,
+        query: input.query,
+      });
+      await input.audit(transaction, batchExport);
+      return batchExport;
+    },
+    { isolationLevel: "Serializable" },
+  );
 }
 
 export async function dispatchDorisBatchExport(input: {

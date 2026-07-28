@@ -144,13 +144,19 @@ describe("Doris batch export router", () => {
       status: "QUEUED",
       dispatchOutbox: { generation: 1 },
     };
-    mocks.createManaged.mockResolvedValue(managed);
+    mocks.createManaged.mockImplementation(async (args) => {
+      await args.audit({} as never, managed);
+      return managed;
+    });
 
     await expect(
       createCaller().batchExport.create(input),
     ).resolves.toBeUndefined();
 
     expect(mocks.createManaged).toHaveBeenCalledOnce();
+    expect(mocks.createManaged).toHaveBeenCalledWith(
+      expect.objectContaining({ audit: expect.any(Function) }),
+    );
     expect(mocks.legacyCreate).not.toHaveBeenCalled();
     expect(mocks.auditLog).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -158,6 +164,7 @@ describe("Doris batch export router", () => {
         action: "create",
         after: managed,
       }),
+      expect.anything(),
     );
     expect(mocks.auditLog.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.dispatchManaged.mock.invocationCallOrder[0]!,
@@ -201,7 +208,10 @@ describe("Doris batch export router", () => {
       status: "QUEUED",
       dispatchOutbox: { generation: 1 },
     };
-    mocks.createManaged.mockResolvedValue(managed);
+    mocks.createManaged.mockImplementation(async (args) => {
+      await args.audit({} as never, managed);
+      return managed;
+    });
 
     await expect(
       createCaller().batchExport.create({

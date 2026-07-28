@@ -1,13 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createIntent, publishDispatch, getQueue, loggerWarn } = vi.hoisted(
-  () => ({
-    createIntent: vi.fn(),
-    publishDispatch: vi.fn(),
-    getQueue: vi.fn(),
-    loggerWarn: vi.fn(),
-  }),
-);
+const {
+  createIntent,
+  createIntentInTransaction,
+  publishDispatch,
+  getQueue,
+  loggerWarn,
+} = vi.hoisted(() => ({
+  createIntent: vi.fn(),
+  createIntentInTransaction: vi.fn(),
+  publishDispatch: vi.fn(),
+  getQueue: vi.fn(),
+  loggerWarn: vi.fn(),
+}));
 
 vi.mock("@langfuse/shared/src/server", () => ({
   BatchExportQueue: { getInstance: getQueue },
@@ -15,6 +20,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
     getInstance: () => ({ closeAllConnections: vi.fn() }),
   },
   createDorisBatchExportIntent: createIntent,
+  createDorisBatchExportIntentInTransaction: createIntentInTransaction,
   logger: { warn: loggerWarn, debug: vi.fn() },
   publishBatchExportDispatch: publishDispatch,
   QueueJobs: { BatchExportJob: "batch-export-job" },
@@ -38,10 +44,18 @@ const managedExport = {
 };
 
 function clientWithActivation(activation: unknown) {
-  return {
+  const transaction = {
     analyticsCapabilityActivation: {
       findUnique: vi.fn().mockResolvedValue(activation),
     },
+  };
+  return {
+    ...transaction,
+    $transaction: vi.fn(
+      async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    ),
+    transaction,
   };
 }
 
@@ -49,6 +63,7 @@ describe("Doris batch export admission", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     createIntent.mockResolvedValue(managedExport);
+    createIntentInTransaction.mockResolvedValue(managedExport);
   });
 
   it.each([
@@ -75,6 +90,7 @@ describe("Doris batch export admission", () => {
           name: "export",
           format: "JSONL",
           query: { tableName: "traces" },
+          audit: vi.fn(),
         }),
       ).rejects.toMatchObject({
         body: { code: "R2_BATCH_EXPORTS_UNAVAILABLE" },
@@ -99,15 +115,66 @@ describe("Doris batch export admission", () => {
         name: "export",
         format: "JSONL",
         query: { tableName: "traces" },
-      }),
+        audit: vi.fn(),
+      } as never),
     ).resolves.toBe(managedExport);
-    expect(createIntent).toHaveBeenCalledWith(
+    expect(client.$transaction).toHaveBeenCalledOnce();
+    expect(createIntentInTransaction).toHaveBeenCalledWith(
       expect.objectContaining({
-        client,
+        transaction: client.transaction,
         admissionContext,
         projectId: "project-1",
       }),
     );
+    expect(createIntent).not.toHaveBeenCalled();
+  });
+
+  it("creates the intent and audit row in the same transaction", async () => {
+    const client = clientWithActivation({
+      status: "ACTIVE",
+      backend: "DORIS",
+      deploymentGeneration: 7n,
+    });
+    const audit = vi.fn().mockResolvedValue(undefined);
+
+    await createAdmittedDorisBatchExport({
+      client: client as never,
+      admissionContext,
+      projectId: "project-1",
+      userId: "user-1",
+      name: "export",
+      format: "JSONL",
+      query: { tableName: "traces" },
+      audit,
+    } as never);
+
+    expect(audit).toHaveBeenCalledWith(client.transaction, managedExport);
+    expect(createIntentInTransaction.mock.invocationCallOrder[0]).toBeLessThan(
+      audit.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("rejects the transaction when audit creation fails", async () => {
+    const client = clientWithActivation({
+      status: "ACTIVE",
+      backend: "DORIS",
+      deploymentGeneration: 7n,
+    });
+    const failure = new Error("audit unavailable");
+
+    await expect(
+      createAdmittedDorisBatchExport({
+        client: client as never,
+        admissionContext,
+        projectId: "project-1",
+        userId: "user-1",
+        name: "export",
+        format: "JSONL",
+        query: { tableName: "traces" },
+        audit: vi.fn().mockRejectedValue(failure),
+      } as never),
+    ).rejects.toBe(failure);
+    expect(client.$transaction).toHaveBeenCalledOnce();
   });
 
   it("uses a stable queue identity and leaves transient publication to recovery", async () => {

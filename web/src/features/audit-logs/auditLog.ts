@@ -98,6 +98,12 @@ function isPrismaClient(
   );
 }
 
+function serializeAuditValue(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === "bigint" ? item.toString() : item,
+  );
+}
+
 export async function auditLog(
   log: AuditLog,
   prisma?: typeof _prisma | Prisma.TransactionClient,
@@ -107,8 +113,8 @@ export async function auditLog(
     resourceType: log.resourceType,
     resourceId: log.resourceId,
     action: log.action,
-    before: log.before ? JSON.stringify(log.before) : undefined,
-    after: log.after ? JSON.stringify(log.after) : undefined,
+    before: log.before ? serializeAuditValue(log.before) : undefined,
+    after: log.after ? serializeAuditValue(log.after) : undefined,
   };
 
   if ("apiKeyId" in log) {

@@ -114,6 +114,18 @@ export const batchExportRouter = createTRPCRouter({
             name,
             format,
             query,
+            audit: (transaction, batchExport) =>
+              auditLog(
+                {
+                  session: ctx.session,
+                  resourceType: "batchExport",
+                  resourceId: batchExport.id,
+                  projectId,
+                  action: "create",
+                  after: batchExport,
+                },
+                transaction,
+              ),
           });
         }
         const exportJob =
@@ -129,15 +141,16 @@ export const batchExportRouter = createTRPCRouter({
             },
           }));
 
-        // Create audit log
-        await auditLog({
-          session: ctx.session,
-          resourceType: "batchExport",
-          resourceId: exportJob.id,
-          projectId,
-          action: "create",
-          after: exportJob,
-        });
+        if (!managedExportJob) {
+          await auditLog({
+            session: ctx.session,
+            resourceType: "batchExport",
+            resourceId: exportJob.id,
+            projectId,
+            action: "create",
+            after: exportJob,
+          });
+        }
 
         if (managedExportJob) {
           await dispatchDorisBatchExport({
