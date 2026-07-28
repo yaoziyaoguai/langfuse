@@ -903,7 +903,7 @@ if (
 }
 
 if (
-  clickhouseAnalyticsEnabled &&
+  analyticsBackendEnabled &&
   env.QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED === "true"
 ) {
   // Instantiate the queue to trigger scheduled jobs
@@ -918,12 +918,16 @@ if (
     dataRetentionProcessingProcessor,
     {
       concurrency: 1,
-      limiter: {
-        // Process at most `max` delete jobs per LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS (default 10 min)
-        max: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
-        duration:
-          env.LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS,
-      },
+      ...(clickhouseAnalyticsEnabled
+        ? {
+            limiter: {
+              // Process at most `max` delete jobs per LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS (default 10 min)
+              max: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
+              duration:
+                env.LANGFUSE_CLICKHOUSE_PROJECT_DELETION_CONCURRENCY_DURATION_MS,
+            },
+          }
+        : {}),
     },
   );
 }

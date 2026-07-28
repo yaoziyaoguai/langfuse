@@ -66,6 +66,42 @@ describe("processDorisGlobalRetentionStep", () => {
     );
   });
 
+  it("scopes project retention state, drains, and head selection to one project", async () => {
+    const startOrResume = vi.fn(async () => run("EVENTS"));
+    const findHeads = vi.fn(async () => []);
+    const advance = vi.fn(async () => true);
+
+    await expect(
+      processDorisGlobalRetentionStep({
+        retentionDays: 30,
+        drainMs: 120_000,
+        batchSize: 1_000,
+        scope: {
+          stateId: "project:project-1",
+          projectId: "project-1",
+        },
+        dependencies: {
+          getDatabaseNow: databaseClock("2026-07-20T00:03:00.000Z"),
+          withWorkFence,
+          client: {} as PrismaClient,
+          startOrResume: startOrResume as never,
+          findHeads: findHeads as never,
+          advance: advance as never,
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "advanced", phase: "EVENTS" });
+    expect(startOrResume).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stateId: "project:project-1",
+      }),
+    );
+    expect(findHeads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+      }),
+    );
+  });
+
   it("publishes the cutoff and waits for the drain window before deleting", async () => {
     const deleteDorisHeads = vi.fn();
     const advance = vi.fn();
@@ -112,7 +148,9 @@ describe("processDorisGlobalRetentionStep", () => {
         },
       }),
     ).resolves.toMatchObject({ outcome: "processed", phase: "EVENTS" });
-    expect(deleteDorisHeads).toHaveBeenCalledWith("run-1-EVENTS", heads);
+    expect(deleteDorisHeads).toHaveBeenCalledWith("run-1-EVENTS", heads, {
+      cutoffDate: cutoff,
+    });
     expect(deleteHeads).toHaveBeenCalledWith(
       expect.objectContaining({
         cutoffDate: cutoff,

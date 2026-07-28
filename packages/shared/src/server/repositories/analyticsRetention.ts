@@ -22,6 +22,26 @@ import {
 import { acquireAnalyticsRetentionMutationPermit } from "./analyticsCheckpoints";
 
 export const ANALYTICS_RETENTION_STATE_ID = "global";
+const ANALYTICS_PROJECT_RETENTION_STATE_PREFIX = "project:";
+
+export function analyticsProjectRetentionStateId(projectId: string): string {
+  if (!projectId) {
+    throw new TypeError("Invalid analytics retention project");
+  }
+  return `${ANALYTICS_PROJECT_RETENTION_STATE_PREFIX}${projectId}`;
+}
+
+export function analyticsProjectIdFromRetentionStateId(
+  stateId: string,
+): string | null {
+  if (!stateId.startsWith(ANALYTICS_PROJECT_RETENTION_STATE_PREFIX)) {
+    return null;
+  }
+  const projectId = stateId.slice(
+    ANALYTICS_PROJECT_RETENTION_STATE_PREFIX.length,
+  );
+  return projectId || null;
+}
 
 export const ANALYTICS_RETENTION_PHASES = [
   "DRAIN",
@@ -154,6 +174,7 @@ export async function startOrResumeAnalyticsRetention(input: {
   readonly client?: PrismaClient;
   readonly retentionDays: number;
   readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
+  readonly stateId?: string;
 }): Promise<ActiveAnalyticsRetentionRun | null> {
   const client = input.client ?? prisma;
   if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 3) {
@@ -161,6 +182,10 @@ export async function startOrResumeAnalyticsRetention(input: {
   }
 
   return client.$transaction(async (transaction) => {
+    const stateId = input.stateId ?? ANALYTICS_RETENTION_STATE_ID;
+    if (!stateId) {
+      throw new TypeError("Invalid analytics retention state");
+    }
     const producerProvenance = await lockRetentionAdmission(
       transaction,
       input.admissionContext ?? null,
@@ -169,8 +194,8 @@ export async function startOrResumeAnalyticsRetention(input: {
     const now = await databaseClock(transaction);
     const cutoffDate = retentionCutoff(now, input.retentionDays);
     const state = await transaction.analyticsRetentionState.upsert({
-      where: { id: ANALYTICS_RETENTION_STATE_ID },
-      create: { id: ANALYTICS_RETENTION_STATE_ID },
+      where: { id: stateId },
+      create: { id: stateId },
       update: {},
     });
     if (state.activeRunId) {
@@ -201,7 +226,7 @@ export async function startOrResumeAnalyticsRetention(input: {
     });
     const claimed = await transaction.analyticsRetentionState.updateMany({
       where: {
-        id: ANALYTICS_RETENTION_STATE_ID,
+        id: stateId,
         activeRunId: null,
         OR: [{ purgedBefore: null }, { purgedBefore: { lt: cutoffDate } }],
       },
@@ -214,7 +239,7 @@ export async function startOrResumeAnalyticsRetention(input: {
 
     await transaction.analyticsRetentionRun.delete({ where: { id: run.id } });
     const winner = await transaction.analyticsRetentionState.findUniqueOrThrow({
-      where: { id: ANALYTICS_RETENTION_STATE_ID },
+      where: { id: stateId },
     });
     if (!winner.activeRunId) return null;
     const winningRun =
@@ -277,9 +302,9 @@ export async function completeAnalyticsRetentionRun(input: {
     await assertRetentionMutationAllowed(transaction);
     const now = await databaseClock(transaction);
     const state = await transaction.analyticsRetentionState.findUnique({
-      where: { id: ANALYTICS_RETENTION_STATE_ID },
+      where: { activeRunId: input.runId },
     });
-    if (state?.activeRunId !== input.runId) return false;
+    if (!state || state.activeRunId !== input.runId) return false;
     const run = await transaction.analyticsRetentionRun.findUniqueOrThrow({
       where: { id: input.runId },
     });
@@ -292,7 +317,7 @@ export async function completeAnalyticsRetentionRun(input: {
       data: { status: "COMPLETED", completedAt: now, lastErrorCode: null },
     });
     await transaction.analyticsRetentionState.update({
-      where: { id: ANALYTICS_RETENTION_STATE_ID },
+      where: { id: state.id },
       data: {
         purgedBefore: run.cutoffDate,
         activeRunId: null,
@@ -318,28 +343,43 @@ export async function getAnalyticsRetentionDatabaseClock(input: {
 export async function getAnalyticsRetentionBarrier(
   input: {
     readonly client?: AnalyticsRetentionClient;
+    readonly projectId?: string;
   } = {},
 ): Promise<Date | null> {
   const client = input.client ?? prisma;
-  const state = await client.analyticsRetentionState.findUnique({
-    where: { id: ANALYTICS_RETENTION_STATE_ID },
-    select: { purgedBefore: true, activeCutoff: true },
-  });
-  if (!state) return null;
-  if (!state.purgedBefore) return state.activeCutoff;
-  if (!state.activeCutoff) return state.purgedBefore;
-  return state.activeCutoff > state.purgedBefore
-    ? state.activeCutoff
-    : state.purgedBefore;
+  const stateIds = [
+    ANALYTICS_RETENTION_STATE_ID,
+    ...(input.projectId
+      ? [analyticsProjectRetentionStateId(input.projectId)]
+      : []),
+  ];
+  let barrier: Date | null = null;
+  for (const id of stateIds) {
+    const state = await client.analyticsRetentionState.findUnique({
+      where: { id },
+      select: { purgedBefore: true, activeCutoff: true },
+    });
+    for (const candidate of [
+      state?.purgedBefore ?? null,
+      state?.activeCutoff ?? null,
+    ]) {
+      if (candidate && (!barrier || candidate > barrier)) {
+        barrier = candidate;
+      }
+    }
+  }
+  return barrier;
 }
 
 export async function countUnresolvedAnalyticsLoadsBefore(input: {
   readonly client?: AnalyticsRetentionClient;
   readonly cutoffDate: Date;
+  readonly projectId?: string;
 }): Promise<number> {
   const client = input.client ?? prisma;
   return client.analyticsLoadBatch.count({
     where: {
+      ...(input.projectId ? { projectId: input.projectId } : {}),
       status: { in: ["LOADING", "UNKNOWN"] },
       partitionDate: { lt: utcDate(input.cutoffDate) },
     },
@@ -351,6 +391,7 @@ export async function findAnalyticsEntityHeadsForRetention(input: {
   readonly cutoffDate: Date;
   readonly entityType: AnalyticsEntityType;
   readonly limit: number;
+  readonly projectId?: string;
 }): Promise<AnalyticsEntityHead[]> {
   if (
     !Number.isSafeInteger(input.limit) ||
@@ -369,6 +410,7 @@ export async function findAnalyticsEntityHeadsForRetention(input: {
   await assertRetentionMutationAllowed(client);
   return client.analyticsEntityHead.findMany({
     where: {
+      ...(input.projectId ? { projectId: input.projectId } : {}),
       entityType: input.entityType,
       partitionDate: { lt: utcDate(input.cutoffDate) },
     },
@@ -382,12 +424,14 @@ export async function deleteAnalyticsEntityHeadsForRetention(input: {
   readonly cutoffDate: Date;
   readonly entityType: AnalyticsEntityType;
   readonly headIds: readonly string[];
+  readonly projectId?: string;
 }): Promise<number> {
   if (input.headIds.length === 0) return 0;
   const client = input.client ?? prisma;
   const deleted = await client.analyticsEntityHead.deleteMany({
     where: {
       id: { in: input.headIds.concat() },
+      ...(input.projectId ? { projectId: input.projectId } : {}),
       entityType: input.entityType,
       partitionDate: { lt: utcDate(input.cutoffDate) },
     },

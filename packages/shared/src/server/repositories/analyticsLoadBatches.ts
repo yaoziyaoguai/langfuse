@@ -18,6 +18,7 @@ import {
   type AnalyticsIntegrationDeliveryTargetInput,
 } from "./analyticsIntegrationDeliveries";
 import { lockAnalyticsIngestionOperation } from "./analyticsIngestionLock";
+import { getAnalyticsRetentionBarrier } from "./analyticsRetention";
 
 export function analyticsLoadBatchIdentity(input: {
   readonly projectId: string;
@@ -304,15 +305,10 @@ export async function cancelAnalyticsLoadBatchIfRetained(input: {
     }
     if (!loadBatch.partitionDate) return { outcome: "current" as const };
 
-    const state = await transaction.analyticsRetentionState.findUnique({
-      where: { id: "global" },
-      select: { purgedBefore: true, activeCutoff: true },
+    const cutoff = await getAnalyticsRetentionBarrier({
+      client: transaction,
+      projectId: input.projectId,
     });
-    const cutoff =
-      state?.activeCutoff &&
-      (!state.purgedBefore || state.activeCutoff > state.purgedBefore)
-        ? state.activeCutoff
-        : state?.purgedBefore;
     if (!cutoff || loadBatch.partitionDate >= cutoff) {
       return { outcome: "current" as const };
     }

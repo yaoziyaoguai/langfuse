@@ -701,6 +701,7 @@ export class AnalyticsWriter implements AnalyticsBatchSink {
     const requiredKeys = new Set<string>();
     const retentionBarrier = await getAnalyticsRetentionBarrier({
       client: this.dependencies.client,
+      projectId: operation.projectId,
     });
 
     for (const descriptor of descriptors) {

@@ -4,15 +4,22 @@ import {
   deleteObservationsOlderThanDays,
   deleteScoresOlderThanDays,
   deleteTracesOlderThanDays,
+  DataRetentionProcessingQueue,
   findExpiredMediaByProjectId,
   getS3MediaStorageClient,
+  isDorisAnalyticsBackend,
   logger,
+  QueueJobs,
   removeIngestionEventsFromS3AndDeleteClickhouseRefsForProject,
   getCurrentSpan,
 } from "@langfuse/shared/src/server";
 import { Job } from "bullmq";
 import { prisma } from "@langfuse/shared/src/db";
+import { randomUUID } from "node:crypto";
 import { env, v4WritesToEventsTable } from "../../env";
+import { getWorkerAnalyticsAdmissionContext } from "../../analyticsRuntime";
+import { deleteDorisProjectRetentionHeads } from "./deleteDorisProjectRetentionHeads";
+import { processDorisProjectRetention } from "./processDorisProjectRetention";
 
 export const handleDataRetentionProcessingJob = async (job: Job) => {
   const { projectId, retention } = job.data.payload;
@@ -29,6 +36,62 @@ export const handleDataRetentionProcessingJob = async (job: Job) => {
     where: { id: projectId },
     select: { retentionDays: true },
   });
+
+  if (isDorisAnalyticsBackend()) {
+    return processDorisProjectRetention(
+      {
+        projectId,
+        queuedRetentionDays: retention,
+        admissionContext: getWorkerAnalyticsAdmissionContext(),
+      },
+      {
+        client: prisma,
+        deleteDorisHeads: deleteDorisProjectRetentionHeads,
+        onCutoffPublished: async ({
+          projectId: retainedProjectId,
+          cutoffDate,
+        }) => {
+          if (!env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET) return;
+          const mediaFilesToDelete = await findExpiredMediaByProjectId({
+            projectId: retainedProjectId,
+            cutoffDate,
+          });
+          await deleteMediaFiles({
+            projectId: retainedProjectId,
+            mediaFiles: mediaFilesToDelete,
+            storageClient: getS3MediaStorageClient(
+              env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET,
+            ),
+          });
+        },
+        scheduleContinuation: async ({
+          projectId: retainedProjectId,
+          retentionDays,
+          delayMs,
+        }) => {
+          const queue = DataRetentionProcessingQueue.getInstance();
+          if (!queue) {
+            throw new Error(
+              "DataRetentionProcessingQueue not initialized for Doris continuation",
+            );
+          }
+          await queue.add(
+            QueueJobs.DataRetentionProcessingJob,
+            {
+              id: randomUUID(),
+              name: QueueJobs.DataRetentionProcessingJob,
+              timestamp: new Date(),
+              payload: {
+                projectId: retainedProjectId,
+                retention: retentionDays,
+              },
+            },
+            { delay: delayMs },
+          );
+        },
+      },
+    );
+  }
 
   // Skip if project no longer exists, has no retention, or retention is set to 0 (indefinite)
   if (!project || !project.retentionDays || project.retentionDays === 0) {

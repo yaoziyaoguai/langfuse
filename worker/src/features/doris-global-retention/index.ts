@@ -67,6 +67,10 @@ type RetentionDependencies = {
   readonly deleteDorisHeads?: (
     operationId: string,
     heads: readonly AnalyticsEntityHead[],
+    context: {
+      readonly cutoffDate: Date;
+      readonly projectId?: string;
+    },
   ) => Promise<void>;
   readonly withWorkFence?: RetentionWorkFence;
   readonly getDatabaseNow?: typeof getAnalyticsRetentionDatabaseClock;
@@ -121,7 +125,10 @@ const withAnalyticsRetentionWorkFence: RetentionWorkFence = async (input) => {
     client: input.client,
     ...fence,
     claimKind: "analytics-retention",
-    resourceIdentity: input.run.id,
+    // Global and per-project runs can overlap the same entity heads. One
+    // deployment-wide mutation claim keeps their Doris delete/head CAS phases
+    // mutually exclusive while each run retains its own durable cutoff.
+    resourceIdentity: "analytics-retention-mutation",
     leaseMs: RETENTION_CLAIM_MS,
   });
   if (!claim) throw new Error("Analytics retention work is already claimed");
@@ -151,6 +158,10 @@ export async function processDorisGlobalRetentionStep(input: {
   readonly retentionDays: number;
   readonly drainMs: number;
   readonly batchSize: number;
+  readonly scope?: {
+    readonly stateId: string;
+    readonly projectId?: string;
+  };
   readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly dependencies?: RetentionDependencies;
 }): Promise<DorisGlobalRetentionStepResult> {
@@ -167,6 +178,9 @@ export async function processDorisGlobalRetentionStep(input: {
   ) {
     throw new TypeError("Invalid Doris retention batch size");
   }
+  if (input.scope && !input.scope.stateId) {
+    throw new TypeError("Invalid Doris retention scope");
+  }
   const dependencies = input.dependencies ?? {};
   const client = dependencies.client ?? prisma;
   const startOrResume =
@@ -175,6 +189,7 @@ export async function processDorisGlobalRetentionStep(input: {
     client,
     retentionDays: input.retentionDays,
     admissionContext: input.admissionContext ?? null,
+    ...(input.scope ? { stateId: input.scope.stateId } : {}),
   });
   if (!run) return { outcome: "idle" };
 
@@ -196,7 +211,13 @@ export async function processDorisGlobalRetentionStep(input: {
           const unresolvedLoads = await (
             dependencies.countUnresolvedLoads ??
             countUnresolvedAnalyticsLoadsBefore
-          )({ client: fencedClient, cutoffDate: run.cutoffDate });
+          )({
+            client: fencedClient,
+            cutoffDate: run.cutoffDate,
+            ...(input.scope?.projectId
+              ? { projectId: input.scope.projectId }
+              : {}),
+          });
           if (unresolvedLoads > 0) return result("waiting", run);
         }
         if (run.phase === "COMPLETE") {
@@ -223,6 +244,9 @@ export async function processDorisGlobalRetentionStep(input: {
             cutoffDate: run.cutoffDate,
             entityType,
             limit: input.batchSize,
+            ...(input.scope?.projectId
+              ? { projectId: input.scope.projectId }
+              : {}),
           });
           if (heads.length > 0) {
             await (
@@ -232,7 +256,12 @@ export async function processDorisGlobalRetentionStep(input: {
                   operationId,
                   selected,
                 ))
-            )(`${run.id}-${run.phase}`, heads);
+            )(`${run.id}-${run.phase}`, heads, {
+              cutoffDate: run.cutoffDate,
+              ...(input.scope?.projectId
+                ? { projectId: input.scope.projectId }
+                : {}),
+            });
             const deleted = await (
               dependencies.deleteHeads ?? deleteAnalyticsEntityHeadsForRetention
             )({
@@ -240,6 +269,9 @@ export async function processDorisGlobalRetentionStep(input: {
               cutoffDate: run.cutoffDate,
               entityType,
               headIds: heads.map(({ id }) => id),
+              ...(input.scope?.projectId
+                ? { projectId: input.scope.projectId }
+                : {}),
             });
             if (deleted !== heads.length) {
               throw new Error("Analytics retention entity-head fence was lost");
