@@ -7,13 +7,20 @@ import {
   type CommunityCapability,
 } from "@/src/features/capabilities/communityAvailability";
 
-export type ActiveDorisCommunityCapability = "evaluations" | "experiments";
+export type ActiveDorisCommunityCapability =
+  | "evaluations"
+  | "experiments"
+  | "analyticsIntegrations";
 
 const DURABLE_DORIS_CAPABILITIES = {
   evaluations: "EVALUATIONS",
   experiments: "EXPERIMENTS",
+  analyticsIntegrations: "ANALYTICS_INTEGRATIONS",
 } as const satisfies Partial<
-  Record<CommunityCapability, "EVALUATIONS" | "EXPERIMENTS">
+  Record<
+    CommunityCapability,
+    "EVALUATIONS" | "EXPERIMENTS" | "ANALYTICS_INTEGRATIONS"
+  >
 >;
 
 const INTERNAL_DORIS_CAPABILITIES = {
@@ -48,7 +55,7 @@ export async function getActiveDorisCommunityCapabilities(
   return (
     Object.entries(DURABLE_DORIS_CAPABILITIES) as readonly [
       ActiveDorisCommunityCapability,
-      "EVALUATIONS" | "EXPERIMENTS",
+      "EVALUATIONS" | "EXPERIMENTS" | "ANALYTICS_INTEGRATIONS",
     ][]
   )
     .filter(([, capability]) => activeRows.has(capability))

@@ -9,7 +9,11 @@ import {
 function client(input: {
   backend?: "DORIS" | "CLICKHOUSE" | null;
   deploymentGeneration?: bigint;
-  activeCapabilities?: readonly ("EVALUATIONS" | "EXPERIMENTS")[];
+  activeCapabilities?: readonly (
+    | "EVALUATIONS"
+    | "EXPERIMENTS"
+    | "ANALYTICS_INTEGRATIONS"
+  )[];
   internalActivation?: {
     backend: "DORIS" | "CLICKHOUSE";
     deploymentGeneration: bigint;
@@ -42,16 +46,22 @@ describe("community capability runtime availability", () => {
   it("requires the current Doris deployment activation row", async () => {
     const activeClient = client({
       backend: "DORIS",
-      activeCapabilities: ["EVALUATIONS", "EXPERIMENTS"],
+      activeCapabilities: [
+        "EVALUATIONS",
+        "EXPERIMENTS",
+        "ANALYTICS_INTEGRATIONS",
+      ],
     });
     await expect(
       getActiveDorisCommunityCapabilities(activeClient as never),
-    ).resolves.toEqual(["evaluations", "experiments"]);
+    ).resolves.toEqual(["evaluations", "experiments", "analyticsIntegrations"]);
     expect(
       activeClient.analyticsCapabilityActivation.findMany,
     ).toHaveBeenCalledWith({
       where: {
-        capability: { in: ["EVALUATIONS", "EXPERIMENTS"] },
+        capability: {
+          in: ["EVALUATIONS", "EXPERIMENTS", "ANALYTICS_INTEGRATIONS"],
+        },
         backend: "DORIS",
         deploymentGeneration: 1n,
         status: "ACTIVE",
@@ -97,6 +107,16 @@ describe("community capability runtime availability", () => {
         "monitors",
         "doris",
         client({ backend: "DORIS" }) as never,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      isCommunityCapabilityRuntimeAvailable(
+        "analyticsIntegrations",
+        "doris",
+        client({
+          backend: "DORIS",
+          activeCapabilities: ["ANALYTICS_INTEGRATIONS"],
+        }) as never,
       ),
     ).resolves.toBe(true);
   });

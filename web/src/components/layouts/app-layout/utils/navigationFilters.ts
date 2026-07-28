@@ -187,6 +187,7 @@ export const filters = {
       projectId: ctx.routerProjectId,
       isLangfuseCloud: ctx.isLangfuseCloud,
       v4WriteMode: ctx.session?.environment?.v4WriteMode,
+      analyticsBackend: ctx.session?.environment?.analyticsBackend,
     })
       ? route
       : null;

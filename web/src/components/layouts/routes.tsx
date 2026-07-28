@@ -35,6 +35,7 @@ import { useCommandMenu } from "@/src/features/command-k-menu/CommandMenuProvide
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { CloudStatusMenu } from "@/src/features/cloud-status-notification/components/CloudStatusMenu";
 import { type ProductModule } from "@/src/ee/features/ui-customization/productModuleSchema";
+import { isMonitorRuntimeAvailable } from "@/src/features/monitors/monitorRuntime";
 
 export enum RouteSection {
   Main = "main",
@@ -68,6 +69,7 @@ export type Route = {
     projectId: string | undefined;
     isLangfuseCloud: boolean;
     v4WriteMode: undefined | "legacy" | "dual" | "events_only"; // undefined until the session has loaded
+    analyticsBackend: undefined | "clickhouse" | "doris";
   }) => boolean;
   group?: RouteGroup; // group this route belongs to (within a section)
 };
@@ -135,7 +137,8 @@ export const ROUTES: Route[] = [
     pathname: "/project/[projectId]/monitors",
     icon: BellRing,
     projectRbacScopes: ["monitors:read"],
-    show: ({ v4WriteMode }) => Boolean(v4WriteMode) && v4WriteMode !== "legacy",
+    show: ({ analyticsBackend, v4WriteMode }) =>
+      isMonitorRuntimeAvailable({ analyticsBackend, v4WriteMode }),
     group: RouteGroup.Observability,
     section: RouteSection.Main,
   },

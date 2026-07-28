@@ -66,7 +66,11 @@ declare module "next-auth" {
       // callback always populates it.
       v4WriteMode?: "legacy" | "dual" | "events_only";
       analyticsBackend?: "clickhouse" | "doris";
-      activeAnalyticsCapabilities?: readonly ("evaluations" | "experiments")[];
+      activeAnalyticsCapabilities?: readonly (
+        | "evaluations"
+        | "experiments"
+        | "analyticsIntegrations"
+      )[];
     };
   }
 

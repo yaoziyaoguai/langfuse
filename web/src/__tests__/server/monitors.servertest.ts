@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-// requireV4Writes 404s the monitors routes under the default legacy write mode;
+// ClickHouse requires v4 event writes for monitors;
 // env is parsed at module load, so force a passing mode before any import.
 vi.hoisted(() => {
   process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE = "dual";

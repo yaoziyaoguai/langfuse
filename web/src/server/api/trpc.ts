@@ -103,6 +103,7 @@ import {
   CommunityCapabilityUnavailableError,
 } from "@/src/features/capabilities/communityAvailability";
 import { isCommunityCapabilityRuntimeAvailable } from "@/src/server/communityCapabilityRuntime";
+import { isMonitorRuntimeAvailable } from "@/src/features/monitors/monitorRuntime";
 
 setUpSuperjson();
 
@@ -465,9 +466,14 @@ export const requireLangfuseCloud = t.middleware(({ next }) => {
   return next();
 });
 
-/** requireV4Writes rejects calls from deployments without v4 event tables */
-export const requireV4Writes = t.middleware(({ next }) => {
-  if (env.LANGFUSE_MIGRATION_V4_WRITE_MODE === "legacy") {
+/** requireMonitorRuntime rejects calls when the selected backend has no monitor query path. */
+export const requireMonitorRuntime = t.middleware(({ next }) => {
+  if (
+    !isMonitorRuntimeAvailable({
+      analyticsBackend: env.LANGFUSE_ANALYTICS_BACKEND,
+      v4WriteMode: env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+    })
+  ) {
     throw new TRPCError({ code: "NOT_FOUND", message: "Not found" });
   }
   return next();
