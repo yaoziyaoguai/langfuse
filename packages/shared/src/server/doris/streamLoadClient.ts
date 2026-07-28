@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import type { LookupFunction } from "node:net";
 
 import {
   assertAnalyticsRuntimeIoAllowed,
@@ -78,6 +79,17 @@ const RECONCILIATION_STATES = new Set([
 
 function basicAuth(user: string, password: string): string {
   return `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+}
+
+function pinnedLookup(address: string): LookupFunction {
+  const family = net.isIP(address);
+  return (_hostname, options, callback) => {
+    callback(
+      null,
+      options.all ? [{ address, family }] : address,
+      options.all ? undefined : family,
+    );
+  };
 }
 
 function asNonNegativeInteger(value: unknown): number {
@@ -373,10 +385,7 @@ export class DorisStreamLoadClient {
           rejectUnauthorized: true,
           ca: this.tlsCa,
           servername: url.hostname,
-          lookup: pinnedAddress
-            ? (_hostname, _options, callback) =>
-                callback(null, pinnedAddress, net.isIP(pinnedAddress) as 4 | 6)
-            : undefined,
+          lookup: pinnedAddress ? pinnedLookup(pinnedAddress) : undefined,
         },
         (res) => {
           let responseBody = "";
@@ -432,10 +441,7 @@ export class DorisStreamLoadClient {
           rejectUnauthorized: true,
           ca: this.tlsCa,
           servername: url.hostname,
-          lookup: pinnedAddress
-            ? (_hostname, _options, callback) =>
-                callback(null, pinnedAddress, net.isIP(pinnedAddress) as 4 | 6)
-            : undefined,
+          lookup: pinnedAddress ? pinnedLookup(pinnedAddress) : undefined,
         },
         (res) => {
           let responseBody = "";

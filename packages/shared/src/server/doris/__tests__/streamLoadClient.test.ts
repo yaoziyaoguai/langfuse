@@ -508,13 +508,17 @@ describe("DorisStreamLoadClient", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ code: 0, data: "VISIBLE" }));
     });
+    const pinnedFeUrl = new URL(fe.origin);
+    pinnedFeUrl.hostname = "doris-fe.internal";
     const client = new DorisStreamLoadClient({
-      feOrigin: fe.origin,
+      feOrigin: pinnedFeUrl.origin,
       database: "langfuse",
       user: "load",
       password: "secret",
       requireTls: false,
+      allowedFeAddresses: ["127.0.0.1"],
       allowedRedirectOrigins: [],
+      resolveAddresses: async () => ["127.0.0.1"],
     });
 
     await expect(

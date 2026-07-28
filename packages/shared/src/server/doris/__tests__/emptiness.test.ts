@@ -10,6 +10,16 @@ import { EXPECTED_DORIS_MIGRATIONS } from "../readiness";
 const createTableByName: Readonly<Record<string, string>> = {
   events_current: `
     CREATE TABLE events_current (... status_message TEXT,
+      metadata_json TEXT, usage_details_json TEXT, cost_details_json TEXT,
+      provided_usage_details_json TEXT, provided_cost_details_json TEXT,
+      model_parameters_json TEXT, tool_definitions_json TEXT,
+      experiment_id VARCHAR(64), experiment_name VARCHAR(512),
+      experiment_metadata VARIANT, experiment_metadata_json TEXT,
+      experiment_description TEXT, experiment_dataset_id VARCHAR(64),
+      experiment_item_id VARCHAR(64), experiment_item_version DATETIME(6),
+      experiment_item_expected_output TEXT, experiment_item_metadata VARIANT,
+      experiment_item_metadata_json TEXT,
+      experiment_item_root_span_id VARCHAR(128),
       INDEX idx_inv_input (input),
       INDEX idx_inv_output (output), INDEX idx_inv_name (name),
       INDEX idx_ng_input (input), INDEX idx_ng_output (output))
@@ -18,7 +28,8 @@ const createTableByName: Readonly<Record<string, string>> = {
     PROPERTIES ("enable_unique_key_merge_on_write"="true",
       "function_column.sequence_col"="version_token")`,
   scores_current: `
-    CREATE TABLE scores_current (...)
+    CREATE TABLE scores_current (... metadata_json TEXT,
+      dataset_run_id VARCHAR(64), execution_trace_id VARCHAR(64))
     UNIQUE KEY (project_id, score_date, score_id)
     AUTO PARTITION BY RANGE (date_trunc(score_date, 'day')) ()
     PROPERTIES ("enable_unique_key_merge_on_write"="true",
@@ -37,6 +48,24 @@ const createTableByName: Readonly<Record<string, string>> = {
   project_tombstones: `
     CREATE TABLE project_tombstones (...)
     UNIQUE KEY (project_id)
+    PROPERTIES ("enable_unique_key_merge_on_write"="true",
+      "function_column.sequence_col"="deletion_generation")`,
+  dataset_run_items_current: `
+    CREATE TABLE dataset_run_items_current (... dataset_run_metadata_json TEXT,
+      dataset_item_metadata_json TEXT, dataset_deletion_generation BIGINT,
+      run_deletion_generation BIGINT)
+    UNIQUE KEY (project_id, run_item_date, run_item_id)
+    AUTO PARTITION BY RANGE (date_trunc(run_item_date, 'day')) ()
+    PROPERTIES ("enable_unique_key_merge_on_write"="true",
+      "function_column.sequence_col"="version_token")`,
+  dataset_tombstones: `
+    CREATE TABLE dataset_tombstones (...)
+    UNIQUE KEY (project_id, dataset_id)
+    PROPERTIES ("enable_unique_key_merge_on_write"="true",
+      "function_column.sequence_col"="deletion_generation")`,
+  dataset_run_tombstones: `
+    CREATE TABLE dataset_run_tombstones (...)
+    UNIQUE KEY (project_id, dataset_run_id)
     PROPERTIES ("enable_unique_key_merge_on_write"="true",
       "function_column.sequence_col"="deletion_generation")`,
 };
@@ -108,7 +137,7 @@ function fakeDorisExecutor(options: FakeDorisOptions = {}): {
 }
 
 describe("Doris analytics backend emptiness", () => {
-  it("proves emptiness only after readiness, exact catalog, and all five table probes", async () => {
+  it("proves emptiness only after readiness, exact catalog, and all eight table probes", async () => {
     const { executor, query } = fakeDorisExecutor();
 
     await expect(
@@ -122,7 +151,7 @@ describe("Doris analytics backend emptiness", () => {
       query.mock.calls.filter(([sql]) =>
         String(sql).includes("SELECT 1 AS hasRows"),
       ),
-    ).toHaveLength(5);
+    ).toHaveLength(8);
   });
 
   it("reports non-empty when any frozen physical table has a row", async () => {

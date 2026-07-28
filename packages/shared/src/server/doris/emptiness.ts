@@ -13,6 +13,9 @@ export const DORIS_ANALYTICS_PHYSICAL_TABLES = [
   "blob_storage_file_log",
   "trace_tombstones",
   "project_tombstones",
+  "dataset_run_items_current",
+  "dataset_tombstones",
+  "dataset_run_tombstones",
 ] as const;
 
 const DORIS_SCHEMA_MIGRATIONS_TABLE = "_langfuse_schema_migrations";
