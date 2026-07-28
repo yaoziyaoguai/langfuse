@@ -43,21 +43,26 @@ import {
   type DorisTraceOrderBy,
 } from "../repositories/telemetry/doris/traces";
 
-export type TracesTableReturnType = Pick<
-  TraceRecordReadType,
-  | "project_id"
-  | "id"
-  | "name"
-  | "timestamp"
-  | "bookmarked"
-  | "release"
-  | "version"
-  | "user_id"
-  | "session_id"
-  | "environment"
-  | "tags"
-  | "public"
->;
+export type TracesTableReturnType = Omit<
+  Pick<
+    TraceRecordReadType,
+    | "project_id"
+    | "id"
+    | "name"
+    | "timestamp"
+    | "bookmarked"
+    | "release"
+    | "version"
+    | "user_id"
+    | "session_id"
+    | "environment"
+    | "tags"
+    | "public"
+  >,
+  "timestamp"
+> & {
+  timestamp: string | Date;
+};
 
 export type TracesTableUiReturnType = Pick<
   TraceDomain,
@@ -96,13 +101,19 @@ export type TracesMetricsUiReturnType = {
   debugCount: bigint;
 };
 
+function parseTraceTableTimestamp(timestamp: string | Date): Date {
+  return timestamp instanceof Date
+    ? timestamp
+    : parseClickhouseUTCDateTimeFormat(timestamp);
+}
+
 export const convertToUiTableRows = (
   row: TracesTableReturnType,
 ): TracesTableUiReturnType => {
   return {
     id: row.id,
     projectId: row.project_id,
-    timestamp: parseClickhouseUTCDateTimeFormat(row.timestamp),
+    timestamp: parseTraceTableTimestamp(row.timestamp),
     tags: row.tags,
     bookmarked: row.bookmarked,
     name: row.name ?? null,
@@ -193,7 +204,7 @@ type SelectReturnTypeMap = {
   count: { count: string };
   metrics: TracesTableMetricsClickhouseReturnType;
   rows: TracesTableReturnType;
-  identifiers: { id: string; projectId: string; timestamp: string };
+  identifiers: { id: string; projectId: string; timestamp: string | Date };
 };
 
 export async function buildDorisTraceReadQuery(
@@ -366,7 +377,7 @@ async function getDorisTracesTableGeneric(
     return page.items.map((trace) => ({
       id: trace.id,
       projectId: trace.projectId,
-      timestamp: trace.timestamp.toISOString(),
+      timestamp: trace.timestamp,
     }));
   }
   const controls = await prisma.traceControlState.findMany({
@@ -385,7 +396,7 @@ async function getDorisTracesTableGeneric(
       project_id: trace.projectId,
       id: trace.id,
       name: trace.name,
-      timestamp: trace.timestamp.toISOString(),
+      timestamp: trace.timestamp,
       bookmarked: control?.bookmarked ?? false,
       release: trace.release,
       version: trace.version,
@@ -860,7 +871,7 @@ export const getTraceIdentifiers = async (props: {
   return identifiers.map((row) => ({
     id: row.id,
     projectId: row.projectId,
-    timestamp: parseClickhouseUTCDateTimeFormat(row.timestamp),
+    timestamp: parseTraceTableTimestamp(row.timestamp),
   }));
 };
 
@@ -896,9 +907,6 @@ export const getTraceDeleteCursorPageFromTraces = async (props: {
 
   return identifiers.map((row) => ({
     traceId: row.id,
-    timestamp: (isDorisAnalyticsBackend()
-      ? new Date(row.timestamp)
-      : parseClickhouseUTCDateTimeFormat(row.timestamp)
-    ).toISOString(),
+    timestamp: parseTraceTableTimestamp(row.timestamp).toISOString(),
   }));
 };

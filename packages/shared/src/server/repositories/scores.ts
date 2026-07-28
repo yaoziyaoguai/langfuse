@@ -3029,6 +3029,10 @@ export const getScoresForAnalyticsIntegrations = async function* (
 };
 
 export const hasAnyScore = async (projectId: string) => {
+  if (isDorisAnalyticsBackend()) {
+    return getDorisTelemetryRepositories().scores.hasAny({ projectId });
+  }
+
   const query = `    SELECT 1
     FROM scores
     WHERE project_id = {projectId: String}

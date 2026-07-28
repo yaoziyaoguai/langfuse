@@ -216,6 +216,49 @@ describe("Doris scores repository", () => {
     expect(query.mock.calls[0]?.[0]).toContain("COUNT(*) AS count");
   });
 
+  it("checks project score existence without scanning the full range", async () => {
+    const query = vi.fn().mockResolvedValue([{ has_rows: 1 }]);
+    const repository = new DorisScoresRepository({ query });
+
+    await expect(repository.hasAny({ projectId: "project-1" })).resolves.toBe(
+      true,
+    );
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("SELECT 1 AS has_rows");
+    expect(sql).toContain("s.project_id = ?");
+    expect(sql).toContain("trace_deletion.trace_id IS NULL");
+    expect(sql).toContain("project_deletion.project_id IS NULL");
+    expect(sql).toContain("LIMIT 1");
+    expect(sql).not.toContain("score_date");
+    expect(query.mock.calls[0]?.[1]).toEqual(["project-1"]);
+  });
+
+  it("accepts the legacy Timestamp alias used by score filter options", async () => {
+    const lowerBound = new Date("2026-07-17T08:00:00.000Z");
+    const query = vi.fn().mockResolvedValue([{ count: "1" }]);
+    const repository = new DorisScoresRepository({ query });
+
+    await expect(
+      repository.count({
+        projectId: "project-1",
+        range,
+        filters: [
+          {
+            type: "datetime",
+            column: "Timestamp",
+            operator: ">=",
+            value: lowerBound,
+          },
+        ],
+      }),
+    ).resolves.toBe(1);
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("s.`timestamp` >= ?");
+    expect(query.mock.calls[0]?.[1]).toContain(lowerBound);
+  });
+
   it("allows only catalogued UI ordering expressions", async () => {
     const query = vi.fn().mockResolvedValue([row]);
     const repository = new DorisScoresRepository({ query });

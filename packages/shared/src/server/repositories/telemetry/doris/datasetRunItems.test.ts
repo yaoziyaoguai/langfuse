@@ -172,6 +172,42 @@ describe("Doris dataset run items repository", () => {
     ]);
   });
 
+  it("resolves visible run version timestamps without crossing project scope", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        max_created_at: "2026-07-24 10:00:00.000000",
+        max_dataset_item_version: "2026-07-23 08:00:00.000000",
+      },
+    ]);
+    const repository = new DorisDatasetRunItemsRepository({ query });
+
+    await expect(
+      repository.versionTimestamps({
+        projectId: "project-1",
+        datasetId: "dataset-1",
+        datasetRunId: "run-1",
+      }),
+    ).resolves.toEqual({
+      maxCreatedAt: new Date("2026-07-24T10:00:00.000Z"),
+      maxDatasetItemVersion: new Date("2026-07-23T08:00:00.000Z"),
+    });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("FROM dataset_run_items_current dri");
+    expect(sql).toContain("LEFT JOIN dataset_tombstones");
+    expect(sql).toContain("LEFT JOIN dataset_run_tombstones");
+    expect(sql).toContain("LEFT JOIN project_tombstones");
+    expect(sql).toContain("dri.project_id = ?");
+    expect(sql).toContain("dri.dataset_id = ?");
+    expect(sql).toContain("dri.dataset_run_id = ?");
+    expect(sql).not.toContain("project-1");
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      "project-1",
+      "dataset-1",
+      "run-1",
+    ]);
+  });
+
   it("applies per-run filters before selecting comparison item identities", async () => {
     const query = vi.fn().mockResolvedValue([{ dataset_item_id: "item-1" }]);
     const repository = new DorisDatasetRunItemsRepository({ query });

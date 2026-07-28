@@ -72,6 +72,7 @@ const SCORE_COLUMNS: Readonly<Record<string, string>> = {
   queueId: "s.queue_id",
   environment: "s.environment",
   timestamp: "s.`timestamp`",
+  Timestamp: "s.`timestamp`",
   createdAt: "s.created_at",
   updatedAt: "s.updated_at",
 };
@@ -673,6 +674,27 @@ export class DorisScoresRepository {
           { signal: input.signal },
         );
     for await (const row of rows) yield { id: String(row.score_id) };
+  }
+
+  async hasAny(input: { readonly projectId: string }): Promise<boolean> {
+    if (!input.projectId) {
+      throw new InvalidRequestError("Invalid Doris score query input");
+    }
+    const rows = await this.dependencies.query<{ readonly has_rows: unknown }>(
+      `SELECT 1 AS has_rows
+FROM scores_current s
+LEFT JOIN trace_tombstones trace_deletion
+  ON trace_deletion.project_id = s.project_id
+ AND trace_deletion.trace_id = s.trace_id
+LEFT JOIN project_tombstones project_deletion
+  ON project_deletion.project_id = s.project_id
+WHERE s.project_id = ?
+  AND trace_deletion.trace_id IS NULL
+  AND project_deletion.project_id IS NULL
+LIMIT 1`,
+      [input.projectId],
+    );
+    return rows.length > 0;
   }
 
   async count(input: {

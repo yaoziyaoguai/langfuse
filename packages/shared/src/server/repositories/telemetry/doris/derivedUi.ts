@@ -15,6 +15,7 @@ const SESSION_COLUMNS: Readonly<Record<string, string>> = {
 
 const USER_COLUMNS: Readonly<Record<string, string>> = {
   timestamp: "startTime",
+  Timestamp: "startTime",
   userId: "userId",
   environment: "environment",
 };

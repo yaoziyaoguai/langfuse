@@ -80,6 +80,30 @@ describe("Doris derived UI query adapter", () => {
     expect(result.sessionFilters).toEqual([]);
   });
 
+  it("accepts the legacy Timestamp alias used by the users page", () => {
+    const lowerBound = new Date("2026-07-01T00:00:00.000Z");
+    const result = buildDorisDerivedQuery(
+      [
+        {
+          type: "datetime",
+          column: "Timestamp",
+          operator: ">=",
+          value: lowerBound,
+        },
+      ],
+      "user",
+      now,
+    );
+
+    expect(result.range).toEqual({ from: lowerBound, to: now });
+    expect(result.filters).toEqual([
+      expect.objectContaining({
+        column: "startTime",
+        value: lowerBound,
+      }),
+    ]);
+  });
+
   it("rejects aggregate filters until their Doris aggregate plan is active", () => {
     expect(() =>
       buildDorisDerivedQuery(

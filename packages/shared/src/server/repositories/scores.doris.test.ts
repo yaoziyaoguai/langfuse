@@ -4,16 +4,20 @@ import type { TimeFilter } from "../../types";
 
 const mocks = vi.hoisted(() => ({
   aggregateGroups: vi.fn(),
+  hasAny: vi.fn(),
 }));
 
 vi.mock("./telemetry/doris/runtime", () => ({
   isDorisAnalyticsBackend: () => true,
   getDorisTelemetryRepositories: () => ({
-    scores: { aggregateGroups: mocks.aggregateGroups },
+    scores: {
+      aggregateGroups: mocks.aggregateGroups,
+      hasAny: mocks.hasAny,
+    },
   }),
 }));
 
-import { getDistinctScoreNames } from "./scores";
+import { getDistinctScoreNames, hasAnyScore } from "./scores";
 
 describe("legacy score repository Doris routing", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -65,6 +69,16 @@ describe("legacy score repository Doris routing", () => {
       ],
       columns: ["name"],
       limit: 200,
+    });
+  });
+
+  it("checks score existence through Doris without falling back to ClickHouse", async () => {
+    mocks.hasAny.mockResolvedValue(true);
+
+    await expect(hasAnyScore("project-1")).resolves.toBe(true);
+
+    expect(mocks.hasAny).toHaveBeenCalledWith({
+      projectId: "project-1",
     });
   });
 });

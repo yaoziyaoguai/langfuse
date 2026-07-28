@@ -146,6 +146,10 @@ function dateTime(value: unknown): Date {
   return parsed;
 }
 
+function nullableDateTime(value: unknown): Date | null {
+  return value === null || value === undefined ? null : dateTime(value);
+}
+
 function nullableString(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
@@ -592,6 +596,36 @@ ORDER BY dri.dataset_item_id ASC`,
       scope.params,
     );
     return new Set(rows.map(({ dataset_item_id }) => String(dataset_item_id)));
+  }
+
+  async versionTimestamps(input: {
+    readonly projectId: string;
+    readonly datasetId: string;
+    readonly datasetRunId: string;
+  }): Promise<{
+    readonly maxCreatedAt: Date | null;
+    readonly maxDatasetItemVersion: Date | null;
+  }> {
+    const rows = await this.dependencies.query<{
+      readonly max_created_at: unknown;
+      readonly max_dataset_item_version: unknown;
+    }>(
+      `SELECT
+  MAX(dri.created_at) AS max_created_at,
+  MAX(dri.dataset_item_version) AS max_dataset_item_version
+${visibilityJoins()}
+WHERE dri.project_id = ?
+  AND dri.dataset_id = ?
+  AND dri.dataset_run_id = ?
+  AND ${visibilityPredicates().join("\n  AND ")}`,
+      [input.projectId, input.datasetId, input.datasetRunId],
+    );
+    return {
+      maxCreatedAt: nullableDateTime(rows[0]?.max_created_at),
+      maxDatasetItemVersion: nullableDateTime(
+        rows[0]?.max_dataset_item_version,
+      ),
+    };
   }
 
   async qualifyingDatasetItemIds(

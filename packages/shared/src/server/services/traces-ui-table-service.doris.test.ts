@@ -97,6 +97,7 @@ describe("Doris traces UI service", () => {
     ).resolves.toEqual([
       expect.objectContaining({
         id: "trace-1",
+        timestamp: new Date("2026-07-17T10:00:00.000Z"),
         bookmarked: true,
         public: false,
       }),
