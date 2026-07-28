@@ -99,9 +99,9 @@ vi.mock("@langfuse/shared/src/server", () => ({
   },
   ANALYTICS_CONTRACT_COMPATIBILITY: {
     writerSchemaVersion: 1,
-    writerCanonicalizerVersion: "1",
+    writerCanonicalizerVersion: "2",
     readableSchemaVersions: [1],
-    readableCanonicalizerVersions: ["1"],
+    readableCanonicalizerVersions: ["1", "2"],
   },
   ClickHouseClientManager: {
     getInstance: () => ({
@@ -109,7 +109,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
     }),
   },
   checkAnalyticsReadiness: mocks.checkAnalyticsReadiness,
-  CURRENT_ANALYTICS_CANONICALIZER_VERSION: "1",
+  CURRENT_ANALYTICS_CANONICALIZER_VERSION: "2",
   CURRENT_ANALYTICS_SCHEMA_VERSION: 1,
   DorisClientManager: {
     getInstance: () => ({
@@ -132,7 +132,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
   resolveAnalyticsRuntimeWorkloadEpoch:
     mocks.resolveAnalyticsRuntimeWorkloadEpoch,
   redis: null,
-  SUPPORTED_DORIS_CANONICALIZER_VERSIONS: ["1"],
+  SUPPORTED_DORIS_CANONICALIZER_VERSIONS: ["1", "2"],
   SUPPORTED_DORIS_SCHEMA_VERSIONS: [1],
 }));
 
@@ -190,7 +190,7 @@ describe("web analytics runtime", () => {
       buildId: "v-test-version",
       foundationContractVersion: 1,
       acceptedSchemaVersion: { min: 1, max: 1 },
-      acceptedCanonicalVersion: { min: 1, max: 1 },
+      acceptedCanonicalVersion: { min: 1, max: 2 },
       capabilityContracts: [
         {
           capability: "coreBatchExports",

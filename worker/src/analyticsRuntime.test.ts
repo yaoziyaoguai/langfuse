@@ -98,7 +98,7 @@ vi.mock("./env", () => ({
 
 vi.mock("@langfuse/shared/src/server", () => ({
   ANALYTICS_CONTRACT_COMPATIBILITY: {
-    readableCanonicalizerVersions: ["1"],
+    readableCanonicalizerVersions: ["1", "2"],
     readableSchemaVersions: [1],
   },
   AnalyticsRuntimeController: class {
@@ -120,7 +120,7 @@ vi.mock("@langfuse/shared/src/server", () => ({
   ClickHouseClientManager: {
     getInstance: () => ({ closeAllConnections: mocks.closeClickhouse }),
   },
-  CURRENT_ANALYTICS_CANONICALIZER_VERSION: "1",
+  CURRENT_ANALYTICS_CANONICALIZER_VERSION: "2",
   CURRENT_ANALYTICS_SCHEMA_VERSION: 1,
   DorisClientManager: {
     getInstance: () => ({ closeAllConnections: mocks.closeDoris }),
@@ -193,7 +193,7 @@ describe("worker analytics runtime", () => {
     });
     expect(mocks.controllerConfigs[0]).toMatchObject({
       instanceId: "worker:test-host",
-      buildId: "v3.218.0",
+      buildId: "v3.224.2",
       queueNamespaceFingerprint: "q".repeat(64),
     });
     expect(mocks.controllers[0]?.startHeartbeat).toHaveBeenCalledWith(30_000);
@@ -220,7 +220,7 @@ describe("worker analytics runtime", () => {
       buildId: "build-123",
       foundationContractVersion: 1,
       acceptedSchemaVersion: { min: 1, max: 1 },
-      acceptedCanonicalVersion: { min: 1, max: 1 },
+      acceptedCanonicalVersion: { min: 1, max: 2 },
       capabilityContracts: [
         {
           capability: "coreBatchExports",

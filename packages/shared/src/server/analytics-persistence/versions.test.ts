@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANALYTICS_CONTRACT_COMPATIBILITY,
+  CURRENT_ANALYTICS_CANONICALIZER_VERSION,
   CURRENT_ANALYTICS_SCHEMA_VERSION,
   defineAdjacentAnalyticsContractWindow,
   NEXT_ANALYTICS_SCHEMA_VERSION,
+  PREVIOUS_ANALYTICS_CANONICALIZER_VERSION,
 } from "./versions";
 
 describe("analytics contract compatibility window", () => {
@@ -14,6 +16,16 @@ describe("analytics contract compatibility window", () => {
       readableSchemaVersions: [
         CURRENT_ANALYTICS_SCHEMA_VERSION,
         NEXT_ANALYTICS_SCHEMA_VERSION,
+      ],
+    });
+  });
+
+  it("fences canonicalizer v2 writes from v1-only workers while retaining v1 replay", () => {
+    expect(ANALYTICS_CONTRACT_COMPATIBILITY).toMatchObject({
+      writerCanonicalizerVersion: CURRENT_ANALYTICS_CANONICALIZER_VERSION,
+      readableCanonicalizerVersions: [
+        PREVIOUS_ANALYTICS_CANONICALIZER_VERSION,
+        CURRENT_ANALYTICS_CANONICALIZER_VERSION,
       ],
     });
   });
