@@ -233,6 +233,43 @@ delivery/retry, rollback/replay, outbound security, Parquet scratch, privacy,
 and diagnostics are documented in
 [`doris-analytics-integrations.md`](./doris-analytics-integrations.md).
 
+### Self-hosted Enterprise control plane and ingestion masking
+
+A valid `LANGFUSE_EE_LICENSE_KEY=langfuse_ee_*` enables the same upstream
+self-hosted entitlements with either analytics backend. RBAC, SCIM/Admin API,
+and Audit Log remain PostgreSQL-owned and do not require Doris migration or a
+Doris capability activation.
+
+Ingestion Masking is backend-sensitive. ClickHouse keeps its existing OTLP
+worker path. Doris persists the masking organization/header context in the raw
+OTLP envelope, then applies the same licensed callback in the Doris Worker
+before canonicalization and Stream Load. With fail-closed enabled, callback
+failure is a retryable durable ingestion failure; the Worker does not write the
+unmasked payload.
+
+This release writes analytics canonicalizer contract `2` and reads contracts
+`1` and `2`. Runtime-lease admission therefore prevents a pre-Masking
+canonicalizer-`1` Worker from claiming a new contract-`2` operation during a
+rolling deploy, while upgraded Workers can drain pre-upgrade contract-`1`
+operations. Do not bypass runtime lease/admission checks during rollout.
+
+Configure the license in both Web and Worker. Configure the callback only on
+trusted Worker infrastructure, and allow only request headers that are
+deliberately safe to persist with the raw pre-masking payload and forward to the
+callback:
+
+```text
+LANGFUSE_EE_LICENSE_KEY=langfuse_ee_...
+LANGFUSE_INGESTION_MASKING_CALLBACK_URL=https://masking.internal.example/v1/mask
+LANGFUSE_INGESTION_MASKING_CALLBACK_TIMEOUT_MS=500
+LANGFUSE_INGESTION_MASKING_CALLBACK_FAIL_CLOSED=true
+LANGFUSE_INGESTION_MASKING_MAX_RETRIES=1
+LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS=x-mask-tenant
+```
+
+Cloud billing, Stripe, Cloud usage metering, and Cloud-only operational exports
+are not part of self-hosted Enterprise parity.
+
 ### Enterprise per-project retention
 
 The existing Enterprise `data-retention` entitlement and project

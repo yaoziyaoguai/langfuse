@@ -29,25 +29,59 @@ by the six durable activation rows.
 
 ## Frozen matrix
 
-| Product capability                         | Scope    | Current Doris          | Target          | Activation              | Owner | Reachability evidence                                   |
-| ------------------------------------------ | -------- | ---------------------- | --------------- | ----------------------- | ----- | ------------------------------------------------------- |
-| Backend selection, migrations, readiness   | Included | available              | available       | none                    | U0    | `LANGFUSE_ANALYTICS_BACKEND`, web/worker readiness      |
-| OTLP/v4 canonical ingestion                | Included | available              | available       | static-synchronous      | U0    | public OTLP endpoints, analytics ingestion queue        |
-| Legacy trace/observation/score ingestion   | Included | available              | available       | static-synchronous      | U6    | `/api/public/ingestion`; child-level dataset-run gate   |
-| Trace/observation/score/session/user reads | Included | available              | available       | static-synchronous      | U3    | tRPC, Public API, MCP list/detail/search                |
-| Trace metrics, bulk detail, export source  | Included | available              | available       | static-synchronous      | U1    | trace metrics tRPC, exact-ID reads, gated export source |
-| Core analytics batch exports               | Included | available              | available       | `coreBatchExports`      | U2    | `batchExport.create`, durable dispatch/export workers   |
-| Product monitors                           | Included | available              | available       | static-synchronous      | U3    | monitors page, tRPC, monitor worker                     |
-| Custom dashboards and widgets              | Included | available              | available       | static-synchronous      | U3    | dashboard pages, tRPC, unstable API/MCP                 |
-| Evaluator execution                        | Included | available              | available       | `evaluations`           | U5    | durable dispatch/replay, eval pages, tRPC, API, MCP     |
-| Prompt/remote experiment execution         | Included | available              | available       | `experiments`           | U6    | experiment pages and tRPC                               |
-| Dataset-run ingestion and projection       | Included | available              | available       | `datasetRunIngestion`   | U6    | dataset-run Public API and MCP                          |
-| Dataset-run exports                        | Included | available              | available       | `datasetRunExports`     | U6    | dataset-run-items batch-export table                    |
-| Dataset-run query, metrics, and comparison | Included | available              | available       | `datasetRunIngestion`   | U6    | dataset run pages, tRPC, MCP                            |
-| PostHog, Mixpanel, and Blob integrations   | Included | available              | available       | `analyticsIntegrations` | U7    | integration pages, tRPC, public Blob API                |
-| Projects, datasets, prompts, configs, auth | Included | storage-neutral        | storage-neutral | none                    | U0    | PostgreSQL control-plane models                         |
-| Cloud core-data S3 operational export      | Excluded | cloud-ee-excluded      | excluded        | none                    | U0    | `CoreDataS3ExportQueue`                                 |
-| Enterprise, billing, and Cloud operations  | Excluded | cloud-ee-excluded      | excluded        | none                    | U0    | `ee/`, Cloud usage metering                             |
+| Product capability                         | Scope    | Current Doris     | Target          | Activation              | Owner | Reachability evidence                                   |
+| ------------------------------------------ | -------- | ----------------- | --------------- | ----------------------- | ----- | ------------------------------------------------------- |
+| Backend selection, migrations, readiness   | Included | available         | available       | none                    | U0    | `LANGFUSE_ANALYTICS_BACKEND`, web/worker readiness      |
+| OTLP/v4 canonical ingestion                | Included | available         | available       | static-synchronous      | U0    | public OTLP endpoints, analytics ingestion queue        |
+| Legacy trace/observation/score ingestion   | Included | available         | available       | static-synchronous      | U6    | `/api/public/ingestion`; child-level dataset-run gate   |
+| Trace/observation/score/session/user reads | Included | available         | available       | static-synchronous      | U3    | tRPC, Public API, MCP list/detail/search                |
+| Trace metrics, bulk detail, export source  | Included | available         | available       | static-synchronous      | U1    | trace metrics tRPC, exact-ID reads, gated export source |
+| Core analytics batch exports               | Included | available         | available       | `coreBatchExports`      | U2    | `batchExport.create`, durable dispatch/export workers   |
+| Product monitors                           | Included | available         | available       | static-synchronous      | U3    | monitors page, tRPC, monitor worker                     |
+| Custom dashboards and widgets              | Included | available         | available       | static-synchronous      | U3    | dashboard pages, tRPC, unstable API/MCP                 |
+| Evaluator execution                        | Included | available         | available       | `evaluations`           | U5    | durable dispatch/replay, eval pages, tRPC, API, MCP     |
+| Prompt/remote experiment execution         | Included | available         | available       | `experiments`           | U6    | experiment pages and tRPC                               |
+| Dataset-run ingestion and projection       | Included | available         | available       | `datasetRunIngestion`   | U6    | dataset-run Public API and MCP                          |
+| Dataset-run exports                        | Included | available         | available       | `datasetRunExports`     | U6    | dataset-run-items batch-export table                    |
+| Dataset-run query, metrics, and comparison | Included | available         | available       | `datasetRunIngestion`   | U6    | dataset run pages, tRPC, MCP                            |
+| PostHog, Mixpanel, and Blob integrations   | Included | available         | available       | `analyticsIntegrations` | U7    | integration pages, tRPC, public Blob API                |
+| Projects, datasets, prompts, configs, auth | Included | storage-neutral   | storage-neutral | none                    | U0    | PostgreSQL control-plane models                         |
+| Cloud core-data S3 operational export      | Excluded | cloud-ee-excluded | excluded        | none                    | U0    | `CoreDataS3ExportQueue`                                 |
+| Enterprise and Cloud-only product surfaces | Excluded | cloud-ee-excluded | excluded        | none                    | U0    | Community corpus only; see Enterprise overlay below     |
+
+## Self-hosted Enterprise overlay
+
+The frozen matrix above deliberately measures Community parity. It must not be
+read as saying that this fork removed or cannot run self-hosted Enterprise
+features. With a valid `LANGFUSE_EE_LICENSE_KEY`, the following upstream
+Self-Hosted Enterprise surfaces work in a Doris deployment:
+
+| Capability                    | Owning data/control plane                | Doris status | Evidence                                                                  |
+| ----------------------------- | ---------------------------------------- | ------------ | ------------------------------------------------------------------------- |
+| RBAC and membership roles     | PostgreSQL                               | available    | existing auth, role, and membership services                              |
+| SCIM / organization Admin API | PostgreSQL                               | available    | `web/src/pages/api/public/scim/**`                                        |
+| Audit Log                     | PostgreSQL                               | available    | Prisma `AuditLog`, audit viewer/router, SCIM audit regression             |
+| Ingestion Masking             | raw object → Worker → selected analytics | available    | durable OTLP masking context and production Doris canonicalizer wiring    |
+| Per-project data retention    | PostgreSQL cutoff + selected analytics   | available    | existing `retentionDays`; Doris project cutoff and anti-resurrection path |
+
+RBAC, SCIM, and Audit Log do not query ClickHouse and require no Doris query
+adapter. Ingestion Masking is data-plane sensitive: for Doris, the accepted raw
+OTLP envelope durably carries the organization and configured propagated
+headers, and Worker invokes the existing licensed masking callback before
+canonicalization and Stream Load. A fail-open callback preserves upstream
+behavior. A fail-closed callback failure writes no unmasked canonical data and
+leaves the durable ingestion operation retryable.
+
+The raw object already contains the pre-masking customer payload and is a
+sensitive store. Propagated header values share that raw-object lifecycle so a
+retry can reproduce the original callback request. Operators must restrict the
+raw bucket and configure only header names they intentionally allow to be
+forwarded.
+
+Cloud billing, Stripe workflows, Cloud usage metering, and Cloud operational
+exports remain excluded because they are Cloud operations, not because Doris
+cannot store their product objects. This Enterprise overlay does not add a
+seventh durable Community activation row.
 
 The six and only six durable Doris capability rows are:
 
@@ -127,8 +161,9 @@ scratch, limits, privacy, and diagnostics are documented in
 
 ## Change control
 
-The matrix may be corrected when reachability evidence proves that a baseline
-surface was omitted, but code search alone must not silently expand scope. Each
-new row needs an inclusion or exclusion rationale, an owning unit, and an
-activation class. Enterprise or Cloud-only code remains excluded even when it
-shares an internal queue or repository with Community code.
+The Community matrix may be corrected when reachability evidence proves that a
+baseline surface was omitted, but code search alone must not silently expand
+scope. Each new row needs an inclusion or exclusion rationale, an owning unit,
+and an activation class. Self-hosted Enterprise capabilities remain in the
+separate overlay above; Cloud-only code remains excluded even when it shares an
+internal queue or repository with Community code.

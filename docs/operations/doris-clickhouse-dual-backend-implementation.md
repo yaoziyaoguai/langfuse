@@ -406,18 +406,19 @@ Monitors、custom dashboards、widgets、核心 query 和核心 ingestion 不需
 
 改造按 U0 到 U8 推进。每个 unit 先冻结行为和失败边界，再实现并执行真实 backend 回归。
 
-| Unit | 做了什么                                                                                                                                                          | 结果                               |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| U0   | 冻结 Community capability corpus；建立 selector、deployment marker、workload epoch、runtime lease、readiness、migration、安全 harness 和 capability state machine | 双后端拓扑和 fail-closed 基础完成  |
-| U1   | trace metrics、bulk detail、exact-ID read 和 export source                                                                                                        | 核心 trace 查询与导出数据源补齐    |
-| U2   | durable batch-export intent、manifest、claim、recovery、MinIO 输出                                                                                                | Doris core batch export 可恢复     |
-| U3   | QueryEngine、filter、search、order、score reads、monitor/dashboard                                                                                                | 同一产品查询模型可选两个 backend   |
-| U4   | experiment/dataset-run schema、canonical round trip、deletion generation、least privilege                                                                         | 复杂产品能力的存储基础完成         |
-| U5   | evaluator capture、dispatch、execution、score visibility、cutoff/replay                                                                                           | Doris evaluator 全链路完成         |
-| U6   | experiment execution、dataset-run UI/API/MCP/query/export/delete                                                                                                  | experiment/dataset-run 能力完成    |
-| U7   | PostHog、Mixpanel、Blob delivery、bootstrap、retry、security、Parquet                                                                                             | 第三方 analytics integrations 完成 |
-| U8   | score analytics/delete、experiment batch eval、control-state cleaner、能力审计和完整验证                                                                          | 本地 Community parity 收口         |
+| Unit | 做了什么                                                                                                                                                          | 结果                                |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| U0   | 冻结 Community capability corpus；建立 selector、deployment marker、workload epoch、runtime lease、readiness、migration、安全 harness 和 capability state machine | 双后端拓扑和 fail-closed 基础完成   |
+| U1   | trace metrics、bulk detail、exact-ID read 和 export source                                                                                                        | 核心 trace 查询与导出数据源补齐     |
+| U2   | durable batch-export intent、manifest、claim、recovery、MinIO 输出                                                                                                | Doris core batch export 可恢复      |
+| U3   | QueryEngine、filter、search、order、score reads、monitor/dashboard                                                                                                | 同一产品查询模型可选两个 backend    |
+| U4   | experiment/dataset-run schema、canonical round trip、deletion generation、least privilege                                                                         | 复杂产品能力的存储基础完成          |
+| U5   | evaluator capture、dispatch、execution、score visibility、cutoff/replay                                                                                           | Doris evaluator 全链路完成          |
+| U6   | experiment execution、dataset-run UI/API/MCP/query/export/delete                                                                                                  | experiment/dataset-run 能力完成     |
+| U7   | PostHog、Mixpanel、Blob delivery、bootstrap、retry、security、Parquet                                                                                             | 第三方 analytics integrations 完成  |
+| U8   | score analytics/delete、experiment batch eval、control-state cleaner、能力审计和完整验证                                                                          | 本地 Community parity 收口          |
 | U9   | Enterprise per-project retention 的 project cutoff、续投、S3/Doris/head 清理与 anti-resurrection                                                                  | Doris Enterprise retention 接线完成 |
+| U10  | Self-Hosted Enterprise RBAC/SCIM/Audit 存储归属核验；OTLP masking context 持久化、Doris Worker 生产接线、canonicalizer v2 rolling fence 与 fail-closed retry      | 自托管 Enterprise 数据面差距收口    |
 
 “最初显示 501”的功能并不是 Doris 永远做不到。它们当时缺少 producer、consumer、recovery 或 durable activation 的完整链路，所以先显式拒绝，避免接受任务后丢失。U5–U8 完成后，能力清单已经改为 available；Doris 部署仍需把对应 generation 激活才开放。
 
@@ -521,7 +522,7 @@ Selector 不迁移历史数据。如果 ClickHouse 有历史数据而 Doris 为�
 - 按 project 选择 backend；
 - ClickHouse 与 Doris 之间的历史数据自动迁移；
 - 把本地 `1 FE + 1 BE` 当作生产 HA；
-- Langfuse Cloud/Enterprise 专用 operational export 和 billing workflow；
+- Cloud billing、Stripe、Cloud usage metering 和 Cloud-only operational export；
 - 撤回已经发送到第三方系统的数据。
 
 ### 仍需真实环境证明

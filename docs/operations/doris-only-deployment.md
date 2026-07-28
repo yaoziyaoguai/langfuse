@@ -623,6 +623,34 @@ barrier；已完成 cutoff 不会因延长或关闭配置而后退。已经开�
 和 anti-resurrection barrier 都验证后才能设置。首次启用前必须备份，因为已完成
 cutoff 的推进不可逆。
 
+### Self-Hosted Enterprise 能力
+
+把有效的 `LANGFUSE_EE_LICENSE_KEY=langfuse_ee_*` 通过 secret manager 同时注入
+Web 和 Worker。RBAC、SCIM/Admin API 和 Audit Log 使用 PostgreSQL，不需要
+ClickHouse，也不需要额外 Doris DDL 或 capability activation。它们仍受原有
+Enterprise entitlement 和 API authentication 约束；本 fork 没有绕过 License。
+
+可选的 Ingestion Masking 由 Worker 在 Doris canonicalization 和 Stream Load
+之前执行：
+
+```text
+LANGFUSE_INGESTION_MASKING_CALLBACK_URL=https://masking.internal.example/v1/mask
+LANGFUSE_INGESTION_MASKING_CALLBACK_TIMEOUT_MS=500
+LANGFUSE_INGESTION_MASKING_CALLBACK_FAIL_CLOSED=true
+LANGFUSE_INGESTION_MASKING_MAX_RETRIES=1
+LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS=x-mask-tenant
+```
+
+callback URL 是管理员配置的受信任出站目标，应由网络策略限制；不要把任意用户输入
+写入该变量。`PROPAGATED_HEADERS` 只填写允许转发的 header 名称。对应 header 值
+会与 pre-masking raw OTLP 对象一起持久化，以便故障恢复后重放，因此 raw bucket
+必须按敏感数据存储保护。`FAIL_CLOSED=true` 时 callback 持续失败不会写入未脱敏
+Doris 数据，operation 会保持可重试；告警必须覆盖 masking callback failure 和
+ingestion backlog。
+
+Cloud billing、Stripe、Cloud usage metering 和 Cloud-only operational export
+不属于 self-hosted Enterprise 目标。
+
 ## 十一、故障定位
 
 | 现象                                     | 优先检查                                                                    |
