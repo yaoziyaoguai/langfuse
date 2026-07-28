@@ -308,7 +308,19 @@ Doris query compiler 对 value 使用参数绑定。未知维度、filter/operat
 
 因此晚到 ingestion、重复 queue delivery 或旧 Worker 不能让已删除的 trace、score 或 dataset-run association 再次出现。
 
-可选的 Doris global retention 默认关闭。它先在 PostgreSQL 固化 cutoff，等待旧 load settle，再分批删除 entity heads。Checkpoint control-state cleaner 也默认关闭，只能清理已被签名 sealed checkpoint 覆盖且超过 replay safety delay 的 child ledgers。
+Enterprise per-project retention 复用现有 `retentionDays`、配置 UI 和 BullMQ
+schedule。ClickHouse 继续执行原有 table DELETE；Doris 为每个 project 固化独立
+cutoff，按 `EVENT`、`SCORE`、`FILE_REFERENCE` phase 分批发布 Stream Load
+DELETE，并在物理可见后删除对应 Postgres entity head。旧的 pending/claimed load
+在 Doris I/O 前同时检查 global 和 project barrier；已完成的 `purged-before`
+不会因为延长或关闭 retention 而后退。已经发布 cutoff 的 run 必须继续完成，
+避免部分删除后撤销屏障导致 replay 复活。
+
+可选的 Doris global retention 默认关闭。它先在 PostgreSQL 固化 deployment-wide
+cutoff，等待旧 load settle，再分批删除 entity heads。Global 与 per-project run
+共享同一个 deployment mutation claim，因此不会并发删除同一 entity head。
+Checkpoint control-state cleaner 也默认关闭，只能清理已被签名 sealed checkpoint
+覆盖且超过 replay safety delay 的 child ledgers。
 
 ### 6. Batch export
 
@@ -405,6 +417,7 @@ Monitors、custom dashboards、widgets、核心 query 和核心 ingestion 不需
 | U6   | experiment execution、dataset-run UI/API/MCP/query/export/delete                                                                                                  | experiment/dataset-run 能力完成    |
 | U7   | PostHog、Mixpanel、Blob delivery、bootstrap、retry、security、Parquet                                                                                             | 第三方 analytics integrations 完成 |
 | U8   | score analytics/delete、experiment batch eval、control-state cleaner、能力审计和完整验证                                                                          | 本地 Community parity 收口         |
+| U9   | Enterprise per-project retention 的 project cutoff、续投、S3/Doris/head 清理与 anti-resurrection                                                                  | Doris Enterprise retention 接线完成 |
 
 “最初显示 501”的功能并不是 Doris 永远做不到。它们当时缺少 producer、consumer、recovery 或 durable activation 的完整链路，所以先显式拒绝，避免接受任务后丢失。U5–U8 完成后，能力清单已经改为 available；Doris 部署仍需把对应 generation 激活才开放。
 

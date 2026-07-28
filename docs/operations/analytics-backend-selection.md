@@ -233,11 +233,37 @@ delivery/retry, rollback/replay, outbound security, Parquet scratch, privacy,
 and diagnostics are documented in
 [`doris-analytics-integrations.md`](./doris-analytics-integrations.md).
 
+### Enterprise per-project retention
+
+The existing Enterprise `data-retention` entitlement and project
+`retentionDays` setting work with both analytics backends. ClickHouse keeps its
+original table-deletion path. Doris uses a project-scoped durable retention
+state and processes `EVENT`, `SCORE`, and `FILE_REFERENCE` heads in bounded
+batches through the existing Stream Load deletion identity.
+
+The Worker publishes an immutable project cutoff before deletion and waits for
+older `LOADING` or `UNKNOWN` loads to settle. Pending and claimed loads
+revalidate both the global and project cutoff before Doris I/O. The completed
+`purged-before` value remains an anti-resurrection barrier if retention is later
+extended or disabled. If a user disables retention after a run has published
+its cutoff, that run continues to completion; removing the barrier halfway
+would make partial deletion and replay ambiguous.
+
+No Doris-specific UI or API is required. Keep
+`QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED=true` on at least one Worker,
+and verify that the Enterprise license exposes the existing project retention
+setting. Each run also removes expired media and raw ingestion objects that
+have retained Doris file-reference heads, using the same durable UTC cutoff for
+all three stores. A raw object is kept while any current Doris file-reference
+still points to it. Canonical object lifecycle, backups, and completed cutoffs
+remain irreversible and must be covered by the deployment backup/restore
+policy.
+
 ### Optional global retention
 
 Deployment-wide Doris analytics retention is disabled unless
 `LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS` is set. It is intentionally global, not
-per-project, and accepts a minimum of three days. The worker publishes an
+an alternative project policy, and accepts a minimum of three days. The worker publishes an
 immutable cutoff in Postgres before deletion, waits for all older
 `LOADING`/`UNKNOWN` batches to settle, then removes at most
 `LANGFUSE_DORIS_GLOBAL_RETENTION_BATCH_SIZE` entity heads per interval through

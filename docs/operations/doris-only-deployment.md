@@ -604,6 +604,21 @@ Doris migration 是 forward-only。不要通过删除
 
 ### Retention
 
+持有 Enterprise License 并启用 `data-retention` entitlement 时，项目设置页中的
+retention days 会直接驱动 Doris per-project retention。至少一个 Worker 必须保留：
+
+```text
+QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED=true
+```
+
+项目 cutoff 会先持久化到 PostgreSQL，再通过有界的 Doris Stream Load DELETE
+清理 event、score 和 file-reference projection。旧 load 会在写入前重新检查
+barrier；已完成 cutoff 不会因延长或关闭配置而后退。已经开始的 run 会在配置关闭后
+继续收敛，这是防止部分删除和旧数据 replay 的安全要求。Media、Doris projection
+和 raw-object 清理使用同一个 UTC cutoff；仍被当前 file-reference 引用的 raw object
+不会提前删除。上线前至少验证一个项目中“旧数据删除、新数据保留、另一项目不受影响、
+关闭后旧数据不复活”四个场景。
+
 `LANGFUSE_DORIS_GLOBAL_RETENTION_DAYS` 默认留空。只有在 checkpoint、备份、恢复
 和 anti-resurrection barrier 都验证后才能设置。首次启用前必须备份，因为已完成
 cutoff 的推进不可逆。
