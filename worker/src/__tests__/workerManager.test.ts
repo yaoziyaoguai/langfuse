@@ -1,34 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "crypto";
 
-vi.mock("../env", () => ({
-  env: { LANGFUSE_QUEUE_METRICS_SAMPLE_RATE: 0 },
-}));
-vi.mock("@langfuse/shared/src/server", () => ({
-  QueueName: {
-    TraceDelete: "trace-delete",
-    IngestionQueue: "ingestion-queue",
-    ScoreDelete: "score-delete",
-  },
-  contextWithLangfuseProps: vi.fn(() => ({})),
-  convertQueueNameToMetricName: vi.fn((queueName: string) =>
-    queueName === "ingestion-queue"
-      ? "langfuse.queue.ingestion"
-      : `langfuse.queue.${queueName.replaceAll("-", "_")}`,
-  ),
-  createBullMQWorkerOptionsWithRedis: vi.fn(() => undefined),
-  logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
-  recordDistribution: vi.fn(),
-  recordGauge: vi.fn(),
-  recordHistogram: vi.fn(),
-  recordIncrement: vi.fn(),
-  traceException: vi.fn(),
-}));
-vi.mock("../queues/shardedQueueRegistry", () => ({
-  resolveQueueInstance: vi.fn(),
-  SHARDED_QUEUE_BASE_NAMES: ["ingestion-queue"],
-}));
+import { Queue, Worker } from "bullmq";
+import { describe, expect, it } from "vitest";
 
-import { QueueName } from "@langfuse/shared/src/server";
+import {
+  createNewRedisInstance,
+  getQueuePrefix,
+  QueueName,
+  redisQueueRetryOptions,
+} from "@langfuse/shared/src/server";
 import { WorkerManager } from "../queues/workerManager";
 
 const extractProjectId = (data: unknown): string | undefined =>
@@ -37,6 +17,12 @@ const extractProjectId = (data: unknown): string | undefined =>
       extractProjectId(job: { data: unknown }): string | undefined;
     }
   ).extractProjectId({ data });
+
+const computeDlqOldestAgeMs = (jobs: unknown[], nowMs: number): number =>
+  WorkerManager.computeDlqOldestAgeMs(
+    jobs as Parameters<typeof WorkerManager.computeDlqOldestAgeMs>[0],
+    nowMs,
+  );
 
 const resolveMetricInfo = (queueName: QueueName) =>
   (
@@ -48,17 +34,6 @@ const resolveMetricInfo = (queueName: QueueName) =>
   ).resolveMetricInfo(queueName);
 
 describe("WorkerManager", () => {
-  beforeEach(() => {
-    const manager = WorkerManager as unknown as {
-      workers: Record<string, { close: () => Promise<void> }>;
-      registrationsFenced: boolean;
-      closeOperation: Promise<void> | null;
-    };
-    manager.workers = {};
-    manager.registrationsFenced = false;
-    manager.closeOperation = null;
-  });
-
   describe("extractProjectId", () => {
     it("extracts project ids from queue payloads", () => {
       expect(
@@ -114,59 +89,83 @@ describe("WorkerManager", () => {
     });
   });
 
-  it("shares an in-flight close and permanently rejects registration after fencing", async () => {
-    let releaseClose!: () => void;
-    const close = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseClose = resolve;
-        }),
-    );
-    const manager = WorkerManager as unknown as {
-      workers: Record<string, { close: () => Promise<void> }>;
-    };
-    manager.workers[QueueName.TraceDelete] = { close };
-
-    const firstClose = WorkerManager.closeWorkers();
-    let fenceResolved = false;
-    const fence = WorkerManager.fenceRegistrations().then(() => {
-      fenceResolved = true;
+  describe("computeDlqOldestAgeMs", () => {
+    it("returns 0 for an empty failed set", () => {
+      expect(computeDlqOldestAgeMs([], 5_000)).toBe(0);
     });
-    await new Promise((resolve) => setImmediate(resolve));
 
-    expect(close).toHaveBeenCalledOnce();
-    expect(fenceResolved).toBe(false);
+    it("measures age from the first job's finishedOn", () => {
+      expect(
+        computeDlqOldestAgeMs([{ finishedOn: 1_000, timestamp: 500 }], 4_000),
+      ).toBe(3_000);
+    });
 
-    releaseClose();
-    await Promise.all([firstClose, fence]);
-    WorkerManager.register(QueueName.ScoreDelete, async () => undefined);
+    it("falls back to timestamp when finishedOn is missing", () => {
+      expect(computeDlqOldestAgeMs([{ timestamp: 500 }], 4_000)).toBe(3_500);
+    });
 
-    expect(close).toHaveBeenCalledOnce();
-    expect(WorkerManager.getRegisteredQueueNames()).toEqual([]);
+    it("skips undefined entries from stale job ids", () => {
+      expect(
+        computeDlqOldestAgeMs([undefined, { finishedOn: 1_000 }], 4_000),
+      ).toBe(3_000);
+    });
   });
 
-  it("retains failed workers and retries only those closures", async () => {
-    const failedClose = vi
-      .fn<() => Promise<void>>()
-      .mockRejectedValueOnce(new Error("transient close failure"))
-      .mockResolvedValueOnce(undefined);
-    const successfulClose = vi.fn(async () => undefined);
-    const manager = WorkerManager as unknown as {
-      workers: Record<string, { close: () => Promise<void> }>;
-    };
-    manager.workers[QueueName.TraceDelete] = { close: failedClose };
-    manager.workers[QueueName.ScoreDelete] = { close: successfulClose };
+  describe("dlq oldest job lookup", () => {
+    it("getFailed returns newest-first, so index -1 is the oldest job", async () => {
+      const queueName = `dlq-oldest-age-${randomUUID()}`;
+      const redis = createNewRedisInstance({
+        enableOfflineQueue: false,
+        ...redisQueueRetryOptions,
+      });
+      if (!redis) throw new Error("Failed to create redis instance");
 
-    await expect(WorkerManager.closeWorkers()).rejects.toThrow(
-      "Failed to close all workers",
-    );
-    expect(WorkerManager.getRegisteredQueueNames()).toEqual([
-      QueueName.TraceDelete,
-    ]);
+      const queue = new Queue(queueName, {
+        connection: redis,
+        prefix: getQueuePrefix(queueName),
+      });
+      const worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error("always fails");
+        },
+        { connection: redis, prefix: getQueuePrefix(queueName) },
+      );
 
-    await expect(WorkerManager.closeWorkers()).resolves.toBeUndefined();
-    expect(failedClose).toHaveBeenCalledTimes(2);
-    expect(successfulClose).toHaveBeenCalledOnce();
-    expect(WorkerManager.getRegisteredQueueNames()).toEqual([]);
+      const waitForFailedCount = async (expected: number) => {
+        const deadline = Date.now() + 15_000;
+        while ((await queue.getFailedCount()) < expected) {
+          if (Date.now() > deadline) {
+            throw new Error(`Timed out waiting for ${expected} failed jobs`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      };
+
+      try {
+        await queue.add("job", { order: "oldest" });
+        await waitForFailedCount(1);
+        // Failure timestamps have ms resolution; keep them distinct.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await queue.add("job", { order: "newest" });
+        await waitForFailedCount(2);
+
+        const newestFirst = await queue.getFailed();
+        expect(newestFirst.map((job) => job.data.order)).toEqual([
+          "newest",
+          "oldest",
+        ]);
+
+        const [oldest] = await queue.getFailed(-1, -1);
+        expect(oldest.data.order).toBe("oldest");
+        expect(oldest.finishedOn).toBeDefined();
+        expect(oldest.finishedOn!).toBeLessThan(newestFirst[0].finishedOn!);
+      } finally {
+        await worker.close();
+        await queue.obliterate({ force: true });
+        await queue.close();
+        redis.disconnect();
+      }
+    }, 30_000);
   });
 });

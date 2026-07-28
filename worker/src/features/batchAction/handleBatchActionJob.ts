@@ -10,6 +10,7 @@ import {
 } from "@langfuse/shared";
 import type { Job } from "bullmq";
 import {
+  applyCommentFilters,
   buildDorisObservationReadQuery,
   buildDorisTraceReadQuery,
   createHistoricalAnalyticsEvaluationDispatches,
@@ -72,6 +73,29 @@ function requireTargetId(payload: BatchActionPayload): string {
   return payload.targetId;
 }
 
+async function resolveObservationCommentFilters(
+  projectId: string,
+  filter: FilterState,
+): Promise<FilterState> {
+  const { filterState, hasNoMatches } = await applyCommentFilters({
+    filterState: filter,
+    prisma,
+    projectId,
+    objectType: "OBSERVATION",
+  });
+
+  return hasNoMatches
+    ? [
+        {
+          type: "stringOptions",
+          operator: "any of",
+          column: "id",
+          value: [],
+        },
+      ]
+    : filterState;
+}
+
 async function listObservationIds(
   payload: Extract<
     BatchActionPayload,
@@ -79,14 +103,14 @@ async function listObservationIds(
   >,
 ): Promise<string[]> {
   const ids: string[] = [];
+  const filter = await resolveObservationCommentFilters(
+    payload.projectId,
+    withCutoff(payload.query, "startTime", new Date(payload.cutoffCreatedAt)),
+  );
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const rows = await getObservationsWithModelDataFromEventsTable({
       projectId: payload.projectId,
-      filter: withCutoff(
-        payload.query,
-        "startTime",
-        new Date(payload.cutoffCreatedAt),
-      ),
+      filter,
       orderBy: payload.query.orderBy,
       searchQuery: payload.query.searchQuery,
       searchType: payload.query.searchType,
@@ -187,14 +211,14 @@ async function processObservationAddToDataset(
   >,
 ): Promise<void> {
   const observations = [];
+  const filter = await resolveObservationCommentFilters(
+    payload.projectId,
+    withCutoff(payload.query, "startTime", new Date(payload.cutoffCreatedAt)),
+  );
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const rows = await getObservationsWithModelDataFromEventsTable({
       projectId: payload.projectId,
-      filter: withCutoff(
-        payload.query,
-        "startTime",
-        new Date(payload.cutoffCreatedAt),
-      ),
+      filter,
       orderBy: payload.query.orderBy,
       searchQuery: payload.query.searchQuery,
       searchType: payload.query.searchType,
@@ -445,15 +469,11 @@ async function processHistoricalObservationEvaluation(
       log: null,
     },
   });
-  const query = buildDorisObservationReadQuery([
-    ...normalizeFilters(payload.query),
-    {
-      type: "datetime",
-      column: "startTime",
-      operator: "<",
-      value: new Date(payload.cutoffCreatedAt),
-    },
-  ]);
+  const filter = await resolveObservationCommentFilters(
+    payload.projectId,
+    withCutoff(payload.query, "startTime", new Date(payload.cutoffCreatedAt)),
+  );
+  const query = buildDorisObservationReadQuery(filter);
   const historicalRange = query.range ?? {
     from: new Date(0),
     to: new Date(payload.cutoffCreatedAt),

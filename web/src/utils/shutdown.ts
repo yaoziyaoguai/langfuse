@@ -14,8 +14,10 @@ import { prisma } from "@langfuse/shared/src/db";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import { quiesceWebAnalyticsRuntime } from "@/src/server/analyticsRuntime";
 import { env } from "@/src/env.mjs";
+import type prexit from "prexit";
 
 const TIMEOUT = 110_000;
+type ShutdownSignal = Parameters<NonNullable<Parameters<typeof prexit>[1]>>[0];
 
 const runShutdownStep = async (
   failureMessage: string,
@@ -94,7 +96,7 @@ export const setSigtermReceived = () => {
 export const isSigtermReceived = () =>
   Boolean(process.env.NEXT_MANUAL_SIG_HANDLE) && globalThis.sigtermReceived;
 
-export const shutdown = async (signal: PrexitSignal) => {
+export const shutdown = async (signal: ShutdownSignal) => {
   if (signal === "SIGTERM" || signal === "SIGINT") {
     console.log(
       `SIGTERM / SIGINT received. Shutting down in ${TIMEOUT / 1000} seconds.`,

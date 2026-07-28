@@ -3,6 +3,7 @@ import {
   DEFAULT_TRACE_ENVIRONMENT,
   createUnknownSdkIngestionAttribution,
   eventTypes,
+  applyCommentFilters,
   createW3CTraceId,
   extractObservationVariables,
   getEventsStreamForEval,
@@ -107,6 +108,7 @@ export async function runCodeEvalTestForJobConfig(params: {
   filter: FilterCondition[] | null;
 }): Promise<CodeEvalTestRunResult | null> {
   const observation = await getObservationForEvalByFilter({
+    prisma: params.prisma,
     projectId: params.projectId,
     target: params.target,
     filter: params.filter,
@@ -221,6 +223,7 @@ function toCodeEvalTestRunError({
 }
 
 async function getObservationForEvalByFilter(params: {
+  prisma: PrismaClient;
   projectId: string;
   target: EvalTargetObject;
   filter: FilterCondition[] | null;
@@ -236,9 +239,20 @@ async function getObservationForEvalByFilter(params: {
     ? getExperimentEvalPreviewFilters(params.filter)
     : params.filter;
 
+  const { filterState, hasNoMatches } = await applyCommentFilters({
+    filterState: filter ?? [],
+    prisma: params.prisma,
+    projectId: params.projectId,
+    objectType: "OBSERVATION",
+  });
+
+  if (hasNoMatches) {
+    return null;
+  }
+
   const stream = await getEventsStreamForEval({
     projectId: params.projectId,
-    filter,
+    filter: filterState,
     rowLimit: 1,
   });
 

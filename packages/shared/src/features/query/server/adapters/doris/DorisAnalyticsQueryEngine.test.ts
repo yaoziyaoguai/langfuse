@@ -23,6 +23,7 @@ describe("Doris analytics query engine", () => {
         "observations",
         "scores-numeric",
         "scores-categorical",
+        "scores-boolean",
       ] as const) {
         const declaration = getViewDeclaration(view, version);
         for (const field of Object.keys(declaration.dimensions)) {
@@ -316,6 +317,28 @@ describe("Doris analytics query engine", () => {
     expect(sql).toContain("o.experiment_name");
     expect(sql).toContain("o.experiment_id");
     expect(query.mock.calls[0]?.[1]).toContain("run-1");
+  });
+
+  it("restricts the boolean score view and exposes its boolean dimension", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+
+    await executeDorisAnalyticsQuery({
+      executor: { query },
+      projectId: "project-1",
+      version: "v2",
+      query: {
+        ...base,
+        view: "scores-boolean",
+        dimensions: [{ field: "booleanValue" }],
+        metrics: [{ measure: "value", aggregation: "avg" }],
+        filters: [],
+        timeDimension: null,
+      },
+    });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("b.boolean_value AS `booleanValue`");
+    expect(query.mock.calls[0]?.[1]).toContain("BOOLEAN");
   });
 
   it.each([

@@ -75,8 +75,10 @@ export type AuthedProjectAPIRouteConfig<
    */
   allowInAppAgentKey?: boolean;
   /**
-   * Marks a legacy tracing write route. ClickHouse events_only deployments
-   * return 404; Doris routes enter the durable canonical ingestion pipeline.
+   * Marks a route that depends on legacy ClickHouse tables. ClickHouse
+   * events_only deployments return 404 because those tables stop receiving
+   * data. Doris uses its canonical backend route and is not rejected solely
+   * because of the ClickHouse write-mode setting.
    */
   rejectInEventsOnlyMode?: boolean;
   fn: (params: {
@@ -379,10 +381,6 @@ export const createAuthedProjectAPIRoute = <
 
     logger.debug(
       `Request to route ${routeConfig.name} projectId ${auth.scope.projectId}`,
-      {
-        query: req.query,
-        body: req.body,
-      },
     );
 
     let query: z.infer<TQuery>;

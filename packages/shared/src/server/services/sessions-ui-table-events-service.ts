@@ -64,6 +64,7 @@ export type SessionTraceFromEvents = {
   timestamp: Date;
   environment: string | null;
   userId: string | null;
+  observationCount: number;
 };
 
 async function getDorisSessionsPage(props: {
@@ -105,7 +106,7 @@ async function getDorisSessionsPage(props: {
 export const getSessionTracesFromEvents = async (props: {
   projectId: string;
   sessionId: string;
-}) => {
+}): Promise<SessionTraceFromEvents[]> => {
   if (isDorisAnalyticsBackend()) {
     const query = buildDorisDerivedQuery(
       [
@@ -139,6 +140,7 @@ export const getSessionTracesFromEvents = async (props: {
         timestamp: trace.timestamp,
         environment: trace.environment,
         userId: trace.userId,
+        observationCount: trace.observationCount,
       }))
       .sort(
         (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
@@ -178,6 +180,7 @@ export const getSessionTracesFromEvents = async (props: {
         timestamp: string;
         environment: string | null;
         user_id: string | null;
+        observation_count: number | string;
       }>({
         query,
         params: input.params,
@@ -193,6 +196,7 @@ export const getSessionTracesFromEvents = async (props: {
     timestamp: parseClickhouseUTCDateTimeFormat(row.timestamp),
     environment: row.environment,
     userId: row.user_id,
+    observationCount: Number(row.observation_count),
   }));
 };
 

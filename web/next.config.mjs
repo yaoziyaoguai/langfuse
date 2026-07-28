@@ -62,6 +62,11 @@ const reportToHeader = {
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
+  // Keep browser source maps for Langfuse Cloud observability. Self-hosted
+  // builds skip them because the full Pages Router graph otherwise makes
+  // Turbopack consume excessive time, memory, and disk during compilation.
+  productionBrowserSourceMaps:
+    env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION !== undefined,
   // Allow building to alternate directory for parallel build checks while dev server runs
   distDir: process.env.NEXT_DIST_DIR || ".next",
   typescript: {
@@ -278,7 +283,10 @@ const sentryConfig = withSentryConfig(nextConfig, {
   // side errors will fail.
   // tunnelRoute: "/api/monitoring-tunnel",
 
-  // Hides source maps from generated client bundles
+  // Keep the Sentry plugin's own source-map generation/upload OFF. We serve
+  // browser source maps publicly when enabled above; Sentry fetches them from
+  // the public sourceMappingURL, so uploading a second copy (with an auth token
+  // + build-time upload) is redundant here.
   sourcemaps: {
     disable: true,
   },
@@ -300,6 +308,6 @@ const sentryConfig = withSentryConfig(nextConfig, {
       removeDebugLogging: true,
     },
   },
-  });
+});
 
 export default sentryConfig;

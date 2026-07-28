@@ -113,6 +113,7 @@ describe("Doris sessions UI service", () => {
           timestamp: new Date("2026-07-17T10:00:00.000Z"),
           environment: "production",
           userId: "user-1",
+          observationCount: 2,
         },
       ],
       nextCursor: null,
@@ -130,6 +131,7 @@ describe("Doris sessions UI service", () => {
         timestamp: new Date("2026-07-17T10:00:00.000Z"),
         environment: "production",
         userId: "user-1",
+        observationCount: 2,
       },
     ]);
   });

@@ -16,7 +16,7 @@ export function UnavailableFeaturePage({
         <div className="text-muted-foreground font-mono text-sm">
           {unavailable.code}
         </div>
-        <h1 className="text-xl font-semibold">{unavailable.message}</h1>
+        <h1 className="text-xl font-bold">{unavailable.message}</h1>
         <p className="text-muted-foreground text-sm">{unavailable.recovery}</p>
       </div>
     </Page>

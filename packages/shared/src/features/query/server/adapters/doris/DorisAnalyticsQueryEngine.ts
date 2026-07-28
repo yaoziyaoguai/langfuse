@@ -156,6 +156,7 @@ const SCORE_DIMENSIONS: ExpressionCatalog = {
   sessionId: "b.session_id",
   value: "b.value",
   stringValue: "b.string_value",
+  booleanValue: "b.boolean_value",
   traceName: "b.trace_name",
   tags: "b.trace_tags",
   userId: "b.trace_user_id",
@@ -411,6 +412,7 @@ function catalogFor(input: {
       );
     case "scores-numeric":
     case "scores-categorical":
+    case "scores-boolean":
       return scoresCatalog(input.projectId, input.from, input.to, input.bound);
   }
 }
@@ -1043,6 +1045,16 @@ export async function executeDorisAnalyticsQuery(input: {
         column: "dataType",
         operator: "=",
         value: "CATEGORICAL",
+      },
+      expression: catalog.dimensions.dataType!,
+    });
+  } else if (input.query.view === "scores-boolean") {
+    filterPlans.push({
+      filter: {
+        type: "string",
+        column: "dataType",
+        operator: "=",
+        value: "BOOLEAN",
       },
       expression: catalog.dimensions.dataType!,
     });

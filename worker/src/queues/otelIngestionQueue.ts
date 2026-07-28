@@ -47,6 +47,7 @@ import {
   createObservationEvalSchedulerDeps,
 } from "../features/evaluation/observationEval";
 import { getWorkerAnalyticsAdmissionContext } from "../analyticsRuntime";
+import { processOtelEventMedia } from "../features/otel-media/processOtelMedia";
 
 /**
  * Check if HTTP headers from the SDK request indicate the batch is eligible
@@ -319,6 +320,7 @@ export const otelIngestionQueueProcessorBuilder = (
       });
       const events: IngestionEventType[] =
         await processor.processToIngestionEvents(parsedSpans);
+
       // Here, we split the events into observations and non-observations.
       // Observations go into the IngestionService directly whereas the non-observations make another run through the processEventBatch method.
       const traces = events.filter(
@@ -510,6 +512,19 @@ export const otelIngestionQueueProcessorBuilder = (
       // Early exit if no processing needed
       if (!hasEvalConfigs && !shouldWriteToEventsTable) {
         return;
+      }
+
+      if (
+        env.LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED === "true" &&
+        shouldWriteToEventsTable
+      ) {
+        await processOtelEventMedia({
+          eventInputs,
+          projectId,
+          fileKey,
+          mediaBucket: env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET,
+          mediaPrefix: env.LANGFUSE_S3_MEDIA_UPLOAD_PREFIX,
+        });
       }
 
       // Create scheduler deps only if we have eval configs
