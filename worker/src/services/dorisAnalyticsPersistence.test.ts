@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+
 import { LangfuseConflictError } from "@langfuse/shared";
+import { encodeRawAnalyticsIngestionEnvelope } from "@langfuse/shared/analytics-persistence";
+import { describe, expect, it, vi } from "vitest";
 
 const reconcileRawAnalyticsIngestionReceipts = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -12,11 +15,22 @@ const reconcileRawAnalyticsIngestionReceipts = vi.hoisted(() =>
 const expireUnreadyAnalyticsIngestionReceipts = vi.hoisted(() =>
   vi.fn(async () => 0),
 );
+const applyIngestionMasking = vi.hoisted(() =>
+  vi.fn(async (input: { data: unknown }) => ({
+    success: true,
+    data: input.data,
+    masked: true,
+  })),
+);
 
 vi.mock("@langfuse/shared/src/server", async (importOriginal) => ({
   ...(await importOriginal()),
   reconcileRawAnalyticsIngestionReceipts,
   expireUnreadyAnalyticsIngestionReceipts,
+}));
+
+vi.mock("@langfuse/shared/src/server/ee/ingestionMasking", () => ({
+  applyIngestionMasking,
 }));
 
 import { EventCanonicalizer } from "./EventCanonicalizer";
@@ -27,6 +41,95 @@ import {
 } from "./dorisAnalyticsPersistence";
 
 describe("createDorisAnalyticsPersistence", () => {
+  it("wires enterprise ingestion masking into the production Doris canonicalizer", async () => {
+    const body = encodeRawAnalyticsIngestionEnvelope({
+      formatVersion: 1,
+      source: "otlp",
+      payload: [],
+      maskingContext: {
+        orgId: "org-1",
+        propagatedHeaders: {
+          "x-mask-tenant": "tenant-1",
+        },
+      },
+      attribution: {
+        ingestionApiKey: "pk-test",
+        ingestionSdkName: "python",
+        ingestionSdkVersion: "4.0.0",
+      },
+    });
+    const composition = createDorisAnalyticsPersistence({
+      runtimeEnv: {
+        LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "test-bucket",
+      },
+      prismaClient: {
+        analyticsProjectDeletionGeneration: {
+          findUnique: vi.fn(async () => null),
+        },
+      } as never,
+      storageService: {
+        downloadIfExists: vi.fn(async () => body),
+      } as never,
+      streamLoadTransport: {
+        load: vi.fn(),
+        reconcile: vi.fn(),
+      },
+      databaseName: "langfuse_test",
+      eventCanonicalizer: new EventCanonicalizer({
+        warnOnUsageTotalMismatch: vi.fn(),
+        resolvePrompt: vi.fn(async () => null),
+        resolveGenerationUsage: vi.fn(async () => null),
+      }),
+    });
+
+    await expect(
+      composition.canonicalizer.canonicalize({
+        id: "operation-1",
+        projectId: "project-1",
+        sourceChecksum: createHash("sha256").update(body).digest("hex"),
+        rawObjectKey: "raw/operation-1.json",
+        acceptedAtNanos: 1_784_383_200_123_000_000n,
+        canonicalizerVersion: "1",
+        schemaVersion: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_VALIDATION_ERROR",
+    });
+    expect(applyIngestionMasking).toHaveBeenCalledWith({
+      data: [],
+      projectId: "project-1",
+      orgId: "org-1",
+      propagatedHeaders: {
+        "x-mask-tenant": "tenant-1",
+      },
+    });
+
+    applyIngestionMasking.mockResolvedValueOnce({
+      success: false,
+      data: [],
+      masked: false,
+      error: "callback unavailable",
+    });
+    await expect(
+      composition.canonicalizer.canonicalize({
+        id: "operation-2",
+        projectId: "project-1",
+        sourceChecksum: createHash("sha256").update(body).digest("hex"),
+        rawObjectKey: "raw/operation-2.json",
+        acceptedAtNanos: 1_784_383_200_123_000_001n,
+        canonicalizerVersion: "1",
+        schemaVersion: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: "ANALYTICS_UNAVAILABLE",
+      retryable: true,
+      tags: {
+        phase: "ingestion_masking",
+        reasonCode: "MASKING_CALLBACK_FAILED",
+      },
+    });
+  });
+
   it("owns the raw canonicalizer and queue processor for the durable path", async () => {
     const order: string[] = [];
     reconcileRawAnalyticsIngestionReceipts.mockImplementationOnce(async () => {

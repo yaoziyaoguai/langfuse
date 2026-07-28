@@ -30,6 +30,11 @@ export const MAX_RAW_ANALYTICS_BYTES = 100 * 1024 * 1024;
 const REPLAY_HORIZON_MS = 7 * 24 * 60 * 60 * 1_000;
 const STATUS_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
+export type RawAnalyticsIngestionMaskingContext = {
+  readonly orgId?: string;
+  readonly propagatedHeaders?: Readonly<Record<string, string>>;
+};
+
 export type RawAnalyticsIngestionEnvelope = {
   readonly formatVersion: typeof RAW_FORMAT_VERSION;
   readonly source:
@@ -41,6 +46,7 @@ export type RawAnalyticsIngestionEnvelope = {
     | "legacy-event";
   readonly payload: unknown;
   readonly isLangfuseInternal?: boolean;
+  readonly maskingContext?: RawAnalyticsIngestionMaskingContext;
   readonly attribution: {
     readonly ingestionApiKey: string;
     readonly ingestionSdkName: string;
@@ -104,6 +110,8 @@ export function encodeRawAnalyticsIngestionEnvelope(
     !("payload" in envelope) ||
     (envelope.isLangfuseInternal !== undefined &&
       typeof envelope.isLangfuseInternal !== "boolean") ||
+    (envelope.maskingContext !== undefined && envelope.source !== "otlp") ||
+    !isValidMaskingContext(envelope.maskingContext) ||
     !envelope.attribution ||
     typeof envelope.attribution.ingestionApiKey !== "string" ||
     typeof envelope.attribution.ingestionSdkName !== "string" ||
@@ -119,6 +127,9 @@ export function encodeRawAnalyticsIngestionEnvelope(
       payload: envelope.payload,
       ...(envelope.isLangfuseInternal === true
         ? { isLangfuseInternal: true }
+        : {}),
+      ...(envelope.maskingContext
+        ? { maskingContext: envelope.maskingContext }
         : {}),
       attribution: envelope.attribution,
       ...(receipt
@@ -176,6 +187,8 @@ export function decodeRawAnalyticsIngestionEnvelope(
         envelope.source !== "legacy-event") ||
       (envelope.isLangfuseInternal !== undefined &&
         typeof envelope.isLangfuseInternal !== "boolean") ||
+      (envelope.maskingContext !== undefined && envelope.source !== "otlp") ||
+      !isValidMaskingContext(envelope.maskingContext) ||
       typeof attribution !== "object" ||
       attribution === null ||
       Array.isArray(attribution)
@@ -196,6 +209,9 @@ export function decodeRawAnalyticsIngestionEnvelope(
       source: envelope.source,
       payload: envelope.payload,
       isLangfuseInternal: envelope.isLangfuseInternal === true,
+      ...(envelope.maskingContext
+        ? { maskingContext: envelope.maskingContext }
+        : {}),
       attribution: {
         ingestionApiKey: typedAttribution.ingestionApiKey,
         ingestionSdkName: typedAttribution.ingestionSdkName,
@@ -207,6 +223,37 @@ export function decodeRawAnalyticsIngestionEnvelope(
     if (error instanceof AnalyticsPersistenceError) throw error;
     throw validationError();
   }
+}
+
+function isValidMaskingContext(
+  value: unknown,
+): value is RawAnalyticsIngestionMaskingContext | undefined {
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const context = value as Record<string, unknown>;
+  if (
+    Object.keys(context).some(
+      (key) => key !== "orgId" && key !== "propagatedHeaders",
+    )
+  ) {
+    return false;
+  }
+  if (context.orgId !== undefined && typeof context.orgId !== "string") {
+    return false;
+  }
+  if (context.propagatedHeaders === undefined) return true;
+  if (
+    typeof context.propagatedHeaders !== "object" ||
+    context.propagatedHeaders === null ||
+    Array.isArray(context.propagatedHeaders)
+  ) {
+    return false;
+  }
+  return Object.values(context.propagatedHeaders).every(
+    (headerValue) => typeof headerValue === "string",
+  );
 }
 
 function assertReceiptSeed(seed: RawAnalyticsIngestionReceiptSeed): void {
@@ -353,6 +400,9 @@ function validateExistingRaw(input: {
     payload: decoded.payload,
     ...(decoded.isLangfuseInternal === true
       ? { isLangfuseInternal: true }
+      : {}),
+    ...(decoded.maskingContext
+      ? { maskingContext: decoded.maskingContext }
       : {}),
     attribution: decoded.attribution,
   };

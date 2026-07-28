@@ -349,6 +349,31 @@ describe("Ingestion Masking", () => {
       expect(request?.headers["x-another-header"]).toBe("another-value");
     });
 
+    it("should not allow propagated headers to override trusted tenant headers", async () => {
+      const testEnv = createTestEnv({
+        LANGFUSE_INGESTION_MASKING_CALLBACK_URL:
+          "https://masking.example.com/success",
+        LANGFUSE_EE_LICENSE_KEY: VALID_EE_LICENSE_KEY,
+      });
+
+      await applyIngestionMasking(
+        {
+          data: sampleSpanData,
+          projectId: "trusted-project",
+          orgId: "trusted-org",
+          propagatedHeaders: {
+            "x-langfuse-org-id": "spoofed-org",
+            "x-langfuse-project-id": "spoofed-project",
+          },
+        },
+        testEnv,
+      );
+
+      const request = maskingServer.getLastRequest();
+      expect(request?.headers["x-langfuse-org-id"]).toBe("trusted-org");
+      expect(request?.headers["x-langfuse-project-id"]).toBe("trusted-project");
+    });
+
     it("should return original data on HTTP 500 with fail-open (default)", async () => {
       const testEnv = createTestEnv({
         LANGFUSE_INGESTION_MASKING_CALLBACK_URL:

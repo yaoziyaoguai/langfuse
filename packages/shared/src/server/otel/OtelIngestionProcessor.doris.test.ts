@@ -38,6 +38,10 @@ describe("OtelIngestionProcessor Doris acceptance", () => {
     const processor = new OtelIngestionProcessor({
       projectId: "project-1",
       publicKey: "pk-lf-test",
+      orgId: "org-1",
+      propagatedHeaders: {
+        "x-mask-tenant": "tenant-1",
+      },
       sdkName: "python",
       sdkVersion: "4.0.0",
       acceptAnalytics,
@@ -52,12 +56,18 @@ describe("OtelIngestionProcessor Doris acceptance", () => {
       expect.objectContaining({
         projectId: "project-1",
         admissionContext: null,
-        canonicalizerVersion: "1",
+        canonicalizerVersion: "2",
         schemaVersion: 1,
         envelope: {
           formatVersion: 1,
           source: "otlp",
           payload: resourceSpans,
+          maskingContext: {
+            orgId: "org-1",
+            propagatedHeaders: {
+              "x-mask-tenant": "tenant-1",
+            },
+          },
           attribution: {
             ingestionApiKey: "pk-lf-test",
             ingestionSdkName: "python",
