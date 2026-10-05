@@ -1,3 +1,10 @@
+> **Doris Community source candidate** — based on the existing personal GitHub
+> `feat/doris-storage-r1a` branch at `ff78576fa`, built on Langfuse `3.218.0`.
+> ClickHouse remains the default; Apache Doris is a deployment-level alternative.
+> This snapshot excludes later Company Edition additions. See the
+> [candidate scope and verification record](docs/plans/2026-07-21-001-feat-doris-community-parity-loop-progress.md#personal-public-candidate).
+> Upstream Enterprise source retains its separate [license](ee/LICENSE).
+
 <img width="2400" alt="hero-b (1)" src="https://github.com/user-attachments/assets/5810ae13-15d6-4b60-afd2-927adc501861" />
 
 <div align="center">

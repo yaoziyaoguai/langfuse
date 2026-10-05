@@ -2,15 +2,59 @@
 title: Doris Community Parity Agent Loop Progress
 plan: docs/plans/2026-07-21-001-feat-doris-community-parity-loop-plan.md
 baseline: 5a964434d1941b0fa879cb681f4b5b81ed8a0ccf
-branch: feat/doris-storage-r1a
-active_unit: U0
-gate_state: U0_EXTERNAL_EVIDENCE_REQUIRED
-updated: 2026-07-25
+branch: codex/personal-public
+candidate_source: ff78576fa51394ce1f80eebfb4af4f6ac8b22614
+active_unit: NONE
+gate_state: COMMUNITY_PUBLICATION_AUTHORIZED
+updated: 2026-10-05
 ---
 
 # Doris Community Parity Agent Loop Progress
 
 本文件只记录可恢复的执行状态与验证证据，不替代或修改实施计划。不得写入凭据、ownership token 或测试 payload。
+
+## Personal public candidate
+
+本工作区当前用于整理 Doris 社区功能的个人公开候选版。用户已选择保留较早的
+Doris Community 实现，排除后来新增的 Company Edition 内容。下方原有实施计划、
+Unit Ledger 和运行验证记录均为历史证据，不代表本次重新执行或生产部署通过。
+
+- 源码来源：个人 GitHub 的 `feat/doris-storage-r1a` 分支，完整提交为
+  `ff78576fa51394ce1f80eebfb4af4f6ac8b22614`；本次通过 `git ls-remote` 核对
+  远端分支仍指向该提交。
+- 上游基线：Langfuse `3.218.0`，提交
+  `85d233edc65ed65d2f0949ec86766aeac3deb719`。
+- 保留范围：ClickHouse 默认路径、可选择的 Doris analytics backend，以及该旧分支
+  已实现的 Community ingestion、查询、导出、评估、实验和 integration 能力。
+- 分离方式：从上述旧提交创建单独工作区；本轮只修改两份 README 和本记录，
+  不从公司工作区复制实现、部署配置、未跟踪文件或本地环境文件。
+- 许可边界：保留根 `LICENSE`、`ee/LICENSE` 和第三方 notices。上游 EE 源码及
+  其中一处历史 Doris Admin API 适配仍适用 `ee/LICENSE`。本候选版未改变官方
+  entitlement 和 license 校验；Community 功能不包含 Enterprise 模块的授权。
+- 结论边界：源码来源与已知公司标识的检查只能证明本轮工程隔离范围，不能单凭
+  Git 远端、作者邮箱或目录名确认代码版权归属。
+- 发布授权：用户于 2026-10-05 明确要求将本候选分支提交并推送到个人 GitHub。
+  目标为 `yaoziyaoguai/langfuse` 的 `codex/personal-public`；发布结果以远端引用
+  与本地提交的实际一致性为准。后续商业能力提取单独核对来源与依赖边界。
+
+本轮工程隔离核对已完成：
+
+- `Source isolation: passed`：4,720 个 Git 跟踪文件中，已知公司标识匹配为 0，
+  Company Edition 实现路径为 0。
+- `Candidate history: passed`：候选历史包含旧分支的 46 个 Doris 改造提交，
+  不包含后续 Company Edition 提交。
+- `License and entitlement checks: unchanged`：根许可、EE 许可、官方 license
+  校验与 entitlement 实现相对上游的差异为 0 个文件；上述一处 EE Admin API
+  历史适配仍保留并适用其原许可。
+- `Export inputs: passed`：没有凭据类命名的跟踪文件、未跟踪文件或越界符号链接。
+  源码包仅纳入 Git 跟踪文件，包含本轮文档修改；不导出 Git 元数据、其他分支历史、
+  本地环境配置或构建产物。
+- `README links: passed`；`git diff --check: passed (exit 0)`。
+- `Candidate diff: documentation only (3 files)`：本轮未修改运行时代码，因此没有
+  重跑 lint、typecheck、数据库迁移、单元测试或构建。下方旧测试结果仍是历史证据。
+
+本轮工程隔离结果限于以上已执行检查。完整秘密扫描、运行时重新验收和公司分支
+新增实现的代码归属没有由这些检查证明；所有原有许可继续保留。
 
 ## Unit Ledger
 

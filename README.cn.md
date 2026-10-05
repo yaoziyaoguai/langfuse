@@ -1,3 +1,10 @@
+> **Doris 社区功能源码候选版**：基于个人 GitHub 上的
+> `feat/doris-storage-r1a` 分支（`ff78576fa`），上游基线为 Langfuse `3.218.0`。
+> ClickHouse 保持默认，Apache Doris 可在部署时选择。本快照排除后来新增的
+> Company Edition 内容。范围与本次核对见
+> [公开候选版记录](docs/plans/2026-07-21-001-feat-doris-community-parity-loop-progress.md#personal-public-candidate)。
+> 上游 Enterprise 源码继续适用其[单独许可](ee/LICENSE)。
+
 ![Langfuse GitHub Banner](https://langfuse.com/images/docs/github-readme/github-banner.png)
 
 <div align="center">
