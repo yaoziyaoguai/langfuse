@@ -5,7 +5,7 @@ baseline: 5a964434d1941b0fa879cb681f4b5b81ed8a0ccf
 branch: codex/community-extensions
 candidate_source: ff78576fa51394ce1f80eebfb4af4f6ac8b22614
 active_unit: COMMERCIAL_CAPABILITY_EXTRACTION
-gate_state: COMMUNITY_EXTRACTION_VERIFIED
+gate_state: COMMUNITY_EXTRACTION_PUBLISHED
 updated: 2026-10-05
 ---
 
@@ -66,8 +66,14 @@ ClickHouse 默认路径和可选 Doris analytics backend 保留；下方 Unit Le
   Doris FE/BE；本轮不能把 mocked Doris 单元测试称为真实 Stream Load 验收。
 - 已明确暂存 140 个源码、配置示例与文档文件；不含本地环境、依赖、生成 SDK 差异
   或构建产物。完整秘密检查之后只调整了本文验证记录与上述测试断言。
-- 下一步：使用 noreply 身份提交，显式推送个人仓库
-  分支并核对远端引用。
+- 功能提交 `1824aeaf08d372803de1f71b422df2bd4e13854f`，作者与提交者均为
+  `yaoziyaoguai <121780480+yaoziyaoguai@users.noreply.github.com>`。提交钩子的
+  全仓格式检查与 lint 通过：`All matched files use Prettier code style!` /
+  `Tasks: 7 successful, 7 total`。
+- 已通过显式个人仓库 URL 和 ref 推送功能提交；`git ls-remote` 核对 GitHub
+  分支含有完全相同的功能提交：
+  [codex/community-extensions](https://github.com/yaoziyaoguai/langfuse/tree/codex/community-extensions)。
+- 临时验证用的四个数据库/存储容器已停止，数据卷保留。公开工作区在功能提交后为 clean。
 
 ## Unit Ledger
 
