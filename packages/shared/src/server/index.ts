@@ -147,6 +147,7 @@ export * from "./notifications";
 export * from "./orderByToPrisma";
 export * from "./filterToPrisma";
 export * from "./instrumentation";
+export * from "./community-extensions/capabilities";
 export * from "./logger";
 export * from "./headerPropagation";
 export * from "./queries";

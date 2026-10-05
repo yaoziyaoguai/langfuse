@@ -160,7 +160,9 @@ export default withMiddlewares({
 
       // Extract headers to propagate for ingestion masking
       const propagatedHeaderNames =
-        env.LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS;
+        env.LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED === "true"
+          ? env.LANGFUSE_COMMUNITY_MASKING_PROPAGATED_HEADERS
+          : env.LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS;
       const propagatedHeaders: Record<string, string> = {};
       for (const headerName of propagatedHeaderNames) {
         const value = req.headers[headerName];

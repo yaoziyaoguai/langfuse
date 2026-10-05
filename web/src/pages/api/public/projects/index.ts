@@ -2,9 +2,10 @@ import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { prisma } from "@langfuse/shared/src/db";
 import { logger, redis } from "@langfuse/shared/src/server";
-import { handleCreateProject } from "@/src/ee/features/admin-api/server/projects/createProject";
+import { handleCreateProject } from "@/src/features/admin-api/server/projects";
 import { type NextApiRequest, type NextApiResponse } from "next";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
+import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 
 export default async function handler(
   req: NextApiRequest,
@@ -96,14 +97,24 @@ export default async function handler(
     }
 
     if (
-      !hasEntitlementBasedOnPlan({
+      !hasPlanEntitlementOrCommunityCapability({
         plan: authCheck.scope.plan,
         entitlement: "admin-api",
+        capability: "admin-api",
       })
     ) {
       return res.status(403).json({
         error: "This feature is not available on your current plan.",
       });
+    }
+
+    const rateLimitCheck =
+      await RateLimitService.getInstance().rateLimitRequest(
+        authCheck.scope,
+        "public-api",
+      );
+    if (rateLimitCheck?.isRateLimited()) {
+      return rateLimitCheck.sendRestResponseIfLimited(res);
     }
 
     return handleCreateProject(req, res, authCheck.scope);

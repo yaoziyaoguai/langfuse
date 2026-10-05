@@ -6,7 +6,7 @@ import {
 } from "../trpc";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { throwIfNoOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
-import { throwIfNoEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
+import { requireEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { paginationZod } from "@langfuse/shared";
 import { AuditLogRecordType, type AuditLog } from "@langfuse/shared/src/db";
 
@@ -85,8 +85,9 @@ export const auditLogsRouter = createTRPCRouter({
     )
     .query(async ({ ctx, input }) => {
       // Check if user has access to audit logs feature
-      throwIfNoEntitlement({
+      requireEntitlementOrCommunityCapability({
         entitlement: "audit-logs",
+        capability: "audit-logs",
         sessionUser: ctx.session.user,
         projectId: input.projectId,
       });
@@ -185,8 +186,9 @@ export const auditLogsRouter = createTRPCRouter({
     )
     .query(async ({ ctx, input }) => {
       // Check if user has access to audit logs feature at org level
-      throwIfNoEntitlement({
+      requireEntitlementOrCommunityCapability({
         entitlement: "audit-logs",
+        capability: "audit-logs",
         sessionUser: ctx.session.user,
         orgId: input.orgId,
       });

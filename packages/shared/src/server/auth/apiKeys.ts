@@ -1,4 +1,4 @@
-import { PrismaClient, ApiKeyScope } from "@prisma/client";
+import { PrismaClient, ApiKeyScope, type Prisma } from "@prisma/client";
 import { compare, hash } from "bcryptjs";
 import { randomUUID } from "crypto";
 import * as crypto from "crypto";
@@ -39,7 +39,7 @@ export function createShaHash(privateKey: string, salt: string): string {
 }
 
 export async function createAndAddApiKeysToDb(p: {
-  prisma: PrismaClient;
+  prisma: PrismaClient | Prisma.TransactionClient;
   entityId: string;
   scope: ApiKeyScope;
   note?: string;

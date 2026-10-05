@@ -1,3 +1,12 @@
+> **Doris Community Extensions 个人公开版**：基于 Langfuse `3.218.0`。
+> ClickHouse 保持默认，Apache Doris 可在部署时选择。在 Web 和 Worker 同时配置
+> `LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED=true` 可启用独立的审计日志、项目 RBAC、
+> 数据保留、摄取脱敏、受保护 prompt 标签、组织创建者限制、UI 定制、Admin API 和
+> SCIM Users。开关默认关闭。
+> 配置与验证范围见[扩展指南](docs/plans/2026-10-05-community-capabilities-extraction.md)。
+> 上游 Enterprise 源码继续适用其[单独许可](ee/LICENSE)，扩展开关不会授予
+> Enterprise 许可，也不会修改官方 license 校验。
+
 ![Langfuse GitHub Banner](https://langfuse.com/images/docs/github-readme/github-banner.png)
 
 <div align="center">

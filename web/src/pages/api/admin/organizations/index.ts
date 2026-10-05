@@ -1,11 +1,11 @@
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { logger } from "@langfuse/shared/src/server";
-import { AdminApiAuthService } from "@/src/ee/features/admin-api/server/adminApiAuth";
+import { AdminApiAuthService } from "@/src/features/admin-api/server/adminApiAuth";
 import {
   handleGetOrganizations,
   handleCreateOrganization,
-} from "@/src/ee/features/admin-api/server/organizations";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+} from "@/src/features/admin-api/server/organizations";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { getSelfHostedInstancePlanServerSide } from "@/src/features/entitlements/server/getPlan";
 
 export default async function handler(
@@ -24,9 +24,10 @@ export default async function handler(
     }
 
     if (
-      !hasEntitlementBasedOnPlan({
+      !hasPlanEntitlementOrCommunityCapability({
         plan: getSelfHostedInstancePlanServerSide(),
         entitlement: "admin-api",
+        capability: "admin-api",
       })
     ) {
       return res.status(403).json({

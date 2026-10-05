@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
-import { throwIfNoEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
+import { requireEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
@@ -1378,9 +1378,10 @@ export const promptRouter = createTRPCRouter({
         scope: "prompts:read",
       });
 
-      throwIfNoEntitlement({
+      requireEntitlementOrCommunityCapability({
         projectId,
         entitlement: "prompt-protected-labels",
+        capability: "protected-prompt-labels",
         sessionUser: ctx.session.user,
       });
 
@@ -1406,9 +1407,10 @@ export const promptRouter = createTRPCRouter({
           "You don't have permission to mark a label as protected. Please contact your project admin for assistance.",
       });
 
-      throwIfNoEntitlement({
+      requireEntitlementOrCommunityCapability({
         projectId,
         entitlement: "prompt-protected-labels",
+        capability: "protected-prompt-labels",
         sessionUser: ctx.session.user,
       });
 
@@ -1460,9 +1462,10 @@ export const promptRouter = createTRPCRouter({
           "You don't have permission to mark a label as unprotected. Please contact your project admin for assistance.",
       });
 
-      throwIfNoEntitlement({
+      requireEntitlementOrCommunityCapability({
         projectId,
         entitlement: "prompt-protected-labels",
+        capability: "protected-prompt-labels",
         sessionUser: ctx.session.user,
       });
 

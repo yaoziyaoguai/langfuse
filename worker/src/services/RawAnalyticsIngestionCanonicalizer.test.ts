@@ -578,6 +578,12 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     const envelope: RawAnalyticsIngestionEnvelope = {
       formatVersion: 1,
       source: "otlp",
+      maskingContext: {
+        orgId: "org-1",
+        propagatedHeaders: {
+          "x-mask-tenant": "tenant-1",
+        },
+      },
       attribution: {
         ingestionApiKey: "pk-test",
         ingestionSdkName: "python",
@@ -595,6 +601,10 @@ describe("RawAnalyticsIngestionCanonicalizer", () => {
     expect(maskOtlp).toHaveBeenCalledWith({
       projectId: "project-1",
       resourceSpans: [],
+      orgId: "org-1",
+      propagatedHeaders: {
+        "x-mask-tenant": "tenant-1",
+      },
     });
     expect(batch.children[0]?.entity).toMatchObject({
       kind: "event",

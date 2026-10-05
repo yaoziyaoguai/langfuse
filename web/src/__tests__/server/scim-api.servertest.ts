@@ -168,7 +168,7 @@ describe("SCIM API", () => {
       expect(response.body.schemas).toContain(
         "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig",
       );
-      expect(response.body.patch.supported).toBe(false);
+      expect(response.body.patch.supported).toBe(true);
       expect(response.body.filter.supported).toBe(true);
     });
 
@@ -396,6 +396,33 @@ describe("SCIM API", () => {
         expect(response.body.Resources[0].userName).toBe(uniqueEmail);
       });
 
+      it("should reject invalid pagination instead of issuing an unbounded query", async () => {
+        const result = await makeAPICall<{ detail: string }>(
+          "GET",
+          "/api/public/scim/Users?startIndex=0&count=1000",
+          undefined,
+          createBasicAuthHeader(orgApiKey, orgSecretKey),
+        );
+
+        expect(result.status).toBe(400);
+        expect(result.body.detail).toContain("pagination");
+      });
+
+      it("should reject unsupported filters instead of listing every member", async () => {
+        const result = await makeAPICall<{
+          detail: string;
+          scimType?: string;
+        }>(
+          "GET",
+          "/api/public/scim/Users?filter=displayName%20eq%20%22someone%22",
+          undefined,
+          createBasicAuthHeader(orgApiKey, orgSecretKey),
+        );
+
+        expect(result.status).toBe(400);
+        expect(result.body.scimType).toBe("invalidFilter");
+      });
+
       it("should return 401 when invalid API keys are provided", async () => {
         const result = await makeAPICall<{ detail: string }>(
           "GET",
@@ -537,6 +564,21 @@ describe("SCIM API", () => {
         expect(result.body.detail).toContain("userName is required");
       });
 
+      it.each([{ userName: 42 }, { userName: "not-an-email" }, null])(
+        "should reject malformed user payloads",
+        async (body) => {
+          const result = await makeAPICall<{ detail: string }>(
+            "POST",
+            "/api/public/scim/Users",
+            body,
+            createBasicAuthHeader(orgApiKey, orgSecretKey),
+          );
+
+          expect(result.status).toBe(400);
+          expect(result.body.detail).toContain("userName");
+        },
+      );
+
       it("should create a new user with specified role", async () => {
         const uniqueEmail = `test.user.${randomUUID().substring(0, 8)}@example.com`;
         const response = await makeZodVerifiedAPICall(
@@ -574,6 +616,24 @@ describe("SCIM API", () => {
         });
         expect(orgMemberships.length).toBe(1);
         expect(orgMemberships[0].role).toBe("ADMIN");
+      });
+
+      it("should reject non-array roles before creating a user", async () => {
+        const uniqueEmail = `test.user.${randomUUID().substring(0, 8)}@example.com`;
+        const result = await makeAPICall<{ detail: string }>(
+          "POST",
+          "/api/public/scim/Users",
+          {
+            userName: uniqueEmail,
+            roles: "ADMIN",
+          },
+          createBasicAuthHeader(orgApiKey, orgSecretKey),
+        );
+
+        expect(result.status).toBe(400);
+        expect(
+          await prisma.user.findUnique({ where: { email: uniqueEmail } }),
+        ).toBeNull();
       });
 
       it("should write an audit log entry when creating a user", async () => {
@@ -991,6 +1051,57 @@ describe("SCIM API", () => {
         expect(result.body.detail).toContain("schemas");
       });
 
+      it("should reject invalid roles without changing the membership", async () => {
+        const before = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+
+        const result = await makeAPICall<{ detail: string }>(
+          "PUT",
+          `/api/public/scim/Users/${testUserId}`,
+          {
+            schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            id: testUserId,
+            userName: "test.user@example.com",
+            active: true,
+            roles: ["SUPER_ADMIN"],
+          },
+          createBasicAuthHeader(orgApiKey, orgSecretKey),
+        );
+
+        expect(result.status).toBe(400);
+        expect(result.body.detail).toContain("roles");
+        const after = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+        expect(after.role).toBe(before.role);
+      });
+
+      it("should reject invalid roles before deprovisioning", async () => {
+        const before = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+
+        const result = await makeAPICall<{ detail: string }>(
+          "PUT",
+          `/api/public/scim/Users/${testUserId}`,
+          {
+            schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            id: testUserId,
+            userName: "test.user@example.com",
+            active: false,
+            roles: ["SUPER_ADMIN"],
+          },
+          createBasicAuthHeader(orgApiKey, orgSecretKey),
+        );
+
+        expect(result.status).toBe(400);
+        const after = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+        expect(after.id).toBe(before.id);
+      });
+
       it("should return 404 when user does not exist", async () => {
         const nonExistentUserId = randomUUID();
         const result = await makeAPICall<{ detail: string }>(
@@ -1239,12 +1350,7 @@ describe("SCIM API", () => {
           deprovisionOp,
           patchAuth(),
         );
-        // PATCH ends by delegating to handleGet, so after a successful
-        // deprovision the user is no longer a member and the endpoint responds
-        // 404. The deprovision (and its audit log) still happened — asserted
-        // below. (PUT active:false returns 200 instead; this PATCH quirk is
-        // pre-existing and out of scope here.)
-        expect(result.status).toBe(404);
+        expect(result.status).toBe(204);
 
         const remaining = await prisma.organizationMembership.findMany({
           where: { userId: testUserId, orgId: orgId },
@@ -1261,6 +1367,58 @@ describe("SCIM API", () => {
         });
         expect(auditLogs.length).toBe(1);
         expect(auditLogs[0].before).toContain(before!.id);
+      });
+
+      it("should validate every PATCH operation before applying any mutation", async () => {
+        const before = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+
+        const result = await makeAPICall<{ detail: string }>(
+          "PATCH",
+          `/api/public/scim/Users/${testUserId}`,
+          {
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            Operations: [
+              { op: "replace", value: { active: false } },
+              { op: "add", value: { active: true } },
+            ],
+          },
+          patchAuth(),
+        );
+
+        expect(result.status).toBe(400);
+        expect(result.body.detail).toContain("Unsupported operation");
+        const after = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+        expect(after.id).toBe(before.id);
+      });
+
+      it("should reject multiple valid PATCH operations before applying any mutation", async () => {
+        const before = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+
+        const result = await makeAPICall<{ detail: string }>(
+          "PATCH",
+          `/api/public/scim/Users/${testUserId}`,
+          {
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            Operations: [
+              { op: "replace", value: { active: false } },
+              { op: "replace", value: { active: true } },
+            ],
+          },
+          patchAuth(),
+        );
+
+        expect(result.status).toBe(400);
+        expect(result.body.detail).toContain("Exactly one");
+        const after = await prisma.organizationMembership.findFirstOrThrow({
+          where: { userId: testUserId, orgId },
+        });
+        expect(after.id).toBe(before.id);
       });
     });
 
@@ -1485,12 +1643,12 @@ describe("SCIM API", () => {
     });
   });
 
-  // SCIM provisioning is gated behind the `admin-api` entitlement, matching the
-  // sibling organization admin REST endpoints (memberships, projects, apiKeys).
-  // Plans without that entitlement (e.g. Hobby) must be rejected before any
-  // user account is created or any membership is mutated.
-  describe("Entitlement gating (admin-api)", () => {
+  // SCIM is available through either the plan entitlement or the independently
+  // configured Community Extensions capability.
+  describe("SCIM capability gating", () => {
     const PLAN_DETAIL = "This feature is not available on your current plan.";
+    const communityExtensionEnabled =
+      process.env.LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED === "true";
 
     let hobbyOrgId: string;
     let hobbyPublicKey: string;
@@ -1549,7 +1707,7 @@ describe("SCIM API", () => {
       });
     });
 
-    it("POST /Users is rejected on a plan without admin-api and creates no account", async () => {
+    it("POST /Users follows plan or Community Extensions access", async () => {
       const uniqueEmail = `scim.gate.${randomUUID().substring(0, 8)}@example.com`;
       const result = await makeAPICall<{ detail: string }>(
         "POST",
@@ -1565,17 +1723,23 @@ describe("SCIM API", () => {
         createBasicAuthHeader(hobbyPublicKey, hobbySecretKey),
       );
 
-      expect(result.status).toBe(403);
-      expect(result.body.detail).toBe(PLAN_DETAIL);
-
-      // The blocked request must not have created the user account.
       const user = await prisma.user.findUnique({
         where: { email: uniqueEmail.toLowerCase() },
       });
-      expect(user).toBeNull();
+      if (communityExtensionEnabled) {
+        expect(result.status).toBe(201);
+        expect(user).not.toBeNull();
+        await prisma.user.deleteMany({
+          where: { email: uniqueEmail.toLowerCase() },
+        });
+      } else {
+        expect(result.status).toBe(403);
+        expect(result.body.detail).toBe(PLAN_DETAIL);
+        expect(user).toBeNull();
+      }
     });
 
-    it("GET /Users is rejected on a plan without admin-api", async () => {
+    it("GET /Users follows plan or Community Extensions access", async () => {
       const result = await makeAPICall<{ detail: string }>(
         "GET",
         "/api/public/scim/Users",
@@ -1583,11 +1747,13 @@ describe("SCIM API", () => {
         createBasicAuthHeader(hobbyPublicKey, hobbySecretKey),
       );
 
-      expect(result.status).toBe(403);
-      expect(result.body.detail).toBe(PLAN_DETAIL);
+      expect(result.status).toBe(communityExtensionEnabled ? 200 : 403);
+      if (!communityExtensionEnabled) {
+        expect(result.body.detail).toBe(PLAN_DETAIL);
+      }
     });
 
-    it("PUT /Users/{id} is rejected on a plan without admin-api (before user lookup)", async () => {
+    it("PUT /Users/{id} applies the gate before user lookup", async () => {
       const result = await makeAPICall<{ detail: string }>(
         "PUT",
         `/api/public/scim/Users/${randomUUID()}`,
@@ -1600,11 +1766,13 @@ describe("SCIM API", () => {
         createBasicAuthHeader(hobbyPublicKey, hobbySecretKey),
       );
 
-      expect(result.status).toBe(403);
-      expect(result.body.detail).toBe(PLAN_DETAIL);
+      expect(result.status).toBe(communityExtensionEnabled ? 404 : 403);
+      if (!communityExtensionEnabled) {
+        expect(result.body.detail).toBe(PLAN_DETAIL);
+      }
     });
 
-    it("DELETE /Users/{id} is rejected on a plan without admin-api", async () => {
+    it("DELETE /Users/{id} follows plan or Community Extensions access", async () => {
       const result = await makeAPICall<{ detail: string }>(
         "DELETE",
         `/api/public/scim/Users/${randomUUID()}`,
@@ -1612,8 +1780,10 @@ describe("SCIM API", () => {
         createBasicAuthHeader(hobbyPublicKey, hobbySecretKey),
       );
 
-      expect(result.status).toBe(403);
-      expect(result.body.detail).toBe(PLAN_DETAIL);
+      expect(result.status).toBe(communityExtensionEnabled ? 404 : 403);
+      if (!communityExtensionEnabled) {
+        expect(result.body.detail).toBe(PLAN_DETAIL);
+      }
     });
 
     it("POST /Users still succeeds on a plan with admin-api", async () => {

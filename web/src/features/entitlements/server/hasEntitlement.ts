@@ -6,7 +6,7 @@ import { TRPCError } from "@trpc/server";
 import { type Session } from "next-auth";
 import { type Plan } from "@langfuse/shared";
 
-type HasEntitlementParams = {
+export type HasEntitlementParams = {
   entitlement: Entitlement;
   sessionUser: NonNullable<Session["user"]>;
 } & ({ projectId: string } | { orgId: string });

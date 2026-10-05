@@ -4,13 +4,13 @@ import { prisma } from "@langfuse/shared/src/db";
 import { logger, redis } from "@langfuse/shared/src/server";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import {
-  handleGetMemberships,
-  handleUpdateMembership,
-  handleDeleteMembership,
-} from "@/src/ee/features/admin-api/server/memberships";
+  handleGetOrganizationMemberships,
+  handleUpdateOrganizationMembership,
+  handleDeleteOrganizationMembership,
+} from "@/src/features/admin-api/server/memberships";
 
 import { type NextApiRequest, type NextApiResponse } from "next";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 
 export default async function handler(
   req: NextApiRequest,
@@ -51,9 +51,10 @@ export default async function handler(
   }
 
   if (
-    !hasEntitlementBasedOnPlan({
+    !hasPlanEntitlementOrCommunityCapability({
       plan: authCheck.scope.plan,
       entitlement: "admin-api",
+      capability: "admin-api",
     })
   ) {
     return res.status(403).json({
@@ -73,11 +74,25 @@ export default async function handler(
   try {
     switch (req.method) {
       case "GET":
-        return handleGetMemberships(req, res, authCheck.scope.orgId);
+        return handleGetOrganizationMemberships(
+          req,
+          res,
+          authCheck.scope.orgId,
+        );
       case "PUT":
-        return handleUpdateMembership(req, res, authCheck.scope.orgId);
+        return handleUpdateOrganizationMembership(
+          req,
+          res,
+          authCheck.scope.orgId,
+          authCheck.scope.apiKeyId,
+        );
       case "DELETE":
-        return handleDeleteMembership(req, res, authCheck.scope.orgId);
+        return handleDeleteOrganizationMembership(
+          req,
+          res,
+          authCheck.scope.orgId,
+          authCheck.scope.apiKeyId,
+        );
       default:
         // This should never happen due to the check at the beginning
         return res.status(405).json({

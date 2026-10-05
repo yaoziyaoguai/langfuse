@@ -54,7 +54,7 @@ export default async function handler(
     schemas: ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
     documentationUri: "https://docs.langfuse.com/scim",
     patch: {
-      supported: false,
+      supported: true,
     },
     bulk: {
       supported: false,

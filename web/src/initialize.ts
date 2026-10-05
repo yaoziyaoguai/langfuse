@@ -2,8 +2,8 @@ import { env } from "@/src/env.mjs";
 import { createUserEmailPassword } from "@/src/features/auth-credentials/lib/credentialsServerUtils";
 import { prisma } from "@langfuse/shared/src/db";
 import { createAndAddApiKeysToDb } from "@langfuse/shared/src/server/auth/apiKeys";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { CloudConfigSchema } from "@langfuse/shared";
 import { logger } from "@langfuse/shared/src/server";
 
@@ -88,9 +88,10 @@ if (env.LANGFUSE_INIT_ORG_ID) {
   // Create Project: Org -> Project
   if (env.LANGFUSE_INIT_PROJECT_ID) {
     let retentionDays: number | null = null;
-    const hasRetentionEntitlement = hasEntitlementBasedOnPlan({
+    const hasRetentionEntitlement = hasPlanEntitlementOrCommunityCapability({
       plan: getOrganizationPlanServerSide(),
       entitlement: "data-retention",
+      capability: "data-retention",
     });
     if (env.LANGFUSE_INIT_PROJECT_RETENTION && hasRetentionEntitlement) {
       retentionDays = env.LANGFUSE_INIT_PROJECT_RETENTION;
@@ -182,9 +183,10 @@ if (env.LANGFUSE_INIT_ORG_ID) {
     // set to OWNER above. Correct it to OWNER for the init user on the init project.
     if (
       env.LANGFUSE_INIT_PROJECT_ID &&
-      hasEntitlementBasedOnPlan({
+      hasPlanEntitlementOrCommunityCapability({
         plan: getOrganizationPlanServerSide(cloudConfig),
         entitlement: "rbac-project-roles",
+        capability: "project-rbac",
       })
     ) {
       await prisma.projectMembership.upsert({

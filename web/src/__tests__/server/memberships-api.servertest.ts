@@ -31,6 +31,7 @@ describe("Memberships APIs", () => {
   let testUserId: string;
   let testApiKey: string;
   let testApiSecretKey: string;
+  let testApiKeyId: string;
 
   beforeAll(async () => {
     // Create a test organization
@@ -73,6 +74,7 @@ describe("Memberships APIs", () => {
     });
     testApiKey = apiKey.publicKey;
     testApiSecretKey = apiKey.secretKey;
+    testApiKeyId = apiKey.id;
   });
 
   afterAll(async () => {
@@ -249,6 +251,16 @@ describe("Memberships APIs", () => {
           },
         });
         expect(membership?.role).toBe(Role.OWNER);
+        const audit = await prisma.auditLog.findFirst({
+          where: {
+            apiKeyId: testApiKeyId,
+            resourceType: "projectMembership",
+            resourceId: `${testProjectId}--${testUserId}`,
+            action: "update",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        expect(audit).not.toBeNull();
       });
 
       it("should return 404 when user is not a member of the organization", async () => {
@@ -460,6 +472,55 @@ describe("Memberships APIs", () => {
           },
         });
         expect(membership?.role).toBe(Role.OWNER);
+        const audit = await prisma.auditLog.findFirst({
+          where: {
+            apiKeyId: testApiKeyId,
+            resourceType: "orgMembership",
+            resourceId: membership?.id,
+            action: "update",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        expect(audit).not.toBeNull();
+      });
+
+      it("should reject demoting the last organization owner", async () => {
+        await prisma.organizationMembership.upsert({
+          where: {
+            orgId_userId: {
+              userId: testUserId,
+              orgId: testOrgId,
+            },
+          },
+          update: { role: Role.OWNER },
+          create: {
+            userId: testUserId,
+            orgId: testOrgId,
+            role: Role.OWNER,
+          },
+        });
+
+        const result = await makeAPICall<{ error: string }>(
+          "PUT",
+          `/api/public/organizations/memberships`,
+          {
+            userId: testUserId,
+            role: Role.MEMBER,
+          },
+          createBasicAuthHeader(testApiKey, testApiSecretKey),
+        );
+
+        expect(result.status).toBe(403);
+        expect(result.body.error.toLowerCase()).toContain("last owner");
+        const membership = await prisma.organizationMembership.findUnique({
+          where: {
+            orgId_userId: {
+              userId: testUserId,
+              orgId: testOrgId,
+            },
+          },
+        });
+        expect(membership?.role).toBe(Role.OWNER);
       });
 
       it("should return 404 when user does not exist", async () => {
@@ -479,6 +540,42 @@ describe("Memberships APIs", () => {
     });
 
     describe("DELETE /api/public/organizations/memberships", () => {
+      it("should reject deleting the last organization owner", async () => {
+        await prisma.organizationMembership.upsert({
+          where: {
+            orgId_userId: {
+              userId: testUserId,
+              orgId: testOrgId,
+            },
+          },
+          update: { role: Role.OWNER },
+          create: {
+            userId: testUserId,
+            orgId: testOrgId,
+            role: Role.OWNER,
+          },
+        });
+
+        const result = await makeAPICall<{ error: string }>(
+          "DELETE",
+          `/api/public/organizations/memberships`,
+          { userId: testUserId },
+          createBasicAuthHeader(testApiKey, testApiSecretKey),
+        );
+
+        expect(result.status).toBe(403);
+        expect(result.body.error.toLowerCase()).toContain("last owner");
+        await prisma.organizationMembership.update({
+          where: {
+            orgId_userId: {
+              userId: testUserId,
+              orgId: testOrgId,
+            },
+          },
+          data: { role: Role.MEMBER },
+        });
+      });
+
       it("should delete an existing organization membership with valid API key", async () => {
         // First ensure the membership exists
         await prisma.organizationMembership.upsert({
@@ -488,7 +585,7 @@ describe("Memberships APIs", () => {
               orgId: testOrgId,
             },
           },
-          update: {},
+          update: { role: Role.MEMBER },
           create: {
             userId: testUserId,
             orgId: testOrgId,

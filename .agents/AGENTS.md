@@ -78,6 +78,12 @@ langfuse/
   - Postgres schema: `packages/shared/prisma/schema.prisma`
   - ClickHouse migrations:
     `packages/shared/clickhouse/migrations/{clustered,unclustered}/*.sql`
+- Independent Community Extensions use
+  `LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED` (default false) consistently in Web
+  and Worker. Contracts live in `packages/shared/src/features/community-extensions/`;
+  implementations live in ordinary feature folders. Keep official license
+  validation intact and run `pnpm run community:check` plus
+  `pnpm run community:check:test` when changing extension boundaries.
 - Architecture principles live in `.agents/ARCHITECTURE_PRINCIPLES.md`.
 
 ## Core Commands

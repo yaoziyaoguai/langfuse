@@ -38,7 +38,7 @@ service:
             docs: 1-based index of the first result to return (default 1)
             type: optional<integer>
           count:
-            docs: Maximum number of results to return (default 100)
+            docs: Number of results to return (1-100, default 100)
             type: optional<integer>
       response: ScimUsersListResponse
 

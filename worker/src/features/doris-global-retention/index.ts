@@ -5,6 +5,7 @@ import type {
 } from "@prisma/client";
 import {
   advanceAnalyticsRetentionRun,
+  analyticsProjectRetentionStateId,
   analyticsDurableProvenanceFromRecord,
   completeAnalyticsRetentionRun,
   countUnresolvedAnalyticsLoadsBefore,
@@ -151,9 +152,19 @@ export async function processDorisGlobalRetentionStep(input: {
   readonly retentionDays: number;
   readonly drainMs: number;
   readonly batchSize: number;
+  readonly projectId?: string;
+  readonly stateId?: string;
+  readonly onCutoffPublished?: (cutoffDate: Date) => Promise<void>;
   readonly admissionContext?: AnalyticsRuntimeAdmissionContext | null;
   readonly dependencies?: RetentionDependencies;
 }): Promise<DorisGlobalRetentionStepResult> {
+  if (
+    (input.projectId &&
+      input.stateId !== analyticsProjectRetentionStateId(input.projectId)) ||
+    (!input.projectId && input.stateId !== undefined)
+  ) {
+    throw new TypeError("Retention scope does not match its durable state");
+  }
   if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 3) {
     throw new TypeError("Invalid Doris global retention configuration");
   }
@@ -175,6 +186,7 @@ export async function processDorisGlobalRetentionStep(input: {
     client,
     retentionDays: input.retentionDays,
     admissionContext: input.admissionContext ?? null,
+    ...(input.stateId ? { stateId: input.stateId } : {}),
   });
   if (!run) return { outcome: "idle" };
 
@@ -186,6 +198,7 @@ export async function processDorisGlobalRetentionStep(input: {
       run,
       admissionContext: input.admissionContext ?? null,
       execute: async (fencedClient) => {
+        await input.onCutoffPublished?.(run.cutoffDate);
         const now = await (
           dependencies.getDatabaseNow ?? getAnalyticsRetentionDatabaseClock
         )({ client: fencedClient });
@@ -196,7 +209,11 @@ export async function processDorisGlobalRetentionStep(input: {
           const unresolvedLoads = await (
             dependencies.countUnresolvedLoads ??
             countUnresolvedAnalyticsLoadsBefore
-          )({ client: fencedClient, cutoffDate: run.cutoffDate });
+          )({
+            client: fencedClient,
+            cutoffDate: run.cutoffDate,
+            ...(input.projectId ? { projectId: input.projectId } : {}),
+          });
           if (unresolvedLoads > 0) return result("waiting", run);
         }
         if (run.phase === "COMPLETE") {
@@ -223,6 +240,7 @@ export async function processDorisGlobalRetentionStep(input: {
             cutoffDate: run.cutoffDate,
             entityType,
             limit: input.batchSize,
+            ...(input.projectId ? { projectId: input.projectId } : {}),
           });
           if (heads.length > 0) {
             await (
@@ -240,6 +258,7 @@ export async function processDorisGlobalRetentionStep(input: {
               cutoffDate: run.cutoffDate,
               entityType,
               headIds: heads.map(({ id }) => id),
+              ...(input.projectId ? { projectId: input.projectId } : {}),
             });
             if (deleted !== heads.length) {
               throw new Error("Analytics retention entity-head fence was lost");

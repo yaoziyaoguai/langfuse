@@ -5,7 +5,7 @@ import {
 } from "@/src/server/api/trpc";
 import * as z from "zod";
 import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
-import { throwIfNoEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
+import { requireEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { TRPCError } from "@trpc/server";
 import { projectNameSchema } from "@/src/features/auth/lib/projectNameSchema";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
@@ -144,8 +144,9 @@ export const projectsRouter = createTRPCRouter({
         scope: "project:update",
       });
       if (input.retention !== null && input.retention > 0) {
-        throwIfNoEntitlement({
+        requireEntitlementOrCommunityCapability({
           entitlement: "data-retention",
+          capability: "data-retention",
           sessionUser: ctx.session.user,
           projectId: input.projectId,
         });

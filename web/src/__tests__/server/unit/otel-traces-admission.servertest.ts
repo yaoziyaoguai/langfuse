@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   backend: "doris" as "clickhouse" | "doris",
+  communityEnabled: false,
+  communityHeaders: [] as string[],
+  enterpriseHeaders: [] as string[],
 }));
 
 const mocks = vi.hoisted(() => ({
@@ -23,7 +26,15 @@ vi.mock("@/src/env.mjs", () => ({
     get LANGFUSE_ANALYTICS_BACKEND() {
       return state.backend;
     },
-    LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS: [],
+    get LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED() {
+      return state.communityEnabled ? "true" : "false";
+    },
+    get LANGFUSE_COMMUNITY_MASKING_PROPAGATED_HEADERS() {
+      return state.communityHeaders;
+    },
+    get LANGFUSE_INGESTION_MASKING_PROPAGATED_HEADERS() {
+      return state.enterpriseHeaders;
+    },
   },
 }));
 
@@ -85,10 +96,13 @@ type RouteInput = {
 
 const route = handler as unknown as (input: RouteInput) => Promise<unknown>;
 
-function requestWith(resourceSpans: unknown[]): NextApiRequest {
+function requestWith(
+  resourceSpans: unknown[],
+  headers: Record<string, string> = {},
+): NextApiRequest {
   const body = Buffer.from(JSON.stringify({ resourceSpans }));
   const req = {
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     on(event: string, listener: (value?: Buffer) => void) {
       if (event === "data") listener(body);
       if (event === "end") listener();
@@ -98,14 +112,14 @@ function requestWith(resourceSpans: unknown[]): NextApiRequest {
   return req as unknown as NextApiRequest;
 }
 
-async function invokeRoute() {
+async function invokeRoute(headers: Record<string, string> = {}) {
   const resourceSpans = [{ scopeSpans: [] }];
   const res = {
     setHeader: vi.fn(),
     status: vi.fn(),
   } as unknown as NextApiResponse;
   await route({
-    req: requestWith(resourceSpans),
+    req: requestWith(resourceSpans, headers),
     res,
     auth: {
       scope: {
@@ -132,6 +146,9 @@ describe("public OTLP traces analytics admission", () => {
       status: "ACCEPTED",
     });
     state.backend = "doris";
+    state.communityEnabled = false;
+    state.communityHeaders = [];
+    state.enterpriseHeaders = [];
   });
 
   it("passes the current managed Doris admission context to the processor", async () => {
@@ -163,6 +180,23 @@ describe("public OTLP traces analytics admission", () => {
 
     expect(mocks.processorConfigs).toEqual([
       expect.objectContaining({ analyticsAdmissionContext: null }),
+    ]);
+  });
+
+  it("captures only the Community Extensions masking header allowlist", async () => {
+    state.communityEnabled = true;
+    state.communityHeaders = ["x-community-tenant"];
+    state.enterpriseHeaders = ["x-enterprise-tenant"];
+
+    await invokeRoute({
+      "x-community-tenant": "community-1",
+      "x-enterprise-tenant": "enterprise-1",
+    });
+
+    expect(mocks.processorConfigs).toEqual([
+      expect.objectContaining({
+        propagatedHeaders: { "x-community-tenant": "community-1" },
+      }),
     ]);
   });
 

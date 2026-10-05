@@ -33,10 +33,8 @@ import { Input } from "@/src/components/ui/input";
 import { Role } from "@langfuse/shared";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { useHasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
-import {
-  useHasEntitlement,
-  useEntitlementLimit,
-} from "@/src/features/entitlements/hooks";
+import { useEntitlementLimit } from "@/src/features/entitlements/hooks";
+import { useHasEntitlementOrCommunityCapability } from "@/src/features/community-extensions/hooks";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { RoleSelectItem } from "@/src/features/rbac/components/RoleSelectItem";
 import { ActionButton } from "@/src/components/ActionButton";
@@ -82,7 +80,10 @@ export function CreateProjectMemberButton(props: {
       enabled: hasOrgAccess,
     },
   ).data?.totalCount;
-  const hasProjectRoleEntitlement = useHasEntitlement("rbac-project-roles");
+  const hasProjectRoleEntitlement = useHasEntitlementOrCommunityCapability(
+    "rbac-project-roles",
+    "project-rbac",
+  );
   const hasOnlySingleProjectAccess =
     !hasOrgAccess && hasProjectAccess && hasProjectRoleEntitlement;
 

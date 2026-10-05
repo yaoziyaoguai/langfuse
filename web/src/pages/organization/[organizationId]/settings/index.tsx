@@ -20,6 +20,8 @@ import { useIsCloudBillingAvailable } from "@/src/ee/features/billing/utils/isCl
 import { env } from "@/src/env.mjs";
 import { OrgAuditLogsSettingsPage } from "@/src/ee/features/audit-log-viewer/OrgAuditLogsSettingsPage";
 import { useHasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
+import { useHasCommunityExtensionCapability } from "@/src/features/community-extensions/hooks";
+import { CommunityAuditLogsSettingsPage } from "@/src/features/community-extensions/audit-logs/CommunityAuditLogsSettingsPage";
 
 type OrganizationSettingsPage = {
   title: string;
@@ -37,7 +39,10 @@ export function useOrganizationSettingsPages(): OrganizationSettingsPage[] {
     scope: "organization:CRUD_apiKeys",
   });
   const showOrgApiKeySettings = hasAdminApiEntitlement && hasOrgApiKeyAccess;
-  const showAuditLogs = useHasEntitlement("audit-logs");
+  const hasAuditLogsEntitlement = useHasEntitlement("audit-logs");
+  const useCommunityAuditLogs =
+    useHasCommunityExtensionCapability("audit-logs");
+  const showAuditLogs = hasAuditLogsEntitlement || useCommunityAuditLogs;
   const plan = usePlan();
   const isLangfuseCloud = isCloudPlan(plan) ?? false;
   const isCloudBillingAvailable = useIsCloudBillingAvailable();
@@ -49,6 +54,7 @@ export function useOrganizationSettingsPages(): OrganizationSettingsPage[] {
     showBillingSettings: showBillingSettings && isCloudBillingAvailable,
     showOrgApiKeySettings,
     showAuditLogs,
+    useCommunityAuditLogs,
     isLangfuseCloud,
   });
 }
@@ -58,12 +64,14 @@ export const getOrganizationSettingsPages = ({
   showBillingSettings,
   showOrgApiKeySettings,
   showAuditLogs,
+  useCommunityAuditLogs = false,
   isLangfuseCloud,
 }: {
   organization: { id: string; name: string; metadata: Record<string, unknown> };
   showBillingSettings: boolean;
   showOrgApiKeySettings: boolean;
   showAuditLogs: boolean;
+  useCommunityAuditLogs?: boolean;
   isLangfuseCloud: boolean;
 }): OrganizationSettingsPage[] => [
   {
@@ -131,7 +139,11 @@ export const getOrganizationSettingsPages = ({
     title: "Audit Logs",
     slug: "audit-logs",
     cmdKKeywords: ["audit", "logs", "history", "changes"],
-    content: <OrgAuditLogsSettingsPage orgId={organization.id} />,
+    content: useCommunityAuditLogs ? (
+      <CommunityAuditLogsSettingsPage orgId={organization.id} />
+    ) : (
+      <OrgAuditLogsSettingsPage orgId={organization.id} />
+    ),
     show: showAuditLogs,
   },
   {

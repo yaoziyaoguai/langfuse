@@ -533,6 +533,77 @@ const EnvSchema = z.object({
   // EE License
   LANGFUSE_EE_LICENSE_KEY: z.string().optional(),
 
+  // 默认关闭的独立自托管扩展。
+  LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_COMMUNITY_MASKING_CALLBACK_URL: z
+    .url()
+    .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+      message: "Community masking callback must use HTTP or HTTPS",
+    })
+    .optional(),
+  LANGFUSE_COMMUNITY_MASKING_CALLBACK_TIMEOUT_MS: z.coerce
+    .number()
+    .positive()
+    .max(60_000)
+    .default(500),
+  LANGFUSE_COMMUNITY_MASKING_CALLBACK_FAIL_CLOSED: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_COMMUNITY_MASKING_MAX_RETRIES: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(5)
+    .default(1),
+  LANGFUSE_COMMUNITY_MASKING_PROPAGATED_HEADERS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? [
+            ...new Set(
+              value
+                .split(",")
+                .map((header) => header.toLowerCase().trim())
+                .filter(Boolean),
+            ),
+          ]
+        : [],
+    ),
+
+  LANGFUSE_COMMUNITY_MASKING_WHITELISTED_HOST: z
+    .string()
+    .optional()
+    .transform(
+      (value) =>
+        value
+          ?.split(",")
+          .map((item) => item.trim())
+          .filter(Boolean) ?? [],
+    ),
+  LANGFUSE_COMMUNITY_MASKING_WHITELISTED_IPS: z
+    .string()
+    .optional()
+    .transform(
+      (value) =>
+        value
+          ?.split(",")
+          .map((item) => item.trim())
+          .filter(Boolean) ?? [],
+    ),
+  LANGFUSE_COMMUNITY_MASKING_WHITELISTED_IP_SEGMENTS: z
+    .string()
+    .optional()
+    .transform(
+      (value) =>
+        value
+          ?.split(",")
+          .map((item) => item.trim())
+          .filter(Boolean) ?? [],
+    ),
+
   // Ingestion Masking (EE feature)
   LANGFUSE_INGESTION_MASKING_CALLBACK_URL: z.url().optional(),
   LANGFUSE_INGESTION_MASKING_CALLBACK_TIMEOUT_MS: z.coerce

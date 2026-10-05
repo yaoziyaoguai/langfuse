@@ -2,12 +2,13 @@ import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { prisma } from "@langfuse/shared/src/db";
 import { logger, redis } from "@langfuse/shared/src/server";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import {
-  handleGetMemberships,
-  handleUpdateMembership,
-  handleDeleteMembership,
-} from "@/src/ee/features/admin-api/server/projects/projectById/memberships";
+  handleGetProjectMemberships,
+  handleUpdateProjectMembership,
+  handleDeleteProjectMembership,
+} from "@/src/features/admin-api/server/memberships";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
+import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 
 import { type NextApiRequest, type NextApiResponse } from "next";
 
@@ -58,9 +59,10 @@ export default async function handler(
 
   // Check if organization has the rbac-project-roles entitlement
   if (
-    !hasEntitlementBasedOnPlan({
+    !hasPlanEntitlementOrCommunityCapability({
       plan: authCheck.scope.plan,
       entitlement: "rbac-project-roles",
+      capability: "project-rbac",
     })
   ) {
     return res.status(403).json({
@@ -70,14 +72,23 @@ export default async function handler(
 
   // Check for admin-api entitlement
   if (
-    !hasEntitlementBasedOnPlan({
+    !hasPlanEntitlementOrCommunityCapability({
       plan: authCheck.scope.plan,
       entitlement: "admin-api",
+      capability: "admin-api",
     })
   ) {
     return res.status(403).json({
       error: "This feature is not available on your current plan.",
     });
+  }
+
+  const rateLimitCheck = await RateLimitService.getInstance().rateLimitRequest(
+    authCheck.scope,
+    "public-api",
+  );
+  if (rateLimitCheck?.isRateLimited()) {
+    return rateLimitCheck.sendRestResponseIfLimited(res);
   }
 
   // Verify the project belongs to the organization
@@ -99,20 +110,27 @@ export default async function handler(
   try {
     switch (req.method) {
       case "GET":
-        return handleGetMemberships(req, res, projectId, authCheck.scope.orgId);
-      case "PUT":
-        return handleUpdateMembership(
+        return handleGetProjectMemberships(
           req,
           res,
           projectId,
           authCheck.scope.orgId,
         );
-      case "DELETE":
-        return handleDeleteMembership(
+      case "PUT":
+        return handleUpdateProjectMembership(
           req,
           res,
           projectId,
           authCheck.scope.orgId,
+          authCheck.scope.apiKeyId,
+        );
+      case "DELETE":
+        return handleDeleteProjectMembership(
+          req,
+          res,
+          projectId,
+          authCheck.scope.orgId,
+          authCheck.scope.apiKeyId,
         );
       default:
         // This should never happen due to the check at the beginning

@@ -25,6 +25,8 @@ Use root [AGENTS.md](../../AGENTS.md) for monorepo-level rules.
 - Main exports: `src/index.ts`
 - DB clients and types: `src/db.ts`
 - Server exports: `src/server/index.ts`
+- Community capability contract: `src/features/community-extensions/capabilities.ts`
+- Independent masking service: `src/server/community-extensions/ingestion-masking/`
 - Server cache utilities: `src/server/cache/*`
 - Domain model types: `src/domain/*`
 - Repository layer: `src/server/repositories/*`
@@ -70,6 +72,9 @@ Use root [AGENTS.md](../../AGENTS.md) for monorepo-level rules.
   `@langfuse/shared/src/server/auth/apiKeys`,
   `@langfuse/shared/src/server/ee/ingestionMasking`, and
   `@langfuse/shared/src/utils/chatml`.
+- `@langfuse/shared/src/server/ingestion-masking`: backend-neutral adapter;
+  it loads the independent callback when extensions are enabled and preserves
+  the upstream adapter otherwise. Production exports must point to `dist`.
 
 When changing export surfaces, keep `package.json#exports`, the relevant barrel
 file (`src/index.ts`, `src/server/index.ts`, etc.), and this guide aligned in

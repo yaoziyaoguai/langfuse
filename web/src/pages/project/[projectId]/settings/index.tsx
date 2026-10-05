@@ -34,6 +34,11 @@ import { PersonalNotificationSettings } from "@/src/features/notifications/compo
 import { ProjectNotificationChannels } from "@/src/features/notifications/components/ProjectNotificationChannels";
 import { WebCalloutIntegrationCard } from "@/src/features/web-callouts/components/WebCalloutSettingsPage";
 import { DeveloperToolsSettings } from "@/src/features/developer-tools/components/DeveloperToolsSettings";
+import {
+  useHasCommunityExtensionCapability,
+  useHasEntitlementOrCommunityCapability,
+} from "@/src/features/community-extensions/hooks";
+import { CommunityAuditLogsSettingsPage } from "@/src/features/community-extensions/audit-logs/CommunityAuditLogsSettingsPage";
 
 type ProjectSettingsPage = {
   title: string;
@@ -46,10 +51,16 @@ export function useProjectSettingsPages(): ProjectSettingsPage[] {
   const router = useRouter();
   const { project, organization } = useQueryProject();
   const showBillingSettings = useHasEntitlement("cloud-billing");
-  const showRetentionSettings = useHasEntitlement("data-retention");
-  const showProtectedLabelsSettings = useHasEntitlement(
-    "prompt-protected-labels",
+  const showRetentionSettings = useHasEntitlementOrCommunityCapability(
+    "data-retention",
+    "data-retention",
   );
+  const showProtectedLabelsSettings = useHasEntitlementOrCommunityCapability(
+    "prompt-protected-labels",
+    "protected-prompt-labels",
+  );
+  const useCommunityAuditLogs =
+    useHasCommunityExtensionCapability("audit-logs");
   if (!project || !organization || !router.query.projectId) {
     return [];
   }
@@ -61,6 +72,7 @@ export function useProjectSettingsPages(): ProjectSettingsPage[] {
     showRetentionSettings,
     showLLMConnectionsSettings: true,
     showProtectedLabelsSettings,
+    useCommunityAuditLogs,
   });
 }
 
@@ -71,6 +83,7 @@ export const getProjectSettingsPages = ({
   showRetentionSettings,
   showLLMConnectionsSettings,
   showProtectedLabelsSettings,
+  useCommunityAuditLogs = false,
 }: {
   project: { id: string; name: string; metadata: Record<string, unknown> };
   organization: { id: string; name: string; metadata: Record<string, unknown> };
@@ -78,6 +91,7 @@ export const getProjectSettingsPages = ({
   showRetentionSettings: boolean;
   showLLMConnectionsSettings: boolean;
   showProtectedLabelsSettings: boolean;
+  useCommunityAuditLogs?: boolean;
 }): ProjectSettingsPage[] => [
   {
     title: "General",
@@ -236,7 +250,11 @@ export const getProjectSettingsPages = ({
     title: "Audit Logs",
     slug: "audit-logs",
     cmdKKeywords: ["trail"],
-    content: <AuditLogsSettingsPage projectId={project.id} />,
+    content: useCommunityAuditLogs ? (
+      <CommunityAuditLogsSettingsPage projectId={project.id} />
+    ) : (
+      <AuditLogsSettingsPage projectId={project.id} />
+    ),
   },
   {
     title: "Notifications",

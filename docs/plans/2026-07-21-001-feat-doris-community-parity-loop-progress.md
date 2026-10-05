@@ -2,15 +2,72 @@
 title: Doris Community Parity Agent Loop Progress
 plan: docs/plans/2026-07-21-001-feat-doris-community-parity-loop-plan.md
 baseline: 5a964434d1941b0fa879cb681f4b5b81ed8a0ccf
-branch: feat/doris-storage-r1a
-active_unit: U0
-gate_state: U0_EXTERNAL_EVIDENCE_REQUIRED
-updated: 2026-07-25
+branch: codex/community-extensions
+candidate_source: ff78576fa51394ce1f80eebfb4af4f6ac8b22614
+active_unit: COMMERCIAL_CAPABILITY_EXTRACTION
+gate_state: COMMUNITY_EXTRACTION_VERIFIED
+updated: 2026-10-05
 ---
 
 # Doris Community Parity Agent Loop Progress
 
 本文件只记录可恢复的执行状态与验证证据，不替代或修改实施计划。不得写入凭据、ownership token 或测试 payload。
+
+## Personal public candidate
+
+本分支从个人 Doris 社区源码 `ff78576fa51394ce1f80eebfb4af4f6ac8b22614`
+延续，上游为 Langfuse `3.218.0`（`85d233edc65ed65d2f0949ec86766aeac3deb719`）。
+ClickHouse 默认路径和可选 Doris analytics backend 保留；下方 Unit Ledger 与旧运行
+记录是历史证据，不能作为本轮重新执行的结果。
+
+## Community Extensions 2026-10-05
+
+- 当前目标：在 `codex/community-extensions` 提交并推送有权公开的独立实现，
+  使用个人 GitHub noreply 身份，只携带公开源码和配置示例。
+- 已实现九项 capability、默认关闭的 `LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED`、
+  Web/shared/Worker 接入和静态边界检查；配置指南见
+  [Community Extensions](2026-10-05-community-capabilities-extraction.md)。
+- 官方 license、plan 和签名校验保留；独立 retention 按 MIT 存储契约实现，
+  历史 EE helpers 未复制。独立扩展目录直接 EE import 为 0。
+- 最终类型检查与 lint 均为 `Tasks: 7 successful, 7 total`；shared
+  `Test Files 7 passed (7)` / `Tests 45 passed (45)`；Worker
+  `Test Files 7 passed (7)` / `Tests 38 passed (38)`；Web server unit
+  `Test Files 6 passed (6)` / `Tests 17 passed (17)`；client
+  `Test Files 2 passed (2)` / `Tests 4 passed (4)`。
+- 生产 `build:check --concurrency=1`：`Tasks: 7 successful, 7 total`；
+  对 `web/.next-check/static` 运行客户端产物扫描：`scanned 645 files in 47.4s` /
+  `clean: every referenced identifier is declared or a known global`。
+  全仓格式检查：`All matched files use Prettier code style!`。
+- 最终类型检查发现新增 members 测试直接读取联合返回类型的字段；改为校验返回
+  对象所含的角色，保留独立数据库状态断言。重新检查类型通过，该真实数据库套件
+  为 `Test Files 1 passed (1)` / `Tests 17 passed (17)`。
+- 自托管真实 Web API 与 DB 检查：`Test Files 8 passed (8)` /
+  `Tests 171 passed (171)`，覆盖 Admin/SCIM/memberships、最后一个 owner、
+  项目/组织隔离、scope 与扩展开关。独立本地数据库使用仓库 seeder 初始化。
+- SFDC adapter 先复现 `Tests 2 failed (2)`，修复后 `Tests 2 passed (2)`；
+  自托管部署不加载上游 Cloud 集成，Cloud 保留原有服务行为。
+- Fern 3.88.0：`[server]: ✓ All checks passed`；Python 与 TypeScript generator
+  均 `Finished.`，重新生成未产生 SDK 文件差异。Colima 未共享本工作区；通过临时
+  Docker API 文件传输完成生成，没有手改 `generated/**`。
+- 静态边界：`Community Extensions boundaries: valid`；检查器回归
+  `tests 2` / `pass 2` / `fail 0`。`agents:sync` 与 `agents:check` 均退出 0。
+- 真实浏览器（Codex In-app Browser）：公开 seed 账号登录；OSS 标记保留；
+  audit 列表/详情、protected-label 控件、可编辑项目角色与 retention 控件正常；
+  Playground 按配置隐藏；捕获的 console errors 为 0。
+- 最终暂存树发布文本检查：4,746 个文本文件中已知非公开组织标识匹配为 0；ancestor identity
+  与 Doris 自定义历史 marker 检查通过。Gitleaks 检查 46 个自定义历史提交，8 个
+  命中已核对为公开 fixture、实体 ID 或文档词组，没有未解决的实际凭据。
+- 完整暂存源码的 Gitleaks 原始检查退出 1，报告 55 个命中；逐项与社区基线源码
+  比对后，新增匹配为 0。命中为公开配置示例、CI 变量引用、fixture/实体 ID、模型
+  名称、文档词组与上游公开客户端 key，没有未解决的实际凭据。
+- 真实 PostgreSQL retention provenance 检查：`Test Files 1 passed (1)` /
+  `Tests 1 passed (1)`；使用隔离数据库，运行后已清理。
+- 当前 Docker VM 总内存约 5.8 GiB，已有其他服务，未部署要求合计 7 GiB 限额的
+  Doris FE/BE；本轮不能把 mocked Doris 单元测试称为真实 Stream Load 验收。
+- 已明确暂存 140 个源码、配置示例与文档文件；不含本地环境、依赖、生成 SDK 差异
+  或构建产物。完整秘密检查之后只调整了本文验证记录与上述测试断言。
+- 下一步：使用 noreply 身份提交，显式推送个人仓库
+  分支并核对远端引用。
 
 ## Unit Ledger
 

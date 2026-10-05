@@ -5,8 +5,9 @@ import { logger, redis } from "@langfuse/shared/src/server";
 import {
   handleUpdateProject,
   handleDeleteProject,
-} from "@/src/ee/features/admin-api/server/projects/projectById";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+} from "@/src/features/admin-api/server/projects";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
+import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import { type NextApiRequest, type NextApiResponse } from "next";
 
 export default async function handler(
@@ -52,14 +53,23 @@ export default async function handler(
   // END CHECK AUTH
 
   if (
-    !hasEntitlementBasedOnPlan({
+    !hasPlanEntitlementOrCommunityCapability({
       plan: authCheck.scope.plan,
       entitlement: "admin-api",
+      capability: "admin-api",
     })
   ) {
     return res.status(403).json({
       error: "This feature is not available on your current plan.",
     });
+  }
+
+  const rateLimitCheck = await RateLimitService.getInstance().rateLimitRequest(
+    authCheck.scope,
+    "public-api",
+  );
+  if (rateLimitCheck?.isRateLimited()) {
+    return rateLimitCheck.sendRestResponseIfLimited(res);
   }
 
   // Check if project exists and belongs to the organization

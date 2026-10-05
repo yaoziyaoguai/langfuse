@@ -1,3 +1,14 @@
+> **Doris Community Extensions**: a personal fork based on Langfuse `3.218.0`.
+> ClickHouse remains the default; Apache Doris is a deployment-level alternative.
+> Set `LANGFUSE_COMMUNITY_EXTENSIONS_ENABLED=true` on both Web and Worker to enable
+> independent audit logs, project RBAC, data retention, ingestion masking,
+> protected prompt labels, organization creator restrictions, UI customization,
+> Admin API, and SCIM Users. The switch defaults to `false`.
+> See the [extension guide](docs/plans/2026-10-05-community-capabilities-extraction.md)
+> for configuration and verification limits. Upstream Enterprise source retains
+> its separate [license](ee/LICENSE); the extension switch does not grant an
+> Enterprise license or change official license validation.
+
 <img width="2400" alt="hero-b (1)" src="https://github.com/user-attachments/assets/5810ae13-15d6-4b60-afd2-927adc501861" />
 
 <div align="center">

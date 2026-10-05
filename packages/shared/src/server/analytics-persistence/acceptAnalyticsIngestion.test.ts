@@ -35,6 +35,74 @@ const managedProvenance: AnalyticsDurableProvenance = {
 const legacyAdmission = vi.fn(async () => null);
 
 describe("acceptAnalyticsIngestion", () => {
+  it("round-trips durable masking context for OTLP replay", () => {
+    const body = encodeRawAnalyticsIngestionEnvelope({
+      ...envelope,
+      maskingContext: {
+        orgId: "org-1",
+        propagatedHeaders: {
+          "x-mask-tenant": "tenant-1",
+        },
+      },
+    });
+
+    expect(decodeRawAnalyticsIngestionEnvelope(body)).toMatchObject({
+      maskingContext: {
+        orgId: "org-1",
+        propagatedHeaders: {
+          "x-mask-tenant": "tenant-1",
+        },
+      },
+    });
+  });
+
+  it("rejects malformed or non-OTLP masking context", () => {
+    expect(() =>
+      decodeRawAnalyticsIngestionEnvelope(
+        JSON.stringify({
+          ...envelope,
+          maskingContext: {
+            propagatedHeaders: {
+              "x-mask-tenant": 42,
+            },
+          },
+        }),
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ANALYTICS_VALIDATION_ERROR",
+      }),
+    );
+    expect(() =>
+      decodeRawAnalyticsIngestionEnvelope(
+        JSON.stringify({
+          ...envelope,
+          maskingContext: {
+            orgId: "org-1",
+            unexpected: "value",
+          },
+        }),
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ANALYTICS_VALIDATION_ERROR",
+      }),
+    );
+    expect(() =>
+      encodeRawAnalyticsIngestionEnvelope({
+        ...envelope,
+        source: "score",
+        maskingContext: {
+          orgId: "org-1",
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ANALYTICS_VALIDATION_ERROR",
+      }),
+    );
+  });
+
   it("creates a pending ledger receipt before raw upload and publishes it afterwards", async () => {
     const order: string[] = [];
     const uploadFileIfAbsent = vi.fn(async () => {
@@ -110,15 +178,27 @@ describe("acceptAnalyticsIngestion", () => {
   });
 
   it("reconciles an identical prior raw write but rejects a checksum collision", async () => {
-    const body = encodeRawAnalyticsIngestionEnvelope(envelope, {
-      operationId: "operation-1",
-      projectId: "project-1",
-      sourceOperationId: "operation-1",
-      acceptedAt,
-      acceptedAtNanos: 1_784_383_200_123_000_000n,
-      canonicalizerVersion: "r1a-v1",
-      schemaVersion: 3,
-    });
+    const envelopeWithMaskingContext = {
+      ...envelope,
+      maskingContext: {
+        orgId: "org-1",
+        propagatedHeaders: {
+          "x-mask-tenant": "tenant-1",
+        },
+      },
+    };
+    const body = encodeRawAnalyticsIngestionEnvelope(
+      envelopeWithMaskingContext,
+      {
+        operationId: "operation-1",
+        projectId: "project-1",
+        sourceOperationId: "operation-1",
+        acceptedAt,
+        acceptedAtNanos: 1_784_383_200_123_000_000n,
+        canonicalizerVersion: "r1a-v1",
+        schemaVersion: 3,
+      },
+    );
     const createReceipt = vi.fn(async (input) => ({
       operation: { id: input.operationId } as AnalyticsIngestionOperation,
       created: true,
@@ -126,7 +206,7 @@ describe("acceptAnalyticsIngestion", () => {
     const base = {
       projectId: "project-1",
       operationId: "operation-1",
-      envelope,
+      envelope: envelopeWithMaskingContext,
       acceptedAt: new Date("2026-07-19T14:00:00.123Z"),
       canonicalizerVersion: "r1a-v1",
       schemaVersion: 3,

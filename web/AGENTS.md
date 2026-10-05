@@ -29,6 +29,10 @@ Use root [AGENTS.md](../AGENTS.md) for monorepo-level rules.
 - Public REST API routes: `src/pages/api/public/*`
 - Unstable public eval APIs: `src/pages/api/public/unstable/{evaluators,evaluation-rules}/*`
 - Feature modules: `src/features/*`
+- Independent Community access, hooks, and audit UI: `src/features/community-extensions/*`
+- Admin API handlers: `src/features/admin-api/server/*`
+- UI customization and product navigation: `src/features/ui-customization/*`
+- Upstream Cloud-only SFDC bridge: `src/features/sfdc-sync/server/getOptionalSfdcService.ts`
 - Reusable UI components: `src/components/*`
 - Tests:
   - Server integration tests: `src/__tests__/server/*.servertest.ts`

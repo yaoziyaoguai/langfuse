@@ -67,6 +67,7 @@ vi.mock("@/src/features/audit-logs/auditLog", () => ({
 }));
 
 vi.mock("@/src/features/entitlements/server/hasEntitlement", () => ({
+  hasEntitlement: vi.fn(() => true),
   hasEntitlementBasedOnPlan: vi.fn(() => true),
 }));
 
@@ -78,7 +79,7 @@ vi.mock("@/src/features/auth/lib/projectRetentionSchema", () => ({
   projectRetentionSchema: { parse: vi.fn() },
 }));
 
-import { handleDeleteProject } from "@/src/ee/features/admin-api/server/projects/projectById";
+import { handleDeleteProject } from "@/src/features/admin-api/server/projects";
 
 const projectId = "project-1";
 const orgId = "org-1";

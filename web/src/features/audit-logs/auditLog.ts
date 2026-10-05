@@ -98,6 +98,48 @@ function isPrismaClient(
   );
 }
 
+const REDACTED_AUDIT_VALUE = "[REDACTED]";
+
+function isSensitiveAuditField(key: string): boolean {
+  const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+
+  return (
+    normalized === "authorization" ||
+    normalized === "api_key" ||
+    normalized === "secret" ||
+    normalized === "token" ||
+    normalized === "password" ||
+    normalized === "secret_key" ||
+    normalized === "secret_access_key" ||
+    normalized === "encryption_key" ||
+    normalized === "signing_key" ||
+    normalized === "private_key" ||
+    normalized === "credentials" ||
+    normalized === "auth_config" ||
+    normalized === "extra_headers" ||
+    normalized.endsWith("_secret") ||
+    normalized.endsWith("_token") ||
+    normalized.endsWith("_password") ||
+    normalized.endsWith("_api_key") ||
+    normalized.endsWith("_secret_key") ||
+    normalized.endsWith("_secret_access_key") ||
+    normalized.endsWith("_encryption_key") ||
+    normalized.endsWith("_signing_key") ||
+    normalized.endsWith("_private_key") ||
+    normalized.endsWith("_credentials") ||
+    normalized.endsWith("_request_headers") ||
+    normalized.startsWith("password_")
+  );
+}
+
+function serializeAuditValue(value: unknown): string {
+  return JSON.stringify(value, (key, item: unknown) => {
+    // 审计记录是长期保存的数据，凭据字段必须在进入数据库前统一脱敏。
+    if (key && isSensitiveAuditField(key)) return REDACTED_AUDIT_VALUE;
+    return typeof item === "bigint" ? item.toString() : item;
+  });
+}
+
 export async function auditLog(
   log: AuditLog,
   prisma?: typeof _prisma | Prisma.TransactionClient,
@@ -107,8 +149,8 @@ export async function auditLog(
     resourceType: log.resourceType,
     resourceId: log.resourceId,
     action: log.action,
-    before: log.before ? JSON.stringify(log.before) : undefined,
-    after: log.after ? JSON.stringify(log.after) : undefined,
+    before: log.before ? serializeAuditValue(log.before) : undefined,
+    after: log.after ? serializeAuditValue(log.after) : undefined,
   };
 
   if ("apiKeyId" in log) {

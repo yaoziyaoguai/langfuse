@@ -70,6 +70,10 @@
     "./monitors/server": {
       "import": "./dist/src/features/monitors/server.js",
       "require": "./dist/src/features/monitors/server.js"
+    },
+    "./src/server/ingestion-masking": {
+      "import": "./dist/src/server/ingestion-masking/index.js",
+      "require": "./dist/src/server/ingestion-masking/index.js"
     }
   },
   "scripts": {

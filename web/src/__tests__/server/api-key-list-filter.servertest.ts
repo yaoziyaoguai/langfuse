@@ -3,10 +3,12 @@ import {
   createAndAddApiKeysToDb,
   createOrgProjectAndApiKey,
 } from "@langfuse/shared/src/server";
-import { handleGetApiKeys as handleGetProjectApiKeys } from "@/src/ee/features/admin-api/server/projects/projectById/apiKeys";
-import { handleDeleteApiKey as handleDeleteProjectApiKey } from "@/src/ee/features/admin-api/server/projects/projectById/apiKeys/apiKeyById";
-import { handleGetApiKeys as handleGetOrganizationApiKeys } from "@/src/ee/features/admin-api/server/organizations/apiKeys";
-import { handleDeleteApiKey as handleDeleteOrganizationApiKey } from "@/src/ee/features/admin-api/server/organizations/apiKeys/apiKeyById";
+import {
+  handleDeleteOrganizationApiKey,
+  handleDeleteProjectApiKey,
+  handleGetOrganizationApiKeys,
+  handleGetProjectApiKeys,
+} from "@/src/features/admin-api/server/apiKeys";
 import type { NextApiRequest, NextApiResponse } from "next";
 
 function createMockResponse() {

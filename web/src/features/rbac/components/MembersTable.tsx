@@ -22,7 +22,7 @@ import { Role } from "@langfuse/shared";
 import { Trash } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { Alert, AlertDescription, AlertTitle } from "@/src/components/ui/alert";
-import { useHasEntitlement } from "@/src/features/entitlements/hooks";
+import { useHasEntitlementOrCommunityCapability } from "@/src/features/community-extensions/hooks";
 import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { RoleSelectItem } from "@/src/features/rbac/components/RoleSelectItem";
@@ -144,7 +144,10 @@ export function MembersTable({
     scope: "projectMembers:CUD",
   });
 
-  const projectRolesEntitlement = useHasEntitlement("rbac-project-roles");
+  const projectRolesEntitlement = useHasEntitlementOrCommunityCapability(
+    "rbac-project-roles",
+    "project-rbac",
+  );
 
   const columns: LangfuseColumnDef<MembersTableRow>[] = [
     {

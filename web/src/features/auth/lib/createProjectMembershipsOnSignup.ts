@@ -2,8 +2,8 @@ import { env } from "@/src/env.mjs";
 import { prisma, Role } from "@langfuse/shared/src/db";
 import { logger } from "@langfuse/shared/src/server";
 import { ServerPosthog } from "@/src/features/posthog-analytics/ServerPosthog";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { shouldAutoEnableV4 } from "@/src/features/events/lib/v4Rollout";
 import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
 import { canCreateOrganizations } from "@/src/features/organizations/server/canCreateOrganizations";
@@ -96,9 +96,10 @@ export async function createProjectMembershipsOnSignup(
     // Project-level role assignments require the rbac-project-roles entitlement.
     // Without it, users inherit their org role for all projects, so we only need
     // to ensure org membership exists (handled above and in path 2 below).
-    const hasProjectRolesEntitlement = hasEntitlementBasedOnPlan({
+    const hasProjectRolesEntitlement = hasPlanEntitlementOrCommunityCapability({
       plan: getOrganizationPlanServerSide(),
       entitlement: "rbac-project-roles",
+      capability: "project-rbac",
     });
 
     for (const project of defaultProjects) {
@@ -165,7 +166,7 @@ export async function createProjectMembershipsOnSignup(
     // why the invitation lookup for the lead source runs here, while the
     // invitations still exist.
     if (options?.userWasJustCreated || isNewUser) {
-      const sfdcService = getSfdcService();
+      const sfdcService = await getSfdcService();
       if (sfdcService) {
         const dbUser = await prisma.user.findUnique({
           where: { id: user.id },
@@ -207,13 +208,17 @@ export async function createProjectMembershipsOnSignup(
       });
 
       if (starterOrg) {
-        await getSfdcService()?.upsertOrg({
+        await (
+          await getSfdcService()
+        )?.upsertOrg({
           orgId: starterOrg.organization.id,
           orgName: starterOrg.organization.name,
           createdAt: starterOrg.organization.createdAt,
           plan: "Hobby",
         });
-        await getSfdcService()?.setUserRole({
+        await (
+          await getSfdcService()
+        )?.setUserRole({
           orgId: starterOrg.organization.id,
           userId: user.id,
           email: user.email,
@@ -362,8 +367,8 @@ async function processMembershipInvitations(email: string, userId: string) {
 
   // SFDC: link the freshly-created lead to each org as an org-member.
   await Promise.all(
-    invitationsForUser.map((invitation) =>
-      getSfdcService()?.setUserRole({
+    invitationsForUser.map(async (invitation) =>
+      (await getSfdcService())?.setUserRole({
         orgId: invitation.orgId,
         userId,
         email,

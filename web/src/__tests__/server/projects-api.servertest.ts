@@ -82,7 +82,7 @@ const ApiKeyDeletionResponseSchema = z.object({
 describe("Projects API", () => {
   // Test variables
   const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
-  const projectName = "Seed Project";
+  let projectName: string;
   const projectApiKey = "pk-lf-1234567890";
   const projectSecretKey = "sk-lf-1234567890";
   const invalidApiKey = "pk-lf-invalid";
@@ -91,6 +91,11 @@ describe("Projects API", () => {
   const orgSecretKey = `sk-lf-org-${randomUUID().substring(0, 8)}`;
 
   beforeAll(async () => {
+    const project = await prisma.project.findUniqueOrThrow({
+      where: { id: projectId },
+      select: { name: true },
+    });
+    projectName = project.name;
     await createAndAddApiKeysToDb({
       prisma,
       entityId: "seed-org-id",

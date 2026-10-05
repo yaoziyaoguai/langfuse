@@ -1,6 +1,6 @@
 import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
-import { prisma } from "@langfuse/shared/src/db";
+import { Prisma, prisma } from "@langfuse/shared/src/db";
 import { logger, redis } from "@langfuse/shared/src/server";
 
 import { type NextApiRequest, type NextApiResponse } from "next";
@@ -8,8 +8,29 @@ import { hashPassword } from "@/src/features/auth-credentials/lib/credentialsSer
 import { z } from "zod";
 import { type Role } from "@langfuse/shared";
 import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+import { getOptionalSfdcService } from "@/src/features/sfdc-sync/server/getOptionalSfdcService";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
+
+const scimRoleSchema = z.enum(["OWNER", "ADMIN", "MEMBER", "VIEWER", "NONE"]);
+
+const scimCreateUserSchema = z
+  .object({
+    userName: z.email(),
+    name: z.object({ formatted: z.string().nullable().optional() }).optional(),
+    password: z.string().min(1).optional(),
+    displayName: z.string().optional(),
+    roles: z.array(scimRoleSchema).optional(),
+  })
+  .loose();
+
+function sendInvalidFilter(res: NextApiResponse) {
+  return res.status(400).json({
+    schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+    scimType: "invalidFilter",
+    detail: 'Only the filter userName eq "value" is supported.',
+    status: 400,
+  });
+}
 
 export default async function handler(
   req: NextApiRequest,
@@ -60,9 +81,10 @@ export default async function handler(
   // Without this, any org-scoped key could create users and assign roles on
   // plans that do not include the feature.
   if (
-    !hasEntitlementBasedOnPlan({
+    !hasPlanEntitlementOrCommunityCapability({
       plan: authCheck.scope.plan,
       entitlement: "admin-api",
+      capability: "scim",
     })
   ) {
     return res.status(403).json({
@@ -79,27 +101,37 @@ export default async function handler(
   if (req.method === "GET") {
     try {
       const { filter, startIndex = 1, count = 100 } = req.query;
+      const paginationResult = z
+        .object({
+          startIndex: z.coerce.number().int().min(1),
+          count: z.coerce.number().int().min(1).max(100),
+        })
+        .safeParse({ startIndex, count });
+      if (!paginationResult.success) {
+        return res.status(400).json({
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+          detail:
+            "Invalid pagination. startIndex must be at least 1 and count must be between 1 and 100.",
+          status: 400,
+        });
+      }
+      const { startIndex: parsedStartIndex, count: parsedCount } =
+        paginationResult.data;
 
-      // Parse startIndex and count to integers
-      const parsedStartIndex = parseInt(startIndex as string, 10) || 1;
-      const parsedCount = parseInt(count as string, 10) || 100;
+      let filteredEmail: string | undefined;
+      if (filter !== undefined) {
+        if (typeof filter !== "string") return sendInvalidFilter(res);
 
-      let whereClause = {};
-      if (filter && typeof filter === "string") {
-        // Parse filter for userName eq "value"
-        const match = filter.match(/userName eq "([^"]+)"/i);
-        if (match && match[1]) {
-          whereClause = {
-            ...whereClause,
-            email: match[1].toLowerCase(),
-          };
-        }
+        const match = /^userName\s+eq\s+"([^"]+)"$/i.exec(filter.trim());
+        const emailResult = z.email().safeParse(match?.[1]);
+        if (!emailResult.success) return sendInvalidFilter(res);
+        filteredEmail = emailResult.data.toLowerCase();
       }
 
       // Get total count for pagination
       const totalCount = await prisma.organizationMembership.count({
         where: {
-          user: whereClause,
+          user: filteredEmail ? { email: filteredEmail } : {},
           orgId: authCheck.scope.orgId,
         },
       });
@@ -107,7 +139,7 @@ export default async function handler(
       // Get users with pagination
       const userMapping = await prisma.organizationMembership.findMany({
         where: {
-          user: whereClause,
+          user: filteredEmail ? { email: filteredEmail } : {},
           orgId: authCheck.scope.orgId,
         },
         skip: parsedStartIndex - 1, // SCIM uses 1-based indexing
@@ -173,52 +205,80 @@ export default async function handler(
         }
       }
 
-      const { userName, name, password, displayName, roles } = body;
-
-      if (!userName) {
-        logger.warn("[SCIM] userName is required for user creation");
+      const bodyResult = scimCreateUserSchema.safeParse(body);
+      if (!bodyResult.success) {
+        const userNameIssue = bodyResult.error.issues.find(
+          (issue) => issue.path[0] === "userName",
+        );
+        const missingUserName =
+          body === null ||
+          typeof body !== "object" ||
+          Array.isArray(body) ||
+          !("userName" in body);
+        const firstIssue = bodyResult.error.issues[0];
+        logger.warn("[SCIM] Invalid user creation request");
         return res.status(400).json({
           schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
-          detail: "userName is required",
+          detail: missingUserName
+            ? "userName is required"
+            : userNameIssue
+              ? `userName is invalid: ${userNameIssue.message}`
+              : `Invalid request body at ${firstIssue?.path.join(".") || "root"}: ${firstIssue?.message ?? "invalid value"}`,
           status: 400,
         });
       }
-
-      let role: Role = "NONE";
-      if (roles && Array.isArray(roles) && roles.length > 0) {
-        const roleSchema = z.array(
-          z.enum(["OWNER", "ADMIN", "MEMBER", "VIEWER", "NONE"]),
-        );
-        const parsedRoles = roleSchema.safeParse(roles);
-        if (!parsedRoles.success) {
-          logger.warn("[SCIM] Invalid roles provided for user creation");
-          return res.status(400).json({
-            schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
-            detail: `Invalid roles provided: ${JSON.stringify(roles)}, must be one of OWNER, ADMIN, MEMBER, VIEWER, NONE`,
-            status: 400,
-          });
-        }
-        // Use the first valid role
-        role = parsedRoles.data[0];
-      }
+      const { userName, name, password, displayName, roles } = bodyResult.data;
+      const role: Role = roles?.[0] ?? "NONE";
 
       // Check if user already exists. Normalize the email to lowercase to
       // stay consistent with the upsert below; otherwise a case-variant
       // userName slips past the duplicate check and the upsert can collide
       // with an existing user row.
       const normalizedEmail = userName.toLowerCase();
-      const existingUser = await prisma.organizationMembership.findMany({
-        where: {
-          user: {
-            email: normalizedEmail,
+      const passwordHash = password ? await hashPassword(password) : undefined;
+      const provisioned = await prisma.$transaction(async (tx) => {
+        const existingMembership = await tx.organizationMembership.findFirst({
+          where: {
+            user: { email: normalizedEmail },
+            orgId: authCheck.scope.orgId,
           },
-          orgId: authCheck.scope.orgId,
-        },
+          select: { userId: true },
+        });
+        if (existingMembership) return null;
+
+        const user = await tx.user.upsert({
+          where: { email: normalizedEmail },
+          create: {
+            email: normalizedEmail,
+            name: name?.formatted ?? displayName,
+            password: passwordHash,
+          },
+          update: {},
+        });
+        const orgMembership = await tx.organizationMembership.create({
+          data: {
+            userId: user.id,
+            orgId: authCheck.scope.orgId,
+            role,
+          },
+        });
+        await auditLog(
+          {
+            resourceType: "orgMembership",
+            resourceId: orgMembership.id,
+            action: "create",
+            after: orgMembership,
+            apiKeyId: authCheck.scope.apiKeyId,
+            orgId: authCheck.scope.orgId,
+          },
+          tx,
+        );
+        return { user, orgMembership };
       });
 
-      if (existingUser.length > 0) {
+      if (!provisioned) {
         logger.warn(
-          `[SCIM] User ${existingUser[0].userId} already exists in organization ${authCheck.scope.orgId}`,
+          `[SCIM] User ${normalizedEmail} already exists in organization ${authCheck.scope.orgId}`,
         );
         return res.status(409).json({
           schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
@@ -226,39 +286,14 @@ export default async function handler(
           status: 409,
         });
       }
-
-      // Create the user
-      const user = await prisma.user.upsert({
-        where: {
-          email: normalizedEmail,
-        },
-        create: {
-          email: normalizedEmail,
-          name: name?.formatted || displayName,
-          password: password ? await hashPassword(password) : undefined,
-        },
-        update: {},
-      });
-      const orgMembership = await prisma.organizationMembership.create({
-        data: {
-          userId: user.id,
-          orgId: authCheck.scope.orgId,
-          role,
-        },
-      });
-      await auditLog({
-        resourceType: "orgMembership",
-        resourceId: orgMembership.id,
-        action: "create",
-        after: orgMembership,
-        apiKeyId: authCheck.scope.apiKeyId,
-        orgId: authCheck.scope.orgId,
-      });
+      const { user } = provisioned;
       logger.info(
         `[SCIM] Assigned user ${user.id} to org ${authCheck.scope.orgId} with role ${role}`,
       );
 
-      await getSfdcService()?.upsertUser({
+      await (
+        await getOptionalSfdcService()
+      )?.upsertUser({
         userId: user.id,
         email: user.email,
         name: user.name,
@@ -266,7 +301,9 @@ export default async function handler(
         // SCIM provisioning is org-admin-driven, never an organic signup.
         leadSource: "Langfuse Cloud Invite",
       });
-      await getSfdcService()?.setUserRole({
+      await (
+        await getOptionalSfdcService()
+      )?.setUserRole({
         orgId: authCheck.scope.orgId,
         userId: user.id,
         email: user.email,
@@ -295,6 +332,16 @@ export default async function handler(
         },
       });
     } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        return res.status(409).json({
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+          detail: "User with this userName already exists",
+          status: 409,
+        });
+      }
       logger.error("[SCIM] Failed to create user", error);
       return res.status(500).json({
         schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],

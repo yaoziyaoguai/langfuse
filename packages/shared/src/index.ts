@@ -91,6 +91,7 @@ export * from "./server/utils/metadata_conversion";
 export * from "./errors/index";
 
 export * from "./utils/environment";
+export * from "./features/community-extensions/capabilities";
 export * from "./interfaces/search";
 export { normalizeIngestionSdkName } from "./server/ingestion/ingestionAttribution";
 

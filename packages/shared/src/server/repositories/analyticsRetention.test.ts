@@ -14,6 +14,7 @@ vi.mock("./analyticsCheckpoints", () => ({
 }));
 
 import {
+  analyticsProjectRetentionStateId,
   completeAnalyticsRetentionRun,
   findAnalyticsEntityHeadsForRetention,
   getAnalyticsRetentionBarrier,
@@ -64,6 +65,7 @@ describe("analytics retention checkpoint fence", () => {
         cutoffDate: new Date("2026-06-01T00:00:00.000Z"),
         entityType: "EVENT",
         limit: 100,
+        projectId: "project-1",
       }),
     ).resolves.toEqual(heads);
     expect(mocks.acquireMutationPermit).toHaveBeenCalledWith({
@@ -72,6 +74,11 @@ describe("analytics retention checkpoint fence", () => {
     expect(
       mocks.acquireMutationPermit.mock.invocationCallOrder[0],
     ).toBeLessThan(findMany.mock.invocationCallOrder[0]!);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ projectId: "project-1" }),
+      }),
+    );
   });
 
   it("does not start or complete a purge watermark transition during a checkpoint", async () => {
@@ -97,6 +104,7 @@ describe("analytics retention checkpoint fence", () => {
       startOrResumeAnalyticsRetention({
         client: client as never,
         retentionDays: 30,
+        stateId: analyticsProjectRetentionStateId("project-1"),
       }),
     ).rejects.toThrow("held by the analytics checkpoint");
     await expect(
@@ -148,6 +156,7 @@ describe("analytics retention checkpoint fence", () => {
       startOrResumeAnalyticsRetention({
         client: client as never,
         retentionDays: 30,
+        stateId: analyticsProjectRetentionStateId("project-1"),
       }),
     ).resolves.toMatchObject({
       cutoffDate: new Date("2026-06-20T00:00:00.000Z"),
@@ -159,6 +168,11 @@ describe("analytics retention checkpoint fence", () => {
           cutoffDate: new Date("2026-06-20T00:00:00.000Z"),
           startedAt: databaseNow,
         }),
+      }),
+    );
+    expect(transaction.analyticsRetentionState.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "project:project-1" },
       }),
     );
   });
@@ -176,5 +190,79 @@ describe("analytics retention checkpoint fence", () => {
     await expect(
       getAnalyticsRetentionBarrier({ client: client as never }),
     ).resolves.toEqual(new Date("2026-06-01T00:00:00.000Z"));
+  });
+
+  it("combines the global and project retention barriers", async () => {
+    const findUnique = vi.fn(async ({ where: { id } }) =>
+      id === "global"
+        ? {
+            purgedBefore: new Date("2026-05-01T00:00:00.000Z"),
+            activeCutoff: null,
+          }
+        : {
+            purgedBefore: new Date("2026-06-01T00:00:00.000Z"),
+            activeCutoff: new Date("2026-07-01T00:00:00.000Z"),
+          },
+    );
+    const client = {
+      analyticsRetentionState: { findUnique },
+    };
+
+    await expect(
+      getAnalyticsRetentionBarrier({
+        client: client as never,
+        projectId: "project-1",
+      }),
+    ).resolves.toEqual(new Date("2026-07-01T00:00:00.000Z"));
+    expect(findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "project:project-1" } }),
+    );
+  });
+
+  it("completes the retention state that owns the run", async () => {
+    const cutoffDate = new Date("2026-07-01T00:00:00.000Z");
+    const updateState = vi.fn(async () => undefined);
+    const transaction = {
+      $queryRaw: vi.fn(async () => [
+        { now: new Date("2026-07-28T00:00:00.000Z") },
+      ]),
+      analyticsCapabilityActivation: {
+        findUnique: vi.fn(async () => null),
+      },
+      analyticsRetentionState: {
+        findUnique: vi.fn(async () => ({
+          id: "project:project-1",
+          activeRunId: "run-1",
+          purgedBefore: null,
+        })),
+        update: updateState,
+      },
+      analyticsRetentionRun: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "run-1",
+          status: "RUNNING",
+          phase: "COMPLETE",
+          cutoffDate,
+        })),
+        update: vi.fn(async () => undefined),
+      },
+    };
+    mocks.acquireMutationPermit.mockResolvedValue({
+      outcome: "allowed",
+      checkpointGeneration: null,
+    });
+
+    await expect(
+      completeAnalyticsRetentionRun({
+        client: transaction as never,
+        runId: "run-1",
+      }),
+    ).resolves.toBe(true);
+    expect(updateState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "project:project-1" },
+        data: expect.objectContaining({ purgedBefore: cutoffDate }),
+      }),
+    );
   });
 });

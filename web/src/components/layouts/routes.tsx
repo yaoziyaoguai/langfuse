@@ -34,7 +34,7 @@ import { KeyboardShortcut } from "@/src/components/ui/keyboard-shortcut";
 import { useCommandMenu } from "@/src/features/command-k-menu/CommandMenuProvider";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { CloudStatusMenu } from "@/src/features/cloud-status-notification/components/CloudStatusMenu";
-import { type ProductModule } from "@/src/ee/features/ui-customization/productModuleSchema";
+import { type ProductModule } from "@/src/features/ui-customization/productModules";
 
 export enum RouteSection {
   Main = "main",

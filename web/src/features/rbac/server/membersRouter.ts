@@ -19,8 +19,8 @@ import {
 } from "@langfuse/shared";
 import { sendMembershipInvitationEmail } from "@langfuse/shared/src/server";
 import { env } from "@/src/env.mjs";
-import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
-import { hasEntitlement } from "@/src/features/entitlements/server/hasEntitlement";
+import { getOptionalSfdcService } from "@/src/features/sfdc-sync/server/getOptionalSfdcService";
+import { requireEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 import { throwIfExceedsLimit } from "@/src/features/entitlements/server/hasEntitlementLimit";
 import {
   hasProjectAccess,
@@ -176,17 +176,12 @@ export const membersRouter = createTRPCRouter({
 
       // check for entilement (project role)
       if (input.projectId && input.projectRole) {
-        const entitled = hasEntitlement({
+        requireEntitlementOrCommunityCapability({
           entitlement: "rbac-project-roles",
+          capability: "project-rbac",
           sessionUser: ctx.session.user,
           orgId: input.orgId,
         });
-        if (!entitled)
-          throw new TRPCError({
-            code: "FORBIDDEN",
-            message:
-              "Organization does not have the required entitlement to set project roles",
-          });
       }
 
       const user = await ctx.prisma.user.findUnique({
@@ -205,6 +200,12 @@ export const membersRouter = createTRPCRouter({
             },
           })
         : null;
+      if (input.projectId && !project) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Project not found in organization",
+        });
+      }
       if (project && input.projectRole)
         await throwIfHigherProjectRole({
           orgCtx: ctx,
@@ -300,7 +301,9 @@ export const membersRouter = createTRPCRouter({
           after: orgMembership,
         });
         // SFDC: link existing lead to org as a member.
-        await getSfdcService()?.setUserRole({
+        await (
+          await getOptionalSfdcService()
+        )?.setUserRole({
           orgId: input.orgId,
           userId: user.id,
           email: user.email,
@@ -472,7 +475,9 @@ export const membersRouter = createTRPCRouter({
       });
 
       // SFDC: remove the org-member bridge.
-      await getSfdcService()?.removeUser({
+      await (
+        await getOptionalSfdcService()
+      )?.removeUser({
         orgId: input.orgId,
         userId: orgMembership.userId,
         email: orgMembership.user?.email,
@@ -611,7 +616,9 @@ export const membersRouter = createTRPCRouter({
         after: updatedMembership,
       });
 
-      await getSfdcService()?.setUserRole({
+      await (
+        await getOptionalSfdcService()
+      )?.setUserRole({
         orgId: input.orgId,
         userId: membership.userId,
         email: membership.user?.email,
@@ -634,6 +641,13 @@ export const membersRouter = createTRPCRouter({
       /**
        * Used by dropdown in membership table to update the project role of a user
        */
+      requireEntitlementOrCommunityCapability({
+        entitlement: "rbac-project-roles",
+        capability: "project-rbac",
+        sessionUser: ctx.session.user,
+        orgId: input.orgId,
+      });
+
       const hasAccess =
         hasOrganizationAccess({
           session: ctx.session,
@@ -676,6 +690,21 @@ export const membersRouter = createTRPCRouter({
           code: "BAD_REQUEST",
           message:
             "The provided userId does not match the organization membership",
+        });
+      }
+
+      const project = await ctx.prisma.project.findFirst({
+        where: {
+          id: input.projectId,
+          orgId: input.orgId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!project) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Project not found in organization",
         });
       }
 

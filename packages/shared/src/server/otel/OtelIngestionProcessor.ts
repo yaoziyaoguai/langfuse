@@ -267,6 +267,16 @@ export class OtelIngestionProcessor {
         source: "otlp",
         payload: resourceSpans,
         ...(this.isLangfuseInternal ? { isLangfuseInternal: true } : {}),
+        ...(this.orgId || this.propagatedHeaders
+          ? {
+              maskingContext: {
+                ...(this.orgId ? { orgId: this.orgId } : {}),
+                ...(this.propagatedHeaders
+                  ? { propagatedHeaders: this.propagatedHeaders }
+                  : {}),
+              },
+            }
+          : {}),
         attribution: {
           ingestionApiKey: this.publicKey,
           ingestionSdkName: this.sdkName,

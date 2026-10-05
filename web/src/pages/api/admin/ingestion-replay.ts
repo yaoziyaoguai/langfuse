@@ -12,7 +12,7 @@ import {
   UNKNOWN_INGESTION_SDK_VALUE,
 } from "@langfuse/shared/src/server";
 import type { QueueName, TQueueJobTypes } from "@langfuse/shared/src/server";
-import { AdminApiAuthService } from "@/src/ee/features/admin-api/server/adminApiAuth";
+import { AdminApiAuthService } from "@/src/features/admin-api/server/adminApiAuth";
 
 const IngestionReplayBody = z.object({
   keys: z.array(z.string()).min(1).max(1000),

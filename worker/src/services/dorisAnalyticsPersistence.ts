@@ -23,6 +23,7 @@ import {
   type DorisObservation,
   type AnalyticsRuntimeAdmissionContext,
 } from "@langfuse/shared/src/server";
+import { applyConfiguredIngestionMasking } from "@langfuse/shared/src/server/ingestion-masking";
 
 import { env } from "../env";
 import { analyticsIngestionQueueProcessorBuilder } from "../queues/analyticsIngestionQueue";
@@ -260,6 +261,8 @@ export function createDorisAnalyticsPersistence(input: {
   readonly maskOtlp?: (input: {
     readonly projectId: string;
     readonly resourceSpans: ResourceSpan[];
+    readonly orgId?: string;
+    readonly propagatedHeaders?: Readonly<Record<string, string>>;
   }) => Promise<ResourceSpan[]>;
 }): DorisAnalyticsPersistence {
   const runtimeEnv = input.runtimeEnv ?? env;
@@ -325,7 +328,7 @@ export function createDorisAnalyticsPersistence(input: {
     client,
     storageService,
     eventCanonicalizer,
-    maskOtlp: input.maskOtlp,
+    maskOtlp: input.maskOtlp ?? applyRuntimeIngestionMasking,
     loadCurrentEvent: createLegacyCurrentEventLoader({ client }),
   });
 
@@ -361,6 +364,31 @@ export function createDorisAnalyticsPersistence(input: {
     },
     workerId,
   };
+}
+
+async function applyRuntimeIngestionMasking(input: {
+  readonly projectId: string;
+  readonly resourceSpans: ResourceSpan[];
+  readonly orgId?: string;
+  readonly propagatedHeaders?: Readonly<Record<string, string>>;
+}): Promise<ResourceSpan[]> {
+  const result = await applyConfiguredIngestionMasking({
+    data: input.resourceSpans,
+    projectId: input.projectId,
+    orgId: input.orgId,
+    propagatedHeaders: input.propagatedHeaders
+      ? { ...input.propagatedHeaders }
+      : undefined,
+  });
+  if (!result.success) {
+    throw new AnalyticsPersistenceError("ANALYTICS_UNAVAILABLE", true, {
+      tags: {
+        phase: "ingestion_masking",
+        reasonCode: "MASKING_CALLBACK_FAILED",
+      },
+    });
+  }
+  return result.data;
 }
 
 function createProductionEventCanonicalizer(): EventCanonicalizer {

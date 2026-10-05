@@ -33,7 +33,7 @@ import { publicRouter } from "@/src/server/api/routers/public";
 import { credentialsRouter } from "@/src/features/auth-credentials/server/credentialsRouter";
 import { batchExportRouter } from "@/src/features/batch-exports/server/batchExport";
 import { utilsRouter } from "@/src/server/api/routers/utilities";
-import { uiCustomizationRouter } from "@/src/ee/features/ui-customization/uiCustomizationRouter";
+import { uiCustomizationRouter } from "@/src/features/ui-customization/server/uiCustomizationRouter";
 import { commentsRouter } from "@/src/server/api/routers/comments";
 import { commentReactionsRouter } from "@/src/server/api/routers/commentReactions";
 import { queueRouter } from "@/src/features/annotation-queues/server/annotationQueuesRouter";

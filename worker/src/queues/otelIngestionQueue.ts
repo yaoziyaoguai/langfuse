@@ -23,10 +23,7 @@ import {
   type IngestionAttribution,
   UNKNOWN_INGESTION_SDK_VALUE,
 } from "@langfuse/shared/src/server";
-import {
-  applyIngestionMasking,
-  isIngestionMaskingEnabled,
-} from "@langfuse/shared/src/server/ee/ingestionMasking";
+import { applyConfiguredIngestionMasking } from "@langfuse/shared/src/server/ingestion-masking";
 import {
   env,
   v4ForceDirectOtelWrite,
@@ -283,31 +280,24 @@ export const otelIngestionQueueProcessorBuilder = (
       // Parse spans from S3 download
       let parsedSpans = JSON.parse(resourceSpans);
 
-      // Apply ingestion masking if enabled (EE feature)
-      if (isIngestionMaskingEnabled()) {
-        const maskingResult = await applyIngestionMasking({
-          data: parsedSpans,
+      const maskingResult = await applyConfiguredIngestionMasking({
+        data: parsedSpans,
+        projectId,
+        orgId: job.data.payload.authCheck.scope.orgId,
+        propagatedHeaders: job.data.payload.propagatedHeaders,
+      });
+
+      if (!maskingResult.success) {
+        // fail-closed 时保留原始 S3 对象，待 callback 恢复后重放。
+        logger.warn(`Dropping OTEL event due to masking failure`, {
           projectId,
           orgId: job.data.payload.authCheck.scope.orgId,
-          propagatedHeaders: job.data.payload.propagatedHeaders,
+          fileKey,
+          error: maskingResult.error,
         });
-
-        if (!maskingResult.success) {
-          // Fail-closed: drop event. Emit the S3 location so operators can
-          // scan logs to identify which raw payloads need to be replayed via
-          // worker/src/scripts/replayIngestionEventsV2 once the upstream
-          // masking callback is healthy again.
-          logger.warn(`Dropping OTEL event due to masking failure`, {
-            projectId,
-            orgId: job.data.payload.authCheck.scope.orgId,
-            fileKey,
-            error: maskingResult.error,
-            propagatedHeaders: job.data.payload.propagatedHeaders,
-          });
-          return;
-        }
-        parsedSpans = maskingResult.data;
+        return;
       }
+      parsedSpans = maskingResult.data;
 
       // Generate events via OtelIngestionProcessor
       const processor = new OtelIngestionProcessor({

@@ -9,7 +9,7 @@ import { Role, Prisma } from "@langfuse/shared/src/db";
 import type { PrismaClient } from "@langfuse/shared/src/db";
 import { canToggleV4 } from "@/src/features/events/lib/v4Rollout";
 import { env } from "@/src/env.mjs";
-import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
+import { getOptionalSfdcService } from "@/src/features/sfdc-sync/server/getOptionalSfdcService";
 
 const updateDisplayNameSchema = z.object({
   name: StringNoHTML.min(1, "Name cannot be empty").max(
@@ -202,9 +202,10 @@ export const userAccountRouter = createTRPCRouter({
     // SFDC: remove every org-member bridge the cascade just deleted. After
     // commit so a rolled-back delete never desyncs SFDC; removeUser never
     // throws, so per-org failures cannot fail the mutation.
+    const sfdcService = await getOptionalSfdcService();
     await Promise.all(
       sfdcRemovals.map(({ orgId, email }) =>
-        getSfdcService()?.removeUser({ orgId, userId, email }),
+        sfdcService?.removeUser({ orgId, userId, email }),
       ),
     );
 

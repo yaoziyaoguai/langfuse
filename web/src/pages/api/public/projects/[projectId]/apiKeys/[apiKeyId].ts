@@ -5,10 +5,10 @@ import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import {
-  validateQueryParams,
-  handleDeleteApiKey,
-} from "@/src/ee/features/admin-api/server/projects/projectById/apiKeys/apiKeyById";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+  validateProjectApiKeyParams,
+  handleDeleteProjectApiKey,
+} from "@/src/features/admin-api/server/apiKeys";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 
 export default async function handler(
   req: NextApiRequest,
@@ -46,9 +46,10 @@ export default async function handler(
     // END CHECK AUTH
 
     if (
-      !hasEntitlementBasedOnPlan({
+      !hasPlanEntitlementOrCommunityCapability({
         plan: authCheck.scope.plan,
         entitlement: "admin-api",
+        capability: "admin-api",
       })
     ) {
       return res.status(403).json({
@@ -65,7 +66,7 @@ export default async function handler(
       return rateLimitCheck.sendRestResponseIfLimited(res);
     }
 
-    const params = validateQueryParams(req.query);
+    const params = validateProjectApiKeyParams(req.query);
     if (!params) {
       return res.status(400).json({ message: "Invalid request parameters" });
     }
@@ -89,12 +90,13 @@ export default async function handler(
     // Handle different HTTP methods
     switch (req.method) {
       case "DELETE":
-        return await handleDeleteApiKey(
+        return await handleDeleteProjectApiKey(
           req,
           res,
           projectId,
           apiKeyId,
           authCheck.scope.orgId,
+          authCheck.scope.apiKeyId,
         );
       default:
         res.status(405).json({ message: "Method Not Allowed" });

@@ -59,6 +59,7 @@ declare module "next-auth" {
       enableExperimentalFeatures: boolean;
       // Enables features that are only available under an enterprise/commercial license when self-hosting Langfuse
       selfHostedInstancePlan: Plan | null;
+      communityExtensionEnabled?: boolean;
       // V4 migration write mode. Mirrors LANGFUSE_MIGRATION_V4_WRITE_MODE so the
       // client can tell whether the legacy traces/observations tables are still
       // written and gate the V4 preview / legacy experiences accordingly.

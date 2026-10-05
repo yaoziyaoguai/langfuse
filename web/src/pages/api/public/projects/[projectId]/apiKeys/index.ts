@@ -5,11 +5,11 @@ import { ApiAuthService } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { RateLimitService } from "@/src/features/public-api/server/RateLimitService";
 import {
-  validateQueryAndExtractId,
-  handleGetApiKeys,
-  handleCreateApiKey,
-} from "@/src/ee/features/admin-api/server/projects/projectById/apiKeys";
-import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
+  validateProjectId,
+  handleGetProjectApiKeys,
+  handleCreateProjectApiKey,
+} from "@/src/features/admin-api/server/apiKeys";
+import { hasPlanEntitlementOrCommunityCapability } from "@/src/features/community-extensions/server/access";
 
 export default async function handler(
   req: NextApiRequest,
@@ -47,9 +47,10 @@ export default async function handler(
     // END CHECK AUTH
 
     if (
-      !hasEntitlementBasedOnPlan({
+      !hasPlanEntitlementOrCommunityCapability({
         plan: authCheck.scope.plan,
         entitlement: "admin-api",
+        capability: "admin-api",
       })
     ) {
       return res.status(403).json({
@@ -66,7 +67,7 @@ export default async function handler(
       return rateLimitCheck.sendRestResponseIfLimited(res);
     }
 
-    const projectId = validateQueryAndExtractId(req.query);
+    const projectId = validateProjectId(req.query);
     if (!projectId) {
       return res.status(400).json({ message: "Invalid project ID" });
     }
@@ -88,9 +89,9 @@ export default async function handler(
     // Handle different HTTP methods
     switch (req.method) {
       case "GET":
-        return await handleGetApiKeys(req, res, projectId);
+        return await handleGetProjectApiKeys(req, res, projectId);
       case "POST":
-        return await handleCreateApiKey(
+        return await handleCreateProjectApiKey(
           req,
           res,
           projectId,

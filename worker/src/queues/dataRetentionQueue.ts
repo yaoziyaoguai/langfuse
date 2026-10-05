@@ -1,18 +1,35 @@
 import { Processor } from "bullmq";
 import {
+  isCommunityExtensionEnabled,
   instrumentAsync,
   logger,
   QueueJobs,
 } from "@langfuse/shared/src/server";
-import { handleDataRetentionSchedule } from "../ee/dataRetention/handleDataRetentionSchedule";
-import { handleDataRetentionProcessingJob } from "../ee/dataRetention/handleDataRetentionProcessingJob";
 import { SpanKind } from "@opentelemetry/api";
+
+const runDataRetentionSchedule = async () =>
+  isCommunityExtensionEnabled()
+    ? (
+        await import("../features/community-extensions/data-retention/index.js")
+      ).scheduleCommunityDataRetention()
+    : (
+        await import("../ee/dataRetention/handleDataRetentionSchedule.js")
+      ).handleDataRetentionSchedule();
+
+const runDataRetentionProcessingJob = async (job: Parameters<Processor>[0]) =>
+  isCommunityExtensionEnabled()
+    ? (
+        await import("../features/community-extensions/data-retention/index.js")
+      ).processCommunityDataRetentionJob(job)
+    : (
+        await import("../ee/dataRetention/handleDataRetentionProcessingJob.js")
+      ).handleDataRetentionProcessingJob(job);
 
 export const dataRetentionProcessor: Processor = async (job) => {
   if (job.name === QueueJobs.DataRetentionJob) {
     logger.info("Executing Data Retention Job");
     try {
-      return await handleDataRetentionSchedule();
+      return await runDataRetentionSchedule();
     } catch (error) {
       logger.error("Error executing DataRetentionJob", error);
       throw error;
@@ -30,7 +47,7 @@ export const dataRetentionProcessingProcessor: Processor = async (job) => {
       },
       async () => {
         try {
-          return await handleDataRetentionProcessingJob(job);
+          return await runDataRetentionProcessingJob(job);
         } catch (error) {
           logger.error("Error executing DataRetentionProcessingJob", error);
           throw error;

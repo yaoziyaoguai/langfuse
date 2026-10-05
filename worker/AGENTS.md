@@ -23,6 +23,8 @@ Use root [AGENTS.md](../AGENTS.md) for monorepo-level rules.
 - Worker registration/lifecycle: `src/queues/workerManager.ts`
 - Queue processors: `src/queues/*`
 - Feature processors: `src/features/*`
+- Independent Community retention: `src/features/community-extensions/data-retention/*`
+- Doris global/project retention state machine: `src/features/doris-global-retention/index.ts`
 - Doris batch-export execution and manifests: `src/features/batchExport/*`
 - Doris batch-export durable dispatch recovery:
   `src/features/batch-export-dispatch-runner/*`
@@ -75,6 +77,9 @@ Use root [AGENTS.md](../AGENTS.md) for monorepo-level rules.
 - Keep queue handlers idempotent where possible.
 - Preserve metrics/tracing patterns in `workerManager` and queue processors.
 - Prefer explicit env-flag gating in `src/app.ts` for new consumers.
+- In Doris mode, project retention requires Community Extensions. Keep its
+  durable state in `project:<projectId>` and resume published cutoffs even
+  after retention is disabled; shared ingestion objects may still be referenced.
 - Keep queue payload parsing/schema validation centralized in shared contracts.
 
 ## Package-Specific Rules

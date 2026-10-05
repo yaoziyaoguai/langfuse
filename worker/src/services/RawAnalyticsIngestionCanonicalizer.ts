@@ -159,6 +159,8 @@ export class RawAnalyticsIngestionCanonicalizer {
       readonly maskOtlp?: (input: {
         readonly projectId: string;
         readonly resourceSpans: ResourceSpan[];
+        readonly orgId?: string;
+        readonly propagatedHeaders?: Readonly<Record<string, string>>;
       }) => Promise<ResourceSpan[]>;
       readonly getProjectDeletionGeneration?: typeof getProjectDeletionGeneration;
       readonly getTraceDeletionGeneration?: typeof getTraceDeletionGeneration;
@@ -359,6 +361,7 @@ export class RawAnalyticsIngestionCanonicalizer {
           operation,
           payload: envelope.payload,
           attribution: envelope.attribution,
+          maskingContext: envelope.maskingContext,
           isLangfuseInternal: envelope.isLangfuseInternal,
           projectDeletionGeneration,
           traceDeletionGeneration,
@@ -428,6 +431,10 @@ export class RawAnalyticsIngestionCanonicalizer {
       ingestionSdkName: string;
       ingestionSdkVersion: string;
     };
+    maskingContext?: {
+      readonly orgId?: string;
+      readonly propagatedHeaders?: Readonly<Record<string, string>>;
+    };
     isLangfuseInternal?: boolean;
     projectDeletionGeneration: bigint;
     traceDeletionGeneration: (traceId: string | null) => Promise<bigint>;
@@ -437,6 +444,14 @@ export class RawAnalyticsIngestionCanonicalizer {
       ? await this.dependencies.maskOtlp({
           projectId: input.operation.projectId,
           resourceSpans: rawResourceSpans,
+          ...(input.maskingContext?.orgId
+            ? { orgId: input.maskingContext.orgId }
+            : {}),
+          ...(input.maskingContext?.propagatedHeaders
+            ? {
+                propagatedHeaders: input.maskingContext.propagatedHeaders,
+              }
+            : {}),
         })
       : rawResourceSpans;
     if (!Array.isArray(resourceSpans)) throw validationError("otlp");

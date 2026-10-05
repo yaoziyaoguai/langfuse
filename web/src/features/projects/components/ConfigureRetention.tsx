@@ -19,7 +19,7 @@ import { useSession } from "next-auth/react";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { projectRetentionSchema } from "@/src/features/auth/lib/projectRetentionSchema";
 import { ActionButton } from "@/src/components/ActionButton";
-import { useHasEntitlement } from "@/src/features/entitlements/hooks";
+import { useHasEntitlementOrCommunityCapability } from "@/src/features/community-extensions/hooks";
 
 export default function ConfigureRetention() {
   const { update: updateSession } = useSession();
@@ -30,7 +30,10 @@ export default function ConfigureRetention() {
     projectId: project?.id,
     scope: "project:update",
   });
-  const hasEntitlement = useHasEntitlement("data-retention");
+  const hasEntitlement = useHasEntitlementOrCommunityCapability(
+    "data-retention",
+    "data-retention",
+  );
 
   const form = useForm({
     resolver: zodResolver(projectRetentionSchema),
