@@ -2,10 +2,10 @@
 title: Doris Community Parity Agent Loop Progress
 plan: docs/plans/2026-07-21-001-feat-doris-community-parity-loop-plan.md
 baseline: 5a964434d1941b0fa879cb681f4b5b81ed8a0ccf
-branch: codex/personal-public
+branch: codex/community-capabilities-plan
 candidate_source: ff78576fa51394ce1f80eebfb4af4f6ac8b22614
-active_unit: NONE
-gate_state: COMMUNITY_PUBLICATION_AUTHORIZED
+active_unit: COMMERCIAL_CAPABILITY_EXTRACTION
+gate_state: EXTRACTION_PLAN_READY_SOURCE_CONFIRMATION_REQUIRED
 updated: 2026-10-05
 ---
 
@@ -55,6 +55,27 @@ Unit Ledger 和运行验证记录均为历史证据，不代表本次重新执�
 
 本轮工程隔离结果限于以上已执行检查。完整秘密扫描、运行时重新验收和公司分支
 新增实现的代码归属没有由这些检查证明；所有原有许可继续保留。
+
+### GitHub 发布与能力提取
+
+- Doris 社区分支已于 2026-10-05 发布到
+  [个人 GitHub](https://github.com/yaoziyaoguai/langfuse/tree/codex/personal-public)。
+  提交 `8de489492862ede0c36852b6bf93fd5a771923c7`，远端引用与本地提交一致，
+  发布后的工作区为 clean。
+- 用户同时要求核对商业版类似能力的提取方式，再提交推送。当前目标是保留个人
+  社区基线，逐项分离实现、接入点和验证，不把公司分支直接合并到 GitHub。
+- 已列出 9 项能力及其接入设计、提取顺序和验证条件，见
+  [自托管社区能力提取方案](2026-10-05-community-capabilities-extraction.md)。
+- 来源核对发现，历史 Doris retention 的两个 helper 首次创建于受限 EE 目录，
+  后来以 98%/100% 相似度移动到普通 feature 目录。这些 helper 不能仅凭当前位置
+  被当作已证明独立的实现。
+- 当前提交只包含提取方案与状态更新，没有复制或启用公司实现。直接复用现有
+  独立实现的公开授权问题已向用户提出；答复前不发布这些实现。
+- 本轮方案验证：`Publication documents: passed (4 Markdown files; no leaks
+  found)`；`Extraction plan links: passed`；`git diff --check: passed (exit 0)`。
+  变更为两份文档，运行时代码变更为 0；没有重跑功能测试、lint、typecheck 或构建。
+- 本轮代码提取的下一步取决于来源确认：有权公开的实现按逐文件范围提取；来源
+  未确认或受限的部分按公开契约独立实现，或保留在后续范围中。
 
 ## Unit Ledger
 
